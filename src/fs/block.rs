@@ -282,53 +282,64 @@ pub fn list_block_devices() -> Vec<(String, u64, usize)> {
     list
 }
 
-/// Инициализация блочной подсистемы VFS: создание `/dev/vda`, парсинг MBR и регистрация `/dev/vda1`
+/// Инициализация блочной подсистемы VFS: регистрация всех устройств из DeviceManager (/dev/vda, /dev/sda, ...),
+/// создание узлов в `/dev`, парсинг MBR и регистрация разделов.
 pub fn init() {
-    let vda = match crate::drivers::get_block_device("vda") {
-        Some(d) => d,
-        None => {
-            serial_println!("block: /dev/vda not found (no virtio-blk attached)");
-            return;
-        }
-    };
-
-    register_block_device(String::from("vda"), vda.clone());
-
-    // Создаем узел `/dev/vda` в VFS
-    if let Ok(dev_dir) = crate::fs::open("/dev") {
-        let _ = dev_dir.create("vda", InodeType::BlockDevice);
+    let dev_names =
+        crate::drivers::with_device_manager(|dm| dm.block_device_names()).unwrap_or_default();
+    if dev_names.is_empty() {
+        serial_println!("block: no block devices found in DeviceManager");
+        return;
     }
 
-    // Парсим MBR для обнаружения разделов
-    let parts = {
-        let mut dev = vda.lock();
-        parse_mbr(&mut *dev)
-    };
+    for name in dev_names {
+        let dev = match crate::drivers::get_block_device(&name) {
+            Some(d) => d,
+            None => continue,
+        };
 
-    if parts.is_empty() {
-        serial_println!("mbr: no valid partitions found on /dev/vda (raw disk)");
-    } else {
-        for (i, p) in parts.iter().enumerate() {
-            let part_num = i + 1;
-            let part_name = alloc::format!("vda{}", part_num);
-            let part_dev = Arc::new(Mutex::new(PartitionDevice::new(
-                vda.clone(),
-                p.start_lba as u64,
-                p.sector_count as u64,
-            )));
+        register_block_device(name.clone(), dev.clone());
 
-            register_block_device(part_name.clone(), part_dev);
+        // Создаем узел `/dev/<name>` в VFS
+        if let Ok(dev_dir) = crate::fs::open("/dev") {
+            let _ = dev_dir.create(&name, InodeType::BlockDevice);
+        }
 
-            let mb = ((p.sector_count as u64) * 512) / (1024 * 1024);
-            serial_println!(
-                "mbr: found /dev/{} start LBA {}, size {} MB ({} sectors), type {:#02x}{}",
-                part_name,
-                p.start_lba,
-                mb,
-                p.sector_count,
-                p.part_type,
-                if p.bootable { " [bootable]" } else { "" }
-            );
+        // Парсим MBR для обнаружения разделов
+        let parts = {
+            let mut d = dev.lock();
+            parse_mbr(&mut *d)
+        };
+
+        if parts.is_empty() {
+            serial_println!("mbr: no valid partitions found on /dev/{} (raw disk)", name);
+        } else {
+            for (i, p) in parts.iter().enumerate() {
+                let part_num = i + 1;
+                let part_name = alloc::format!("{}{}", name, part_num);
+                let part_dev = Arc::new(Mutex::new(PartitionDevice::new(
+                    dev.clone(),
+                    p.start_lba as u64,
+                    p.sector_count as u64,
+                )));
+
+                register_block_device(part_name.clone(), part_dev);
+
+                if let Ok(dev_dir) = crate::fs::open("/dev") {
+                    let _ = dev_dir.create(&part_name, InodeType::BlockDevice);
+                }
+
+                let mb = ((p.sector_count as u64) * 512) / (1024 * 1024);
+                serial_println!(
+                    "mbr: found /dev/{} start LBA {}, size {} MB ({} sectors), type {:#02x}{}",
+                    part_name,
+                    p.start_lba,
+                    mb,
+                    p.sector_count,
+                    p.part_type,
+                    if p.bootable { " [bootable]" } else { "" }
+                );
+            }
         }
     }
 }

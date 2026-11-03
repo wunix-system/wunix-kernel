@@ -44,8 +44,8 @@ pub fn probe_device(addr: PciAddress) -> Option<PciDevice> {
 
             if is_io {
                 let address = (original & !0x3) as u64;
-                // Маска I/O BAR: биты 1..0 зарезервированы
-                let size = (!((size_mask & 0xFFFF_FFFC) as u64)) + 1;
+                // Маска I/O BAR: биты 1..0 зарезервированы. Инвертируем на u32 перед кастом в u64.
+                let size = ((!(size_mask & 0xFFFF_FFFC)) as u64).wrapping_add(1);
                 bars[bar_idx] = Some(PciBar {
                     index: bar_idx as u8,
                     bar_type: BarType::Io,
@@ -68,8 +68,14 @@ pub fn probe_device(addr: PciAddress) -> Option<PciDevice> {
                     config::write_u32(addr, next_offset, original_high);
 
                     let address = ((original_high as u64) << 32) | ((original & !0xF) as u64);
-                    let full_mask = ((size_mask_high as u64) << 32) | ((size_mask & !0xF) as u64);
-                    let size = (!full_mask) + 1;
+                    let size = if size_mask_high == 0 {
+                        // Если старшие 32 бита маски равны 0 (эмулятор возвращает размер только в младшем слове),
+                        // размер ограничен 32-битным диапазоном. Инвертируем на u32 перед кастом в u64.
+                        ((!(size_mask & !0xF)) as u64).wrapping_add(1)
+                    } else {
+                        let full_mask = ((size_mask_high as u64) << 32) | ((size_mask & !0xF) as u64);
+                        (!full_mask).wrapping_add(1)
+                    };
 
                     bars[bar_idx] = Some(PciBar {
                         index: bar_idx as u8,
@@ -81,9 +87,9 @@ pub fn probe_device(addr: PciAddress) -> Option<PciDevice> {
                     // Пропускаем следующий слот, так как он занят старшей половиной 64-битного адреса
                     bar_idx += 2;
                 } else {
-                    // Стандартный 32-битный MMIO BAR
+                    // Стандартный 32-битный MMIO BAR. Инвертируем на u32 перед кастом в u64.
                     let address = (original & !0xF) as u64;
-                    let size = (!((size_mask & !0xF) as u64)) + 1;
+                    let size = ((!(size_mask & !0xF)) as u64).wrapping_add(1);
 
                     bars[bar_idx] = Some(PciBar {
                         index: bar_idx as u8,

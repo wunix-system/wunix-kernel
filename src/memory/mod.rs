@@ -141,6 +141,12 @@ pub fn map_kernel_mmio(phys_addr: u64, size: usize) -> Result<VirtAddr, &'static
         return Ok(VirtAddr::new(hhdm_offset() + phys_addr));
     }
 
+    // Защита от поврежденных или фиктивных BAR-регистров: ядро не должно пытаться
+    // аллоцировать таблицы страниц под гигантские некорректные диапазоны (например > 256 МБ).
+    if size > 256 * 1024 * 1024 {
+        return Err("map_kernel_mmio: requested size exceeds maximum limit of 256 MiB");
+    }
+
     let hhdm = hhdm_offset();
     let (kernel_pml4_frame, _) = Cr3::read();
     let kernel_pml4_virt = VirtAddr::new(hhdm + kernel_pml4_frame.start_address().as_u64());

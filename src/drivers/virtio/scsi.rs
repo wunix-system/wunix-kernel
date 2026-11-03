@@ -25,7 +25,7 @@ pub struct VirtioScsiReqCmd {
     pub task_attr: u8,
     pub prio: u8,
     pub crn: u8,
-    pub cdb: [u8; 16],
+    pub cdb: [u8; 32],
 }
 
 /// Ответ устройства на команду SCSI (virtio_scsi_resp_cmd).
@@ -74,12 +74,12 @@ impl VirtioScsi {
         // Queue 2 — req_queue (очередь команд ввода-вывода)
         transport.select_queue(0);
         let ctl_sz = transport.get_queue_size();
-        let control_queue = Virtqueue::new(0, ctl_sz.min(16))?;
+        let control_queue = Virtqueue::new(0, ctl_sz)?;
         transport.setup_queue(&control_queue);
 
         transport.select_queue(1);
         let evt_sz = transport.get_queue_size();
-        let event_queue = Virtqueue::new(1, evt_sz.min(16))?;
+        let event_queue = Virtqueue::new(1, evt_sz)?;
         transport.setup_queue(&event_queue);
 
         transport.select_queue(2);
@@ -87,7 +87,7 @@ impl VirtioScsi {
         if req_sz == 0 {
             return Err(VirtioError::QueueTooSmall);
         }
-        let req_queue = Virtqueue::new(2, req_sz.min(64))?;
+        let req_queue = Virtqueue::new(2, req_sz)?;
         transport.setup_queue(&req_queue);
 
         transport.set_status(
@@ -127,7 +127,11 @@ impl VirtioScsi {
         cdb[0] = SCSI_READ_CAPACITY_10;
 
         let mut data = [0u8; 8];
-        self.execute_cmd(&cdb, &mut data, false)?;
+        if self.execute_cmd(&cdb, &mut data, false).is_err() {
+            // SCSI устройство часто возвращает Unit Attention (0x02, Power-on Reset) при первом запросе.
+            // Повторяем запрос для чтения актуальных данных.
+            self.execute_cmd(&cdb, &mut data, false)?;
+        }
 
         let max_lba = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as u64;
         let block_len = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) as usize;
@@ -144,7 +148,7 @@ impl VirtioScsi {
     }
 
     /// Отправка SCSI команды в очередь req_queue и синхронное ожидание ответа.
-    fn execute_cmd(&mut self, cdb: &[u8; 16], data: &mut [u8], is_write: bool) -> Result<(), VirtioError> {
+    fn execute_cmd(&mut self, cdb: &[u8], data: &mut [u8], is_write: bool) -> Result<(), VirtioError> {
         let base_phys = self.dma_frame.start_address().as_u64();
         let req_phys = base_phys;
         let resp_phys = base_phys + 0x100;
@@ -158,6 +162,10 @@ impl VirtioScsi {
         let mut lun = [0u8; 8];
         lun[0] = 1;
 
+        let mut full_cdb = [0u8; 32];
+        let copy_len = cdb.len().min(32);
+        full_cdb[..copy_len].copy_from_slice(&cdb[..copy_len]);
+
         unsafe {
             (*req_virt) = VirtioScsiReqCmd {
                 lun,
@@ -165,7 +173,7 @@ impl VirtioScsi {
                 task_attr: 0,
                 prio: 0,
                 crn: 0,
-                cdb: *cdb,
+                cdb: full_cdb,
             };
             (*resp_virt) = VirtioScsiRespCmd {
                 sense_len: 0,

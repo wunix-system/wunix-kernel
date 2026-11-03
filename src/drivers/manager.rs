@@ -114,6 +114,10 @@ impl DeviceManager {
 
             if dev.vendor_id == virtio::VIRTIO_PCI_VENDOR_ID {
                 self.probe_virtio(dev, &mut block_count);
+            } else if dev.class_code == 0x01 && dev.subclass == 0x01 {
+                self.probe_ide(dev);
+            } else if super::ahci::probe_pci(dev, self, &mut block_count) {
+                // Контроллер SATA / AHCI обработал устройство
             } else if virt::vbox::probe_pci(dev, self) {
                 // VirtualBox драйвер обработал устройство
             } else if virt::vmware::probe_pci(dev, self) {
@@ -125,6 +129,33 @@ impl DeviceManager {
 
         self.pci_devices = pci_list;
         self.init_hypervisor_integrations(hv);
+    }
+
+    /// Инициализация обнаруженного контроллера IDE/ATA
+    fn probe_ide(&mut self, dev: &pci::PciDevice) {
+        dev.enable_io_space();
+        dev.enable_bus_mastering();
+
+        // Проверяем 4 стандартных IDE диска (Primary/Secondary Master/Slave)
+        let channels = [
+            (0x1F0u16, false, "hda"),
+            (0x1F0u16, true, "hdb"),
+            (0x170u16, false, "hdc"),
+            (0x170u16, true, "hdd"),
+        ];
+
+        for (port, is_slave, name) in channels {
+            if let Some(ata) = super::ata::AtaDevice::probe(port, is_slave) {
+                let cap_mb = (ata.sector_count() * 512) / (1024 * 1024);
+                serial_println!(
+                    "ata: registered /dev/{} ({} MB, {} sectors)",
+                    name,
+                    cap_mb,
+                    ata.sector_count()
+                );
+                self.register_block_device(String::from(name), Arc::new(Mutex::new(ata)));
+            }
+        }
     }
 
     /// Инициализация обнаруженных устройств VirtIO.
@@ -152,13 +183,19 @@ impl DeviceManager {
                 }
             }
             virtio::VirtioDeviceType::Scsi => {
-                if let Ok(scsi) = virtio::scsi::VirtioScsi::new(transport) {
-                    let letter = (b'a' + (*block_count as u8).min(25)) as char;
-                    let name = format!("sd{}", letter);
-                    let cap_mb = (scsi.sector_count() * scsi.sector_size() as u64) / (1024 * 1024);
-                    serial_println!("virtio-scsi: registered /dev/{} ({} MB)", name, cap_mb);
-                    self.register_block_device(name, Arc::new(Mutex::new(scsi)));
-                    *block_count += 1;
+                match virtio::scsi::VirtioScsi::new(transport) {
+                    Ok(scsi) => {
+                        let letter = (b'a' + (*block_count as u8).min(25)) as char;
+                        let name = format!("sd{}", letter);
+                        let cap_mb =
+                            (scsi.sector_count() * scsi.sector_size() as u64) / (1024 * 1024);
+                        serial_println!("virtio-scsi: registered /dev/{} ({} MB)", name, cap_mb);
+                        self.register_block_device(name, Arc::new(Mutex::new(scsi)));
+                        *block_count += 1;
+                    }
+                    Err(e) => {
+                        serial_println!("virtio-scsi: init failed: {:?}", e);
+                    }
                 }
             }
             virtio::VirtioDeviceType::Net => {
