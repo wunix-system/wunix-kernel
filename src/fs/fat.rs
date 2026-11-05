@@ -1,6 +1,7 @@
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 use spin::Mutex;
 
 use crate::drivers::BlockDevice;
@@ -464,6 +465,9 @@ pub struct Fat32FileInode {
     pub dir_slot_offset: usize,
     pub inode_id: u64,
     pub cluster_chain: Mutex<Vec<u32>>,
+    pub permissions: AtomicU16,
+    pub uid: AtomicU32,
+    pub gid: AtomicU32,
 }
 
 impl Inode for Fat32FileInode {
@@ -472,10 +476,21 @@ impl Inode for Fat32FileInode {
             itype: InodeType::File,
             size: *self.file_size.lock(),
             inode_id: self.inode_id,
-            permissions: 0o775,
-            uid: 0,
-            gid: 0,
+            permissions: self.permissions.load(Ordering::Relaxed),
+            uid: self.uid.load(Ordering::Relaxed),
+            gid: self.gid.load(Ordering::Relaxed),
         }
+    }
+
+    fn chmod(&self, mode: u16) -> Result<(), VfsError> {
+        self.permissions.store(mode, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn chown(&self, uid: u32, gid: u32) -> Result<(), VfsError> {
+        self.uid.store(uid, Ordering::Relaxed);
+        self.gid.store(gid, Ordering::Relaxed);
+        Ok(())
     }
 
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> Result<usize, VfsError> {
@@ -633,6 +648,9 @@ pub struct Fat32DirInode {
     pub cluster: u32,
     pub parent_cluster: u32,
     pub inode_id: u64,
+    pub permissions: AtomicU16,
+    pub uid: AtomicU32,
+    pub gid: AtomicU32,
 }
 
 impl Fat32DirInode {
@@ -732,10 +750,21 @@ impl Inode for Fat32DirInode {
             itype: InodeType::Directory,
             size: 4096,
             inode_id: self.inode_id,
-            permissions: 0o775,
-            uid: 0,
-            gid: 0,
+            permissions: self.permissions.load(Ordering::Relaxed),
+            uid: self.uid.load(Ordering::Relaxed),
+            gid: self.gid.load(Ordering::Relaxed),
         }
+    }
+
+    fn chmod(&self, mode: u16) -> Result<(), VfsError> {
+        self.permissions.store(mode, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn chown(&self, uid: u32, gid: u32) -> Result<(), VfsError> {
+        self.uid.store(uid, Ordering::Relaxed);
+        self.gid.store(gid, Ordering::Relaxed);
+        Ok(())
     }
 
     fn lookup(&self, name: &str) -> Result<Arc<dyn Inode>, VfsError> {
@@ -745,6 +774,9 @@ impl Inode for Fat32DirInode {
                 cluster: self.cluster,
                 parent_cluster: self.parent_cluster,
                 inode_id: self.inode_id,
+                permissions: AtomicU16::new(self.permissions.load(Ordering::Relaxed)),
+                uid: AtomicU32::new(self.uid.load(Ordering::Relaxed)),
+                gid: AtomicU32::new(self.gid.load(Ordering::Relaxed)),
             }));
         }
 
@@ -764,8 +796,22 @@ impl Inode for Fat32DirInode {
                         cluster: first_clus,
                         parent_cluster: self.cluster,
                         inode_id: (first_clus as u64) + 1000,
+                        permissions: AtomicU16::new(0o777),
+                        uid: AtomicU32::new(0),
+                        gid: AtomicU32::new(0),
                     }));
                 } else {
+                    let is_suid = name.eq_ignore_ascii_case("sudo")
+                        || name.eq_ignore_ascii_case("su")
+                        || name.eq_ignore_ascii_case("passwd")
+                        || name.eq_ignore_ascii_case("sudoadd");
+                    let perms = if is_suid {
+                        0o4755
+                    } else if name.eq_ignore_ascii_case("shadow") {
+                        0o600
+                    } else {
+                        0o777
+                    };
                     return Ok(Arc::new(Fat32FileInode {
                         inner: self.inner.clone(),
                         start_cluster: Mutex::new(first_clus),
@@ -774,6 +820,9 @@ impl Inode for Fat32DirInode {
                         dir_slot_offset: entry.slot_offset,
                         inode_id: (first_clus as u64) + 2000,
                         cluster_chain: Mutex::new(alloc::vec::Vec::new()),
+                        permissions: AtomicU16::new(perms),
+                        uid: AtomicU32::new(0),
+                        gid: AtomicU32::new(0),
                     }));
                 }
             }
@@ -986,14 +1035,31 @@ impl Inode for Fat32DirInode {
 
         self.inner.write_cluster(target_clus, &clus_buf)?;
 
+        let euid = crate::task::current_thread_euid();
+        let egid = crate::task::current_thread_egid();
+
         if is_dir {
             Ok(Arc::new(Fat32DirInode {
                 inner: self.inner.clone(),
                 cluster: first_clus,
                 parent_cluster: self.cluster,
                 inode_id: (first_clus as u64) + 1000,
+                permissions: AtomicU16::new(0o777),
+                uid: AtomicU32::new(euid),
+                gid: AtomicU32::new(egid),
             }))
         } else {
+            let is_suid = name.eq_ignore_ascii_case("sudo")
+                || name.eq_ignore_ascii_case("su")
+                || name.eq_ignore_ascii_case("passwd")
+                || name.eq_ignore_ascii_case("sudoadd");
+            let perms = if is_suid {
+                0o4755
+            } else if name.eq_ignore_ascii_case("shadow") {
+                0o600
+            } else {
+                0o777
+            };
             Ok(Arc::new(Fat32FileInode {
                 inner: self.inner.clone(),
                 start_cluster: Mutex::new(first_clus),
@@ -1002,6 +1068,9 @@ impl Inode for Fat32DirInode {
                 dir_slot_offset: raw_dir_offset,
                 inode_id: (first_clus as u64) + 2000,
                 cluster_chain: Mutex::new(alloc::vec::Vec::new()),
+                permissions: AtomicU16::new(perms),
+                uid: AtomicU32::new(euid),
+                gid: AtomicU32::new(egid),
             }))
         }
     }
@@ -1063,6 +1132,9 @@ impl Fat32FileSystem {
             cluster: inner.root_cluster,
             parent_cluster: 0,
             inode_id: 1,
+            permissions: AtomicU16::new(0o777),
+            uid: AtomicU32::new(0),
+            gid: AtomicU32::new(0),
         });
 
         Ok(Self { inner, root_node })

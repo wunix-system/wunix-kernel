@@ -3,7 +3,7 @@ use x86_64::structures::paging::PhysFrame;
 use crate::drivers::traits::{BlockDevice, BlockDeviceError};
 use crate::memory::hhdm_offset;
 
-use super::hba::{ATA_DEV_BUSY, ATA_DEV_DRQ, ATA_DEV_ERR};
+use super::hba::{ATA_DEV_BUSY, ATA_DEV_DRQ, ATA_DEV_ERR, PORT_CMD_CR, PORT_CMD_ST};
 
 /// Блочный накопитель Serial ATA (SATA SSD / HDD) под управлением контроллера AHCI
 pub struct AhciDisk {
@@ -30,7 +30,7 @@ impl AhciDisk {
 
     fn wait_not_busy(&self) -> Result<(), BlockDeviceError> {
         let tfd_ptr = (self.port_base + 0x20) as *mut u32;
-        for _ in 0..100_000 {
+        for _ in 0..200_000 {
             let tfd = unsafe { tfd_ptr.read_volatile() };
             if (tfd & (ATA_DEV_BUSY | ATA_DEV_DRQ)) == 0 {
                 return Ok(());
@@ -38,6 +38,25 @@ impl AhciDisk {
             core::hint::spin_loop();
         }
         Err(BlockDeviceError::IoError)
+    }
+
+    fn recover_port(&self) {
+        unsafe {
+            let cmd_ptr = (self.port_base + 0x18) as *mut u32;
+            cmd_ptr.write_volatile(cmd_ptr.read_volatile() & !PORT_CMD_ST);
+            for _ in 0..10_000 {
+                if (cmd_ptr.read_volatile() & PORT_CMD_CR) == 0 {
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+            let serr_ptr = (self.port_base + 0x30) as *mut u32;
+            serr_ptr.write_volatile(0xFFFF_FFFF);
+            let is_ptr = (self.port_base + 0x10) as *mut u32;
+            is_ptr.write_volatile(0xFFFF_FFFF);
+
+            cmd_ptr.write_volatile(cmd_ptr.read_volatile() | PORT_CMD_ST);
+        }
     }
 
     pub fn execute_cmd(&mut self, is_write: bool, ata_cmd: u8, lba: u64, count: u16) -> Result<(), BlockDeviceError> {
@@ -89,14 +108,18 @@ impl AhciDisk {
             let is_ptr = (self.port_base + 0x10) as *mut u32;
             is_ptr.write_volatile(0xFFFF_FFFF);
 
+            // Компиляторный барьер гарантирует запись данных в память до взвода doorbell
+            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+
             let ci_ptr = (self.port_base + 0x38) as *mut u32;
             ci_ptr.write_volatile(1);
 
             let tfd_ptr = (self.port_base + 0x20) as *mut u32;
-            for _ in 0..200_000 {
+            for _ in 0..2_000_000 {
                 if (ci_ptr.read_volatile() & 1) == 0 {
                     let tfd = tfd_ptr.read_volatile();
                     if (tfd & ATA_DEV_ERR) != 0 {
+                        self.recover_port();
                         return Err(BlockDeviceError::IoError);
                     }
                     return Ok(());
@@ -105,44 +128,60 @@ impl AhciDisk {
             }
         }
 
+        self.recover_port();
         Err(BlockDeviceError::IoError)
+    }
+}
+
+impl Drop for AhciDisk {
+    fn drop(&mut self) {
+        crate::memory::deallocate_frame(self.dma_frame);
     }
 }
 
 impl BlockDevice for AhciDisk {
     fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
-        let count = buf.len() / 512;
+        let total_sectors = buf.len() / 512;
         let bounce_virt = unsafe { self.dma_virt().add(0x800) };
+        let mut sec_done = 0;
 
-        for sec in 0..count {
-            let lba = start_sector + sec as u64;
-            self.execute_cmd(false, 0x25, lba, 1)?; // READ DMA EXT
+        while sec_done < total_sectors {
+            let batch = (total_sectors - sec_done).min(4) as u16;
+            let lba = start_sector + sec_done as u64;
+            self.execute_cmd(false, 0x25, lba, batch)?; // READ DMA EXT
 
+            let byte_len = batch as usize * 512;
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     bounce_virt,
-                    buf.as_mut_ptr().add(sec * 512),
-                    512,
+                    buf.as_mut_ptr().add(sec_done * 512),
+                    byte_len,
                 );
             }
+            sec_done += batch as usize;
         }
         Ok(())
     }
 
     fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
-        let count = buf.len() / 512;
+        let total_sectors = buf.len() / 512;
         let bounce_virt = unsafe { self.dma_virt().add(0x800) };
+        let mut sec_done = 0;
 
-        for sec in 0..count {
-            let lba = start_sector + sec as u64;
+        while sec_done < total_sectors {
+            let batch = (total_sectors - sec_done).min(4) as u16;
+            let lba = start_sector + sec_done as u64;
+            let byte_len = batch as usize * 512;
+
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    buf.as_ptr().add(sec * 512),
+                    buf.as_ptr().add(sec_done * 512),
                     bounce_virt,
-                    512,
+                    byte_len,
                 );
             }
-            self.execute_cmd(true, 0x35, lba, 1)?; // WRITE DMA EXT
+            self.execute_cmd(true, 0x35, lba, batch)?; // WRITE DMA EXT
+            sec_done += batch as usize;
         }
         Ok(())
     }

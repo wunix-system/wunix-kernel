@@ -18,6 +18,8 @@ const ATA_CMD_READ_PIO_EXT: u8 = 0x24;
 const ATA_CMD_WRITE_PIO: u8 = 0x30;
 const ATA_CMD_WRITE_PIO_EXT: u8 = 0x34;
 const ATA_CMD_IDENTIFY: u8 = 0xEC;
+const ATA_CMD_FLUSH_CACHE: u8 = 0xE7;
+const ATA_CMD_FLUSH_CACHE_EXT: u8 = 0xEA;
 
 /// Драйвер блочного накопителя ATA PIO (IDE / PIIX3 / PIIX4)
 pub struct AtaDevice {
@@ -228,6 +230,21 @@ impl BlockDevice for AtaDevice {
                 unsafe { data_port.write(word); }
             }
         }
+
+        self.wait_not_busy()?;
+
+        let mut status_port = Port::<u8>::new(self.base_port + ATA_STATUS_CMD);
+        let status = unsafe { status_port.read() };
+        if (status & ATA_STATUS_ERR) != 0 {
+            return Err(BlockDeviceError::IoError);
+        }
+
+        let flush_cmd = if start_sector >= 0x1000_0000 {
+            ATA_CMD_FLUSH_CACHE_EXT
+        } else {
+            ATA_CMD_FLUSH_CACHE
+        };
+        unsafe { cmd_port.write(flush_cmd); }
         self.wait_not_busy()
     }
 

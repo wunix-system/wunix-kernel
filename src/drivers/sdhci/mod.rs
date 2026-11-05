@@ -11,7 +11,8 @@ use regs::*;
 pub struct SdhciDevice {
     base: u64,
     sector_count: u64,
-    pub _card_rca: u16,
+    pub card_rca: u16,
+    pub is_sdhc: bool,
 }
 
 unsafe impl Send for SdhciDevice {}
@@ -51,11 +52,13 @@ impl SdhciDevice {
     pub fn new(mmio_base_virt: u64) -> Result<Self, &'static str> {
         let mut dev = Self {
             base: mmio_base_virt,
-            sector_count: 64 * 1024 * 1024 / 512, // 64 МБ по умолчанию
-            _card_rca: 0,
+            sector_count: 64 * 1024 * 1024 / 512, // 64 МБ дефолт
+            card_rca: 0,
+            is_sdhc: true,
         };
 
         dev.init_controller()?;
+        let _ = dev.init_card();
         Ok(dev)
     }
 
@@ -88,12 +91,82 @@ impl SdhciDevice {
         Ok(())
     }
 
+    fn init_card(&mut self) -> Result<(), &'static str> {
+        let present = self.read32(SDHCI_PRESENT_STATE);
+        if (present & SDHCI_CARD_PRESENT) == 0 {
+            return Err("sdhci: no SD/eMMC card inserted");
+        }
+
+        // CMD0: сброс карточки в Idle
+        let _ = self.send_command(0x0000, 0);
+
+        // CMD8: проверка поддержки SD 2.0 (2.7-3.6V)
+        let mut is_v2 = false;
+        if let Ok(resp) = self.send_command(0x081A, 0x1AA) {
+            if (resp & 0xFF) == 0xAA {
+                is_v2 = true;
+            }
+        }
+
+        // ACMD41: опрос готовности питания
+        let mut ready = false;
+        let mut sdhc = false;
+        let op_cond_arg = if is_v2 { 0x4030_0000 } else { 0x0030_0000 };
+
+        for _ in 0..1000 {
+            let _ = self.send_command(0x371A, (self.card_rca as u32) << 16);
+            if let Ok(resp) = self.send_command(0x2902, op_cond_arg) {
+                if (resp & (1 << 31)) != 0 {
+                    ready = true;
+                    sdhc = (resp & (1 << 30)) != 0;
+                    break;
+                }
+            }
+            for _ in 0..1000 { core::hint::spin_loop(); }
+        }
+
+        if !ready {
+            return Err("sdhci: card power up timeout");
+        }
+        self.is_sdhc = sdhc;
+
+        // CMD2: чтение CID
+        let _ = self.send_command(0x0209, 0);
+
+        // CMD3: чтение RCA адреса
+        if let Ok(resp) = self.send_command(0x031A, 0) {
+            self.card_rca = (resp >> 16) as u16;
+        }
+
+        // CMD9: чтение CSD для емкости
+        if let Ok(_) = self.send_command(0x0909, (self.card_rca as u32) << 16) {
+            let r1 = self.read32(SDHCI_RESPONSE_1);
+            let r2 = self.read32(SDHCI_RESPONSE_2);
+            if self.is_sdhc {
+                let c_size = ((r1 >> 16) | ((r2 & 0x3F) << 16)) as u64;
+                if c_size > 0 {
+                    self.sector_count = (c_size + 1) * 1024;
+                }
+            }
+        }
+
+        // CMD7: выбор карточки и перевод в состояние TRAN
+        self.send_command(0x071A, (self.card_rca as u32) << 16)
+            .map_err(|_| "sdhci: failed to select card")?;
+
+        // CMD16: фиксируем размер блока 512 байт
+        let _ = self.send_command(0x101A, 512);
+
+        Ok(())
+    }
+
     fn send_command(&mut self, cmd: u16, arg: u32) -> Result<u32, BlockDeviceError> {
         // Ждем готовности линии команд
         for _ in 0..100_000 {
             if (self.read32(SDHCI_PRESENT_STATE) & SDHCI_CMD_INHIBIT) == 0 {
                 break;
             }
+            core::hint::spin_loop();
         }
 
         self.write32(SDHCI_ARGUMENT, arg);
@@ -105,6 +178,7 @@ impl SdhciDevice {
                 self.write32(SDHCI_INT_STATUS, SDHCI_INT_CMD_COMPLETE);
                 return Ok(self.read32(SDHCI_RESPONSE_0));
             }
+            core::hint::spin_loop();
         }
 
         Err(BlockDeviceError::IoError)
@@ -128,16 +202,24 @@ impl BlockDevice for SdhciDevice {
             self.write16(SDHCI_TRANSFER_MODE, 0x0010); // Read, Single block
 
             // CMD17: Read Single Block
-            self.send_command(0x113A, (start_sector + s as u64) as u32)?;
+            // SDSC (Byte address) vs SDHC/SDXC (Block address)
+            let addr = if self.is_sdhc {
+                (start_sector + s as u64) as u32
+            } else {
+                ((start_sector + s as u64) * 512) as u32
+            };
+            self.send_command(0x113A, addr)?;
 
             // Ждем готовности буфера данных
             let mut ready = false;
-            for _ in 0..100_000 {
-                if (self.read32(SDHCI_INT_STATUS) & SDHCI_INT_BUFFER_READ_READY) != 0 {
+            for _ in 0..200_000 {
+                let stat = self.read32(SDHCI_INT_STATUS);
+                if (stat & SDHCI_INT_BUFFER_READ_READY) != 0 {
                     self.write32(SDHCI_INT_STATUS, SDHCI_INT_BUFFER_READ_READY);
                     ready = true;
                     break;
                 }
+                core::hint::spin_loop();
             }
             if !ready {
                 return Err(BlockDeviceError::IoError);
@@ -166,7 +248,27 @@ impl BlockDevice for SdhciDevice {
             self.write16(SDHCI_TRANSFER_MODE, 0x0000); // Write, Single block
 
             // CMD24: Write Single Block
-            self.send_command(0x183A, (start_sector + s as u64) as u32)?;
+            let addr = if self.is_sdhc {
+                (start_sector + s as u64) as u32
+            } else {
+                ((start_sector + s as u64) * 512) as u32
+            };
+            self.send_command(0x183A, addr)?;
+
+            // Ждем готовности буфера данных для записи
+            let mut ready = false;
+            for _ in 0..200_000 {
+                let stat = self.read32(SDHCI_INT_STATUS);
+                if (stat & SDHCI_INT_BUFFER_WRITE_READY) != 0 {
+                    self.write32(SDHCI_INT_STATUS, SDHCI_INT_BUFFER_WRITE_READY);
+                    ready = true;
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+            if !ready {
+                return Err(BlockDeviceError::IoError);
+            }
 
             let offset = s * 512;
             for i in 0..128 {
@@ -178,6 +280,21 @@ impl BlockDevice for SdhciDevice {
                 ]);
                 self.write32(SDHCI_BUFFER_DATA, dword);
             }
+
+            // Ждем подтверждения завершения передачи блока
+            let mut xfer_complete = false;
+            for _ in 0..200_000 {
+                let stat = self.read32(SDHCI_INT_STATUS);
+                if (stat & SDHCI_INT_TRANSFER_COMPLETE) != 0 {
+                    self.write32(SDHCI_INT_STATUS, SDHCI_INT_TRANSFER_COMPLETE);
+                    xfer_complete = true;
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+            if !xfer_complete {
+                return Err(BlockDeviceError::IoError);
+            }
         }
 
         Ok(())
@@ -188,6 +305,9 @@ impl BlockDevice for SdhciDevice {
 }
 
 pub fn probe(pci: &PciDevice, dm: &mut DeviceManager) -> Result<(), &'static str> {
+    pci.enable_memory_space();
+    pci.enable_bus_mastering();
+
     let bar0 = pci.bars[0].ok_or("sdhci: missing BAR0 MMIO")?;
     let mmio = crate::memory::map_kernel_mmio(bar0.address, bar0.size as usize)
         .map_err(|_| "sdhci: failed to map BAR0 MMIO")?;

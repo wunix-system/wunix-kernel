@@ -115,8 +115,8 @@ impl VirtioBlock {
         transport.read_device_config(0, &mut cap_bytes);
         let capacity_sectors = u64::from_le_bytes(cap_bytes);
 
-        // 2 страницы (8 КиБ) под DMA-буфер: 16 байт заголовок + до 15 секторов данных + 1 байт статус
-        let dma_buf = DmaBuffer::new(2)?;
+        // 16 страниц (64 КиБ) под DMA-буфер: 64 байта заголовок + до 126 секторов данных + 1 байт статус
+        let dma_buf = DmaBuffer::new(16)?;
 
         Ok(Self {
             transport,
@@ -131,9 +131,15 @@ impl VirtioBlock {
         &mut self,
         req_type: u32,
         start_sector: u64,
-        buffer: &mut [u8],
+        write_buf: Option<&[u8]>,
+        read_buf: Option<&mut [u8]>,
     ) -> Result<(), VirtioError> {
-        let sector_count = buffer.len() / SECTOR_SIZE;
+        let buffer_len = if req_type == VIRTIO_BLK_T_OUT {
+            write_buf.as_ref().map(|b| b.len()).unwrap_or(0)
+        } else {
+            read_buf.as_ref().map(|b| b.len()).unwrap_or(0)
+        };
+        let sector_count = buffer_len / SECTOR_SIZE;
         if sector_count == 0 {
             return Ok(());
         }
@@ -141,11 +147,11 @@ impl VirtioBlock {
         // Заголовок запроса размещаем в начале DMA-буфера (offset 0)
         let hdr_ptr = self.dma_buf.virt_addr as *mut VirtioBlkReqHeader;
         let data_virt = unsafe { self.dma_buf.virt_addr.add(64) };
-        let status_virt = unsafe { self.dma_buf.virt_addr.add(64 + buffer.len()) };
+        let status_virt = unsafe { self.dma_buf.virt_addr.add(64 + buffer_len) };
 
         let hdr_phys = self.dma_buf.phys_addr;
         let data_phys = self.dma_buf.phys_addr + 64;
-        let status_phys = self.dma_buf.phys_addr + 64 + (buffer.len() as u64);
+        let status_phys = self.dma_buf.phys_addr + 64 + (buffer_len as u64);
 
         unsafe {
             core::ptr::write_volatile(
@@ -159,7 +165,9 @@ impl VirtioBlock {
 
             // При записи копируем данные в физический DMA-буфер
             if req_type == VIRTIO_BLK_T_OUT {
-                core::ptr::copy_nonoverlapping(buffer.as_ptr(), data_virt, buffer.len());
+                if let Some(wbuf) = write_buf {
+                    core::ptr::copy_nonoverlapping(wbuf.as_ptr(), data_virt, wbuf.len());
+                }
             }
 
             // Инициализируем байт статуса недопустимым значением перед запросом
@@ -182,7 +190,7 @@ impl VirtioBlock {
             },
             VirtioBuffer {
                 phys_addr: data_phys,
-                len: buffer.len() as u32,
+                len: buffer_len as u32,
                 is_write: is_write_for_device,
             },
             VirtioBuffer {
@@ -217,8 +225,10 @@ impl VirtioBlock {
 
         // При чтении копируем результат из DMA-буфера в целевой буфер вызывающего
         if req_type == VIRTIO_BLK_T_IN {
-            unsafe {
-                core::ptr::copy_nonoverlapping(data_virt, buffer.as_mut_ptr(), buffer.len());
+            if let Some(rbuf) = read_buf {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(data_virt, rbuf.as_mut_ptr(), rbuf.len());
+                }
             }
         }
 
@@ -254,8 +264,8 @@ impl BlockDevice for VirtioBlock {
             return Err(BlockDeviceError::OutOfBounds);
         }
 
-        // Выполняем чтение порциями не более 14 секторов (7 КиБ) за раз, чтобы уместиться в DMA буфер
-        let max_chunk_sectors = 14;
+        // Выполняем чтение крупными порциями (до 126 секторов = 63 КиБ за раз в DMA-буфер)
+        let max_chunk_sectors = 126;
         let mut current_sector = start_sector;
         let mut offset = 0;
 
@@ -267,7 +277,8 @@ impl BlockDevice for VirtioBlock {
             self.do_io(
                 VIRTIO_BLK_T_IN,
                 current_sector,
-                &mut buf[offset..offset + chunk_bytes],
+                None,
+                Some(&mut buf[offset..offset + chunk_bytes]),
             ).map_err(BlockDeviceError::from)?;
 
             current_sector += chunk_sectors as u64;
@@ -290,21 +301,22 @@ impl BlockDevice for VirtioBlock {
             return Err(BlockDeviceError::OutOfBounds);
         }
 
-        let max_chunk_sectors = 14;
+        // Прямая запись крупными порциями до 126 секторов (63 КиБ) без промежуточных heap аллокаций
+        let max_chunk_sectors = 126;
         let mut current_sector = start_sector;
         let mut offset = 0;
 
-        // Для записи копируем порции во временный срез и шлем устройству
         while offset < buf.len() {
             let remaining_sectors = (buf.len() - offset) / SECTOR_SIZE;
             let chunk_sectors = remaining_sectors.min(max_chunk_sectors);
             let chunk_bytes = chunk_sectors * SECTOR_SIZE;
 
-            // do_io для VIRTIO_BLK_T_OUT читает из buf, создаем мутабельную обертку над порцией
-            let mut chunk = alloc::vec![0u8; chunk_bytes];
-            chunk.copy_from_slice(&buf[offset..offset + chunk_bytes]);
-
-            self.do_io(VIRTIO_BLK_T_OUT, current_sector, &mut chunk).map_err(BlockDeviceError::from)?;
+            self.do_io(
+                VIRTIO_BLK_T_OUT,
+                current_sector,
+                Some(&buf[offset..offset + chunk_bytes]),
+                None,
+            ).map_err(BlockDeviceError::from)?;
 
             current_sector += chunk_sectors as u64;
             offset += chunk_bytes;

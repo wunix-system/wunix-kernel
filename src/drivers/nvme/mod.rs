@@ -148,8 +148,8 @@ impl NvmeDevice {
         self.ring_doorbell(0, false, self.admin_sq_tail);
 
         let head = self.admin_cq_head as usize;
-        for _ in 0..100_000 {
-            let cqe = self.admin_cq[head];
+        for _ in 0..500_000 {
+            let cqe = unsafe { core::ptr::read_volatile(&self.admin_cq[head]) };
             if cqe.is_phase_match(self.admin_cq_phase) {
                 self.admin_cq_head = ((self.admin_cq_head + 1) % QUEUE_DEPTH as u16) as u16;
                 if self.admin_cq_head == 0 {
@@ -210,8 +210,8 @@ impl NvmeDevice {
         self.ring_doorbell(1, false, self.io_sq_tail);
 
         let head = self.io_cq_head as usize;
-        for _ in 0..200_000 {
-            let cqe = self.io_cq[head];
+        for _ in 0..2_000_000 {
+            let cqe = unsafe { core::ptr::read_volatile(&self.io_cq[head]) };
             if cqe.is_phase_match(self.io_cq_phase) {
                 self.io_cq_head = ((self.io_cq_head + 1) % QUEUE_DEPTH as u16) as u16;
                 if self.io_cq_head == 0 {
@@ -232,37 +232,53 @@ impl NvmeDevice {
 impl BlockDevice for NvmeDevice {
     fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
         let sec_sz = self.sector_size;
-        let count = buf.len() / sec_sz;
-        if count == 0 {
+        let total_sectors = buf.len() / sec_sz;
+        if total_sectors == 0 {
             return Ok(());
         }
 
-        for (i, chunk) in buf.chunks_mut(sec_sz).enumerate() {
-            let lba = start_sector + (i as u64);
+        let max_chunk = 4096 / sec_sz;
+        let mut sec_done = 0;
+
+        while sec_done < total_sectors {
+            let chunk_sectors = (total_sectors - sec_done).min(max_chunk);
+            let byte_len = chunk_sectors * sec_sz;
+            let lba = start_sector + sec_done as u64;
+
             let mut cmd = NvmeCmd::default();
             cmd.opcode = 0x02; // NVM Read
             cmd.nsid = 1;
             cmd.prp1 = self.dma_bounce.physical() as u64;
             cmd.cdw10 = lba as u32;
             cmd.cdw11 = (lba >> 32) as u32;
-            cmd.cdw12 = 0; // 0 означает 1 блок (0-based)
+            cmd.cdw12 = (chunk_sectors - 1) as u32; // 0-based sector count
 
             self.submit_io_cmd(cmd)?;
-            chunk.copy_from_slice(&self.dma_bounce[..sec_sz]);
+            buf[sec_done * sec_sz..sec_done * sec_sz + byte_len]
+                .copy_from_slice(&self.dma_bounce[..byte_len]);
+
+            sec_done += chunk_sectors;
         }
         Ok(())
     }
 
     fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
         let sec_sz = self.sector_size;
-        let count = buf.len() / sec_sz;
-        if count == 0 {
+        let total_sectors = buf.len() / sec_sz;
+        if total_sectors == 0 {
             return Ok(());
         }
 
-        for (i, chunk) in buf.chunks(sec_sz).enumerate() {
-            let lba = start_sector + (i as u64);
-            self.dma_bounce[..sec_sz].copy_from_slice(chunk);
+        let max_chunk = 4096 / sec_sz;
+        let mut sec_done = 0;
+
+        while sec_done < total_sectors {
+            let chunk_sectors = (total_sectors - sec_done).min(max_chunk);
+            let byte_len = chunk_sectors * sec_sz;
+            let lba = start_sector + sec_done as u64;
+
+            self.dma_bounce[..byte_len]
+                .copy_from_slice(&buf[sec_done * sec_sz..sec_done * sec_sz + byte_len]);
 
             let mut cmd = NvmeCmd::default();
             cmd.opcode = 0x01; // NVM Write
@@ -270,9 +286,10 @@ impl BlockDevice for NvmeDevice {
             cmd.prp1 = self.dma_bounce.physical() as u64;
             cmd.cdw10 = lba as u32;
             cmd.cdw11 = (lba >> 32) as u32;
-            cmd.cdw12 = 0;
+            cmd.cdw12 = (chunk_sectors - 1) as u32;
 
             self.submit_io_cmd(cmd)?;
+            sec_done += chunk_sectors;
         }
         Ok(())
     }
