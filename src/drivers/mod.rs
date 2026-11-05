@@ -6,6 +6,7 @@ pub mod font;
 pub mod keyboard;
 pub mod manager;
 pub mod pci;
+pub mod redox_compat;
 pub mod registry;
 pub mod rtc;
 pub mod serial;
