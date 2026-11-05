@@ -136,6 +136,18 @@ impl E1000Device {
         if self.mac == [0; 6] {
             self.mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
         }
+
+        // Программируем фильтр MAC-адреса с установленным битом валидности (AV = 1 << 31),
+        // чтобы сетевая карта не сбрасывала входящие Unicast пакеты (ARP, DHCP, TCP, ICMP)
+        let ral_val = (self.mac[0] as u32)
+            | ((self.mac[1] as u32) << 8)
+            | ((self.mac[2] as u32) << 16)
+            | ((self.mac[3] as u32) << 24);
+        let rah_val = (self.mac[4] as u32)
+            | ((self.mac[5] as u32) << 8)
+            | (1 << 31);
+        self.write_reg(REG_RAL, ral_val);
+        self.write_reg(REG_RAH, rah_val);
     }
 
     fn read_eeprom_word(&self, addr: u8) -> u16 {
@@ -255,7 +267,7 @@ impl NetDevice for E1000Device {
             core::slice::from_raw_parts_mut(self.dma_virt as *mut E1000RxDesc, NUM_RX_DESCRIPTORS)
         };
 
-        let idx = (self.rx_cur + 1) % NUM_RX_DESCRIPTORS;
+        let idx = self.rx_cur;
         if (rx_descs[idx].status & RXD_STAT_DD) == 0 {
             return Ok(None);
         }
@@ -271,8 +283,8 @@ impl NetDevice for E1000Device {
         }
 
         rx_descs[idx].status = 0;
-        self.rx_cur = idx;
         self.write_reg(REG_RDT, idx as u32);
+        self.rx_cur = (self.rx_cur + 1) % NUM_RX_DESCRIPTORS;
         self.rx_packets_count += 1;
         self.rx_bytes_count += pkt_len;
 
