@@ -382,7 +382,7 @@ impl Inode for Fat32FileInode {
             itype: InodeType::File,
             size: *self.file_size.lock(),
             inode_id: self.inode_id,
-            permissions: 0o664,
+            permissions: 0o775,
             uid: 0,
             gid: 0,
         }

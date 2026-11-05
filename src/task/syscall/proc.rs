@@ -564,6 +564,7 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
 
     // Проверка прав на исполнение бинарного файла (флаг 'x')
     if let Err(_) = crate::fs::check_permission(&node, false, false, true) {
+        crate::serial_println!("[execve] permission denied for '{}'", path_str);
         return (-(EACCES as i64)) as u64;
     }
 
