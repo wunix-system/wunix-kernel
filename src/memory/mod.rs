@@ -164,17 +164,22 @@ pub fn map_kernel_mmio(phys_addr: u64, size: usize) -> Result<VirtAddr, &'static
         let frame: PhysFrame<Size4KiB> =
             PhysFrame::containing_address(x86_64::PhysAddr::new(curr_phys));
 
-        if mapper.translate_page(page).is_err() {
-            let flags = PageTableFlags::PRESENT
-                | PageTableFlags::WRITABLE
-                | PageTableFlags::NO_CACHE
-                | PageTableFlags::WRITE_THROUGH;
+        match mapper.translate_page(page) {
+            Ok(_) | Err(x86_64::structures::paging::mapper::TranslateError::ParentEntryHugePage) => {
+                // Страница уже отображена в HHDM ядра (напрямую или через 1GB/2MB Huge Pages Limine)
+            }
+            Err(_) => {
+                let flags = PageTableFlags::PRESENT
+                    | PageTableFlags::WRITABLE
+                    | PageTableFlags::NO_CACHE
+                    | PageTableFlags::WRITE_THROUGH;
 
-            unsafe {
-                mapper
-                    .map_to(page, frame, flags, &mut allocator)
-                    .map_err(|_| "Failed to map MMIO page")?
-                    .flush();
+                unsafe {
+                    mapper
+                        .map_to(page, frame, flags, &mut allocator)
+                        .map_err(|_| "Failed to map MMIO page")?
+                        .flush();
+                }
             }
         }
 
