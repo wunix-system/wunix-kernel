@@ -9,7 +9,7 @@ use crate::drivers::manager::DeviceManager;
 use crate::drivers::pci::PciDevice;
 
 /// Опрос PCI аудиоконтроллеров (Intel HDA, AC'97)
-pub fn probe_pci(dev: &PciDevice, dm: &mut DeviceManager) -> bool {
+pub fn probe_pci(dev: &mut PciDevice, dm: &mut DeviceManager) -> bool {
     if hda::probe_pci(dev, dm) {
         return true;
     }

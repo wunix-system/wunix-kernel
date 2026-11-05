@@ -4,9 +4,9 @@ pub mod regs;
 use alloc::sync::Arc;
 use spin::Mutex;
 
+use crate::drivers::dma::Dma;
 use crate::drivers::manager::DeviceManager;
 use crate::drivers::pci::PciDevice;
-use crate::drivers::dma::Dma;
 use crate::drivers::traits::{AudioDevice, AudioDeviceError};
 use crate::memory::map_kernel_mmio;
 use crate::serial_println;
@@ -22,6 +22,10 @@ pub struct IntelHdaDevice {
     out_stream_offset: usize,
     bdl: Dma<[BdlEntry; 2]>,
     pcm_buffer: Dma<[u8; PCM_BUFFER_SIZE]>,
+    corb: Dma<[u32; 256]>,
+    rirb: Dma<[u64; 256]>,
+    corb_wp: u8,
+    rirb_rp: u8,
     volume: u8,
 }
 
@@ -35,6 +39,10 @@ impl IntelHdaDevice {
 
     fn write_reg32(&self, offset: usize, val: u32) {
         unsafe { core::ptr::write_volatile(self.mmio_base.add(offset) as *mut u32, val) }
+    }
+
+    fn read_reg16(&self, offset: usize) -> u16 {
+        unsafe { core::ptr::read_volatile(self.mmio_base.add(offset) as *const u16) }
     }
 
     fn write_reg16(&self, offset: usize, val: u16) {
@@ -56,7 +64,6 @@ impl IntelHdaDevice {
 
         let gcap = unsafe { core::ptr::read_volatile(mmio_base as *const u16) };
         let in_streams = ((gcap >> 8) & 0x0F) as usize;
-        // Первый выходной стрим (Output Stream) начинается сразу за входными
         let out_stream_offset = stream_offset(in_streams);
 
         let mut dev = Self {
@@ -64,11 +71,35 @@ impl IntelHdaDevice {
             out_stream_offset,
             bdl: Dma::zeroed()?,
             pcm_buffer: Dma::zeroed()?,
+            corb: Dma::zeroed()?,
+            rirb: Dma::zeroed()?,
+            corb_wp: 0,
+            rirb_rp: 0,
             volume: 80,
         };
 
         dev.init_hw()?;
         Ok(dev)
+    }
+
+    fn send_verb(&mut self, nid: u8, verb: u32, payload: u32) -> u32 {
+        let cmd = ((nid as u32) << 20) | ((verb & 0xFFF) << 8) | (payload & 0xFF);
+        self.corb_wp = self.corb_wp.wrapping_add(1);
+        let wp = self.corb_wp as usize;
+        self.corb[wp] = cmd;
+        self.write_reg16(REG_CORBWP, wp as u16);
+
+        // Ожидаем ответа по RIRB
+        for _ in 0..10_000 {
+            let rirb_wp = (self.read_reg16(REG_RIRBWP) & 0xFF) as u8;
+            if rirb_wp != self.rirb_rp {
+                self.rirb_rp = self.rirb_rp.wrapping_add(1);
+                let resp = self.rirb[self.rirb_rp as usize];
+                return resp as u32;
+            }
+            core::hint::spin_loop();
+        }
+        0
     }
 
     fn init_hw(&mut self) -> Result<(), &'static str> {
@@ -91,7 +122,40 @@ impl IntelHdaDevice {
             core::hint::spin_loop();
         }
 
-        // Настраиваем BDL таблицу под кольцевой PCM буфер
+        // 1. Настройка кольца команд CORB
+        self.write_reg8(REG_CORBCTL, 0);
+        self.write_reg8(REG_CORBSIZE, 2); // 256 записей
+        let corb_phys = self.corb.physical() as u64;
+        self.write_reg32(REG_CORBLBASE, corb_phys as u32);
+        self.write_reg32(REG_CORBUBASE, (corb_phys >> 32) as u32);
+        self.write_reg16(REG_CORBRP, 1 << 15);
+        self.write_reg16(REG_CORBRP, 0);
+        self.write_reg16(REG_CORBWP, 0);
+        self.write_reg8(REG_CORBCTL, 2); // Запуск DMA CORB
+
+        // 2. Настройка кольца ответов RIRB
+        self.write_reg8(REG_RIRBCTL, 0);
+        self.write_reg8(REG_RIRBSIZE, 2); // 256 записей
+        let rirb_phys = self.rirb.physical() as u64;
+        self.write_reg32(REG_RIRBLBASE, rirb_phys as u32);
+        self.write_reg32(REG_RIRBUBASE, (rirb_phys >> 32) as u32);
+        self.write_reg16(REG_RIRBWP, 1 << 15);
+        self.write_reg8(REG_RIRBCTL, 2); // Запуск DMA RIRB
+
+        // 3. Инициализация кодека через CORB глаголы (Verbs):
+        // Перевод Audio Function Group (Node 1) в активное состояние питания D0
+        self.send_verb(1, 0x705, 0x00);
+
+        // Инициализация ЦАП (DAC) и выходных пинов (Node 2..6)
+        for nid in 2..=8 {
+            self.send_verb(nid, 0x705, 0x00); // Power state D0
+            self.send_verb(nid, 0x706, 0x10); // Converter Stream 1, Channel 0
+            self.send_verb(nid, 0x707, 0xC0); // Pin Widget Control: HP_ENABLE | OUT_ENABLE
+            self.send_verb(nid, 0x390, 0x00); // Unmute output amplifier
+            self.send_verb(nid, 0x3B0, 0x00);
+        }
+
+        // 4. Настраиваем BDL таблицу под кольцевой PCM буфер
         let pcm_phys = self.pcm_buffer.physical() as u64;
         self.bdl[0].addr = pcm_phys;
         self.bdl[0].length = (PCM_BUFFER_SIZE / 2) as u32;
@@ -116,7 +180,6 @@ impl IntelHdaDevice {
         self.write_reg16(s_off + SD_LVI, 1);
 
         // Формат потока: 48 кГц, 16 бит, 2 канала (стерео)
-        // Бит 14: base rate 48 кГц (0), биты 6:4: 16-бит (001b), биты 3:0: 2 канала (0001b)
         self.write_reg16(s_off + SD_FMT, (1 << 4) | 1);
 
         Ok(())
@@ -137,7 +200,6 @@ impl AudioDevice for IntelHdaDevice {
         self.pcm_buffer[..len].copy_from_slice(&samples[..len]);
 
         let s_off = self.out_stream_offset;
-        // Номер стрима 1 в битах 23:20 + флаги RUN и IOCE
         let ctl = (1 << 20) | SD_CTL_IOCE | SD_CTL_RUN;
         self.write_reg32(s_off + SD_CTL, ctl);
 
@@ -156,11 +218,11 @@ impl AudioDevice for IntelHdaDevice {
     }
 }
 
-/// Поиск и регистрация аудиоконтроллеров Intel HDA (Class 0x04, Subclass 0x03)
-pub fn probe_pci(dev: &PciDevice, dm: &mut DeviceManager) -> bool {
+pub fn probe_pci(dev: &mut PciDevice, dm: &mut DeviceManager) -> bool {
     if dev.class_code == 0x04 && dev.subclass == 0x03 {
         match IntelHdaDevice::new(dev) {
             Ok(hda) => {
+                dev.driver_name = Some("snd_hda");
                 serial_println!(
                     "hda: registered audio controller (Intel High Definition Audio, {:04x}:{:04x})",
                     dev.vendor_id, dev.device_id

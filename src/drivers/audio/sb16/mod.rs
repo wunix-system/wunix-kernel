@@ -1,5 +1,6 @@
 use x86_64::instructions::port::{PortReadOnly, PortWriteOnly};
 
+use crate::drivers::dma::Dma;
 use crate::drivers::traits::{AudioDevice, AudioDeviceError};
 use crate::serial_println;
 
@@ -12,12 +13,21 @@ const REG_DSP_READ: u16 = 0x0A;
 const REG_DSP_WRITE: u16 = 0x0C;
 const REG_DSP_STATUS: u16 = 0x0E;
 
-/// Драйвер легендарной звуковой карты Sound Blaster 16 (ISA / QEMU эмуляция)
+// Регистры контроллера DMA Intel 8237A (Master DMA для 16-битных каналов 4-7)
+const DMA2_MASK_REG: u16 = 0xD4;
+const DMA2_MODE_REG: u16 = 0xD6;
+const DMA2_CLEAR_FF_REG: u16 = 0xD8;
+const DMA2_CH5_ADDR_REG: u16 = 0xC4;
+const DMA2_CH5_COUNT_REG: u16 = 0xC6;
+const DMA_CH5_PAGE_REG: u16 = 0x8B;
+
+/// Драйвер легендарной звуковой карты Sound Blaster 16 с поддержкой ISA DMA
 pub struct Sb16Device {
     base: u16,
     version_major: u8,
     version_minor: u8,
     volume: u8,
+    dma_buf: Dma<[u8; 4096]>,
 }
 
 unsafe impl Send for Sb16Device {}
@@ -78,11 +88,14 @@ impl Sb16Device {
             return None;
         }
 
+        let dma_buf = Dma::zeroed().ok()?;
+
         let mut dev = Self {
             base,
             version_major: 0,
             version_minor: 0,
             volume: 80,
+            dma_buf,
         };
 
         // Запрашиваем версию DSP (команда 0xE1)
@@ -92,6 +105,40 @@ impl Sb16Device {
 
         Some(dev)
     }
+
+    /// Программирует контроллер Intel 8237A DMA для канала 5 (16-битный вывод)
+    fn setup_dma5(&self, phys_addr: u32, word_count: u16) {
+        unsafe {
+            let mut mask = PortWriteOnly::<u8>::new(DMA2_MASK_REG);
+            let mut clear_ff = PortWriteOnly::<u8>::new(DMA2_CLEAR_FF_REG);
+            let mut mode = PortWriteOnly::<u8>::new(DMA2_MODE_REG);
+            let mut addr = PortWriteOnly::<u8>::new(DMA2_CH5_ADDR_REG);
+            let mut page = PortWriteOnly::<u8>::new(DMA_CH5_PAGE_REG);
+            let mut count = PortWriteOnly::<u8>::new(DMA2_CH5_COUNT_REG);
+
+            // Маскируем канал 5
+            mask.write(5);
+            clear_ff.write(0);
+            // Single cycle mode, read transfer, channel 5 (0x48 | 1)
+            mode.write(0x49);
+
+            // Адрес в 16-битных словах
+            let word_addr = (phys_addr >> 1) as u16;
+            addr.write((word_addr & 0xFF) as u8);
+            addr.write(((word_addr >> 8) & 0xFF) as u8);
+
+            // Страничный регистр (биты 16..23 физического адреса)
+            page.write(((phys_addr >> 16) & 0xFF) as u8);
+
+            // Количество 16-битных слов минус 1
+            let words_minus_one = word_count.saturating_sub(1);
+            count.write((words_minus_one & 0xFF) as u8);
+            count.write(((words_minus_one >> 8) & 0xFF) as u8);
+
+            // Разрешаем канал 5
+            mask.write(1);
+        }
+    }
 }
 
 impl AudioDevice for Sb16Device {
@@ -99,11 +146,30 @@ impl AudioDevice for Sb16Device {
         "Sound Blaster 16"
     }
 
-    fn play_pcm(&mut self, _samples: &[u8]) -> Result<(), AudioDeviceError> {
-        // Задаем частоту дискретизации 44100 Гц (команда 0x41)
+    fn play_pcm(&mut self, samples: &[u8]) -> Result<(), AudioDeviceError> {
+        let len = samples.len().min(4096);
+        if len == 0 {
+            return Ok(());
+        }
+
+        self.dma_buf[..len].copy_from_slice(&samples[..len]);
+        let words = (len / 2) as u16;
+        let phys = self.dma_buf.physical() as u32;
+
+        self.setup_dma5(phys, words);
+
+        // Устанавливаем частоту 44100 Гц
         self.write_cmd(0x41);
         self.write_cmd((44100u16 >> 8) as u8);
         self.write_cmd((44100u16 & 0xFF) as u8);
+
+        // Команда 0xB0: 16-битный PCM D/A, single-cycle
+        self.write_cmd(0xB0);
+        self.write_cmd(0x10); // 16-bit signed stereo
+        let samples_minus_one = words.saturating_sub(1);
+        self.write_cmd((samples_minus_one & 0xFF) as u8);
+        self.write_cmd(((samples_minus_one >> 8) & 0xFF) as u8);
+
         Ok(())
     }
 
@@ -125,7 +191,6 @@ impl AudioDevice for Sb16Device {
     }
 }
 
-/// Инициализация звуковой карты Sound Blaster 16 по стандартному порту 0x220
 pub fn init() -> Option<Sb16Device> {
     if let Some(sb) = Sb16Device::probe(SB16_DEFAULT_BASE) {
         serial_println!(

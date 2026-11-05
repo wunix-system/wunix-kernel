@@ -146,10 +146,11 @@ impl AudioDevice for Ac97Device {
 }
 
 /// Поиск и регистрация аудиоконтроллеров AC'97 (Class 0x04, Subclass 0x01)
-pub fn probe_pci(dev: &PciDevice, dm: &mut DeviceManager) -> bool {
+pub fn probe_pci(dev: &mut PciDevice, dm: &mut DeviceManager) -> bool {
     if dev.class_code == 0x04 && dev.subclass == 0x01 {
         match Ac97Device::new(dev) {
             Ok(ac97) => {
+                dev.driver_name = Some("snd_ac97");
                 serial_println!(
                     "ac97: registered audio controller (AC'97 Audio, {:04x}:{:04x})",
                     dev.vendor_id, dev.device_id
