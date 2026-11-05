@@ -9,7 +9,7 @@ extern crate alloc;
 use core::panic::PanicInfo;
 use limine::request::{
     BootloaderInfoRequest, ExecutableFileRequest, FirmwareTypeRequest, FramebufferRequest,
-    HhdmRequest, MemmapRequest, ModulesRequest as ModuleRequest,
+    HhdmRequest, MemmapRequest, ModulesRequest as ModuleRequest, RsdpRequest,
 };
 use limine::BaseRevision;
 use wunix_kernel::i18n::t;
@@ -44,6 +44,11 @@ pub static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 #[used]
 #[unsafe(no_mangle)]
 pub static MEMORY_MAP_REQUEST: MemmapRequest = MemmapRequest::new();
+
+// Запрашиваем у Limine указатель на таблицу ACPI RSDP
+#[used]
+#[unsafe(no_mangle)]
+pub static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
 
 // Запрашиваем у Limine графический фреймбуфер
 #[used]
@@ -137,6 +142,11 @@ pub extern "C" fn _start() -> ! {
 
     // 7. Инициализация виртуальной памяти и кучи
     wunix_kernel::memory::init(memmap_entries, hhdm_offset);
+
+    // Передаем адрес ACPI RSDP от Limine в подсистему питания ядра
+    if let Some(rsdp_response) = RSDP_REQUEST.response() {
+        wunix_kernel::drivers::acpi::set_rsdp_address(rsdp_response.address as u64);
+    }
 
     // 8. Инициализация таймера и устройств ввода
     wunix_kernel::arch::x86_64::timer::init(100);

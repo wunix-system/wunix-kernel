@@ -1,4 +1,5 @@
 pub mod config;
+pub mod msi;
 pub mod scan;
 
 use core::fmt;
