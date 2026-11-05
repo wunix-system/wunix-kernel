@@ -5,7 +5,6 @@ use alloc::sync::Arc;
 use spin::Mutex;
 use crate::drivers::dma::Dma;
 use crate::drivers::manager::DeviceManager;
-use crate::drivers::net::wifi::{register_scanned_network, SecurityType, WirelessNetwork};
 use crate::drivers::pci::PciDevice;
 use crate::drivers::traits::{NetDevice, NetDeviceError};
 
@@ -115,15 +114,6 @@ impl IwlDevice {
         let tx_phys = self.tx_ring.physical() as u64;
         self.write_reg(FH_TX_BASE_ADDR, tx_phys as u32);
         self.write_reg(FH_TX_CONFIG, 1);
-
-        // Регистрируем обнаруженную тестовую беспроводную точку доступа в результатах сканирования
-        register_scanned_network(WirelessNetwork {
-            ssid: alloc::string::String::from("Wunix-Office-5G"),
-            bssid: [0x50, 0xC7, 0xBF, 0x12, 0x34, 0x56],
-            channel: 36,
-            rssi: -45,
-            security: SecurityType::Wpa2Psk,
-        });
 
         crate::klog!(
             "iwlwifi: Intel Wireless Wi-Fi 6/6E adapter registered (MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",

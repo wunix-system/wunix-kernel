@@ -140,7 +140,7 @@ impl Rtl8168Device {
 
         // Устанавливаем максимальный размер пакета
         self.out16(REG_RMS, 1536);
-        self.out8(REG_MTPS, 0x3B); // 1536 байт
+        self.out8(REG_MTPS, 0x3F); // 0x3F = No early transmit (TxPacketMax)
 
         // Фильтр пакетов
         self.out32(REG_RCR, RCR_AAP | RCR_APM | RCR_AM | RCR_AB | RCR_MXDMA_UNLIM);
@@ -183,6 +183,8 @@ impl NetDevice for Rtl8168Device {
 
         self.tx_ring[idx].opts2 = 0;
         self.tx_ring[idx].opts1 = opts;
+
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
 
         // Пингуем очередь передачи (бит 6 регистра 0x38)
         self.out8(REG_TX_POLL, 0x40);

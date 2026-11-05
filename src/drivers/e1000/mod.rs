@@ -241,7 +241,11 @@ impl NetDevice for E1000Device {
         };
 
         let idx = self.tx_cur;
-        if (tx_descs[idx].status & TXD_STAT_DD) == 0 {
+        let tx_status = unsafe {
+            let ptr = &tx_descs[idx].status as *const u8;
+            core::ptr::read_volatile(ptr)
+        };
+        if (tx_status & TXD_STAT_DD) == 0 {
             return Err(NetDeviceError::NotReady);
         }
 
@@ -252,7 +256,11 @@ impl NetDevice for E1000Device {
 
         tx_descs[idx].length = packet.len() as u16;
         tx_descs[idx].cmd = TXD_CMD_EOP | TXD_CMD_IFCS | TXD_CMD_RS;
-        tx_descs[idx].status = 0;
+        unsafe {
+            core::ptr::write_volatile(&mut tx_descs[idx].status, 0);
+        }
+
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
 
         self.tx_cur = (self.tx_cur + 1) % NUM_TX_DESCRIPTORS;
         self.write_reg(REG_TDT, self.tx_cur as u32);
@@ -268,9 +276,15 @@ impl NetDevice for E1000Device {
         };
 
         let idx = self.rx_cur;
-        if (rx_descs[idx].status & RXD_STAT_DD) == 0 {
+        let rx_status = unsafe {
+            let ptr = &rx_descs[idx].status as *const u8;
+            core::ptr::read_volatile(ptr)
+        };
+        if (rx_status & RXD_STAT_DD) == 0 {
             return Ok(None);
         }
+
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Acquire);
 
         let pkt_len = rx_descs[idx].length as usize;
         if pkt_len > buf.len() {
@@ -280,9 +294,11 @@ impl NetDevice for E1000Device {
         let rx_buf_virt = (self.dma_virt as usize + RX_BUFFERS_OFFSET + (idx * BUFFER_SIZE)) as *const u8;
         unsafe {
             core::ptr::copy_nonoverlapping(rx_buf_virt, buf.as_mut_ptr(), pkt_len);
+            core::ptr::write_volatile(&mut rx_descs[idx].status, 0);
         }
 
-        rx_descs[idx].status = 0;
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
+
         self.write_reg(REG_RDT, idx as u32);
         self.rx_cur = (self.rx_cur + 1) % NUM_RX_DESCRIPTORS;
         self.rx_packets_count += 1;
@@ -301,7 +317,12 @@ impl Drop for E1000Device {
     fn drop(&mut self) {
         self.write_reg(REG_RCTL, 0);
         self.write_reg(REG_TCTL, 0);
-        deallocate_frame(self.dma_frame);
+        for i in 0..16 {
+            let frame = PhysFrame::containing_address(
+                self.dma_frame.start_address() + (i as u64 * 4096)
+            );
+            deallocate_frame(frame);
+        }
     }
 }
 

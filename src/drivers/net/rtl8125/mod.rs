@@ -188,6 +188,8 @@ impl NetDevice for Rtl8125Device {
         self.tx_ring[idx].opts2 = 0;
         self.tx_ring[idx].opts1 = opts;
 
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
+
         // Пингуем контроллер на отправку
         self.write8(REG_TPPOLL, 0x40);
 
