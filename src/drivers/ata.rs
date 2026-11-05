@@ -14,7 +14,9 @@ const ATA_STATUS_DRQ: u8 = 0x08;
 const ATA_STATUS_BSY: u8 = 0x80;
 
 const ATA_CMD_READ_PIO: u8 = 0x20;
+const ATA_CMD_READ_PIO_EXT: u8 = 0x24;
 const ATA_CMD_WRITE_PIO: u8 = 0x30;
+const ATA_CMD_WRITE_PIO_EXT: u8 = 0x34;
 const ATA_CMD_IDENTIFY: u8 = 0xEC;
 
 /// Драйвер блочного накопителя ATA PIO (IDE / PIIX3 / PIIX4)
@@ -143,14 +145,30 @@ impl BlockDevice for AtaDevice {
             let lba = start_sector + sec as u64;
             self.wait_not_busy()?;
 
-            let head_sel = 0xE0 | (if self.is_slave { 0x10 } else { 0x00 }) | (((lba >> 24) & 0x0F) as u8);
             unsafe {
-                drive_port.write(head_sel);
-                seccount_port.write(1);
-                lba_lo.write((lba & 0xFF) as u8);
-                lba_mid.write(((lba >> 8) & 0xFF) as u8);
-                lba_hi.write(((lba >> 16) & 0xFF) as u8);
-                cmd_port.write(ATA_CMD_READ_PIO);
+                if lba >= 0x1000_0000 {
+                    let drive_sel = 0x40 | (if self.is_slave { 0x10 } else { 0x00 });
+                    drive_port.write(drive_sel);
+                    // Старшие байты (High bytes)
+                    seccount_port.write(0);
+                    lba_lo.write(((lba >> 24) & 0xFF) as u8);
+                    lba_mid.write(((lba >> 32) & 0xFF) as u8);
+                    lba_hi.write(((lba >> 40) & 0xFF) as u8);
+                    // Младшие байты (Low bytes)
+                    seccount_port.write(1);
+                    lba_lo.write((lba & 0xFF) as u8);
+                    lba_mid.write(((lba >> 8) & 0xFF) as u8);
+                    lba_hi.write(((lba >> 16) & 0xFF) as u8);
+                    cmd_port.write(ATA_CMD_READ_PIO_EXT);
+                } else {
+                    let head_sel = 0xE0 | (if self.is_slave { 0x10 } else { 0x00 }) | (((lba >> 24) & 0x0F) as u8);
+                    drive_port.write(head_sel);
+                    seccount_port.write(1);
+                    lba_lo.write((lba & 0xFF) as u8);
+                    lba_mid.write(((lba >> 8) & 0xFF) as u8);
+                    lba_hi.write(((lba >> 16) & 0xFF) as u8);
+                    cmd_port.write(ATA_CMD_READ_PIO);
+                }
             }
 
             self.wait_ready()?;
@@ -178,14 +196,28 @@ impl BlockDevice for AtaDevice {
             let lba = start_sector + sec as u64;
             self.wait_not_busy()?;
 
-            let head_sel = 0xE0 | (if self.is_slave { 0x10 } else { 0x00 }) | (((lba >> 24) & 0x0F) as u8);
             unsafe {
-                drive_port.write(head_sel);
-                seccount_port.write(1);
-                lba_lo.write((lba & 0xFF) as u8);
-                lba_mid.write(((lba >> 8) & 0xFF) as u8);
-                lba_hi.write(((lba >> 16) & 0xFF) as u8);
-                cmd_port.write(ATA_CMD_WRITE_PIO);
+                if lba >= 0x1000_0000 {
+                    let drive_sel = 0x40 | (if self.is_slave { 0x10 } else { 0x00 });
+                    drive_port.write(drive_sel);
+                    seccount_port.write(0);
+                    lba_lo.write(((lba >> 24) & 0xFF) as u8);
+                    lba_mid.write(((lba >> 32) & 0xFF) as u8);
+                    lba_hi.write(((lba >> 40) & 0xFF) as u8);
+                    seccount_port.write(1);
+                    lba_lo.write((lba & 0xFF) as u8);
+                    lba_mid.write(((lba >> 8) & 0xFF) as u8);
+                    lba_hi.write(((lba >> 16) & 0xFF) as u8);
+                    cmd_port.write(ATA_CMD_WRITE_PIO_EXT);
+                } else {
+                    let head_sel = 0xE0 | (if self.is_slave { 0x10 } else { 0x00 }) | (((lba >> 24) & 0x0F) as u8);
+                    drive_port.write(head_sel);
+                    seccount_port.write(1);
+                    lba_lo.write((lba & 0xFF) as u8);
+                    lba_mid.write(((lba >> 8) & 0xFF) as u8);
+                    lba_hi.write(((lba >> 16) & 0xFF) as u8);
+                    cmd_port.write(ATA_CMD_WRITE_PIO);
+                }
             }
 
             self.wait_ready()?;
