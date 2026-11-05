@@ -25,21 +25,26 @@ pub fn mount(source: &str, target: &str, fstype: &str, _flags: u64) -> Result<()
         return Err(VfsError::AlreadyExists);
     }
 
-    // Ищем блочное устройство по имени источника (например, "/dev/vda1" или "vda1")
-    let dev = match crate::fs::block::get_block_device(source) {
-        Some(d) => d,
-        None => return Err(VfsError::NotFound),
-    };
+    let fs: Arc<dyn FileSystem> = if fstype == "vboxsf" {
+        // Общие папки VirtualBox обращаются напрямую к гипервизору без блочного диска
+        Arc::new(crate::drivers::virt::vbox::VBoxSfFileSystem::new(source))
+    } else {
+        // Ищем блочное устройство по имени источника (например, "/dev/vda1" или "vda1")
+        let dev = match crate::fs::block::get_block_device(source) {
+            Some(d) => d,
+            None => return Err(VfsError::NotFound),
+        };
 
-    // Создаем экземпляр файловой системы (FAT32 по умолчанию)
-    let fs: Arc<dyn FileSystem> = match fstype {
-        "fat" | "vfat" | "fat32" | "" => {
-            Arc::new(Fat32FileSystem::open(dev).map_err(|e| {
-                serial_println!("mount: failed to open fat32 on {}: {:?}", source, e);
-                e
-            })?)
+        // Создаем экземпляр файловой системы (FAT32 по умолчанию)
+        match fstype {
+            "fat" | "vfat" | "fat32" | "" => {
+                Arc::new(Fat32FileSystem::open(dev).map_err(|e| {
+                    serial_println!("mount: failed to open fat32 on {}: {:?}", source, e);
+                    e
+                })?)
+            }
+            _ => return Err(VfsError::NotSupported),
         }
-        _ => return Err(VfsError::NotSupported),
     };
 
     // Создаем директорию точки монтирования, если она еще не создана

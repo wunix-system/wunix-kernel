@@ -1,6 +1,7 @@
 pub mod ahci;
 pub mod ata;
 pub mod display;
+pub mod e1000;
 pub mod font;
 pub mod keyboard;
 pub mod manager;

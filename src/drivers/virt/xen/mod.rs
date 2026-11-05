@@ -2,6 +2,7 @@ pub mod blkfront;
 pub mod grant_table;
 pub mod hypercall;
 pub mod netfront;
+pub mod platform;
 
 use alloc::format;
 use alloc::sync::Arc;

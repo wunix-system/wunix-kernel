@@ -8,6 +8,10 @@ pub fn pci_vendor_name(vendor: u16) -> &'static str {
     match vendor {
         0x8086 => "Intel Corporation",
         0x1AF4 => "Red Hat, Inc.",
+        0x80EE => "Oracle VM VirtualBox",
+        0x15AD => "VMware, Inc.",
+        0x1414 => "Microsoft Corporation",
+        0x5853 => "Citrix Systems, Inc. / Xen",
         0x1234 => "Bochs/QEMU",
         0x1013 => "Cirrus Logic",
         0x10EC => "Realtek Semiconductor",
@@ -22,6 +26,16 @@ pub fn pci_device_name(vendor: u16, device: u16) -> &'static str {
         (0x8086, 0x7010) => "82371SB PIIX3 IDE [Natoma/Triton II]",
         (0x8086, 0x7113) => "82371AB/EB/MB PIIX4 ACPI",
         (0x8086, 0x100E) => "82540EM Gigabit Ethernet Controller",
+        (0x8086, 0x100F) => "82545EM Gigabit Ethernet Controller",
+        (0x8086, 0x1004) => "82543GC Gigabit Ethernet Controller",
+        (0x8086, 0x10D3) => "82574L Gigabit Network Connection",
+        (0x80EE, 0xCAFE) => "VirtualBox Guest Integration (VMMDev)",
+        (0x80EE, 0xBEEF) => "VirtualBox Graphics Adapter (VBoxSVGA)",
+        (0x15AD, 0x0405) => "VMware SVGA II Adapter",
+        (0x15AD, 0x07B0) => "VMware vmxnet3 Ethernet Controller",
+        (0x15AD, 0x07C0) => "VMware PVSCSI Storage Controller",
+        (0x1414, 0x5353) => "Microsoft Hyper-V Synthetic Video",
+        (0x5853, 0x0001) => "Xen Platform PCI Device",
         (0x1AF4, 0x1000) | (0x1AF4, 0x1041) => "Virtio Network Device",
         (0x1AF4, 0x1001) | (0x1AF4, 0x1042) => "Virtio Block Device",
         (0x1AF4, 0x1002) | (0x1AF4, 0x1043) => "Virtio Memory Balloon",
@@ -38,6 +52,14 @@ pub fn pci_device_name(vendor: u16, device: u16) -> &'static str {
 
 pub fn pci_driver_name(vendor: u16, device: u16) -> &'static str {
     match (vendor, device) {
+        (0x8086, 0x100E) | (0x8086, 0x100F) | (0x8086, 0x1004) | (0x8086, 0x10D3) => "e1000",
+        (0x80EE, 0xCAFE) => "vboxguest",
+        (0x80EE, 0xBEEF) => "vboxvideo",
+        (0x15AD, 0x0405) => "vmw_svga",
+        (0x15AD, 0x07B0) => "vmxnet3",
+        (0x15AD, 0x07C0) => "pvscsi",
+        (0x1414, 0x5353) => "hyperv_fb",
+        (0x5853, 0x0001) => "xen-platform",
         (0x1AF4, 0x1000) | (0x1AF4, 0x1041) => "virtio-net",
         (0x1AF4, 0x1001) | (0x1AF4, 0x1042) => "virtio-blk",
         (0x1AF4, 0x1048) | (0x1AF4, 0x1050) => "virtio-gpu",
@@ -356,5 +378,40 @@ pub fn refresh_proc_files(path: &str) {
             let _ = write_file_ramfs("/sys/class/graphics/fb0/bits_per_pixel", alloc::format!("{}\n", bpp).as_bytes());
             let _ = write_file_ramfs("/sys/class/graphics/fb0/address", alloc::format!("0x{:08x}\n", addr).as_bytes());
         }
+    } else if path == "/proc/hypervisor" {
+        let hv = crate::drivers::virt::current_hypervisor();
+        let mut text = alloc::format!(
+            "Hypervisor: {}\nType: {}\nStatus: active\n",
+            hv.display_name(true),
+            hv.name()
+        );
+        match hv {
+            crate::drivers::virt::HypervisorType::VirtualBox => {
+                text.push_str("Platform: Oracle VM VirtualBox\nDrivers: vboxguest, vboxvideo, vboxmouse, vboxsf\nFeatures: HGCM, TimeSync, Seamless Pointer, Shared Folders\n");
+            }
+            crate::drivers::virt::HypervisorType::VMware => {
+                text.push_str("Platform: VMware Workstation / ESXi\nDrivers: vmw_svga, vmxnet3, pvscsi, vmmouse\nFeatures: Backdoor I/O, Host TimeSync, Absolute Mouse Pointer\n");
+            }
+            crate::drivers::virt::HypervisorType::HyperV => {
+                text.push_str("Platform: Microsoft Hyper-V / Azure\nDrivers: hyperv_vmbus, hyperv_fb, netvsc, storvsc\nFeatures: VMBus, Heartbeat, Guest Shutdown, KVP Exchange\n");
+            }
+            crate::drivers::virt::HypervisorType::Kvm | crate::drivers::virt::HypervisorType::Qemu => {
+                text.push_str("Platform: KVM / Proxmox VE / QEMU\nDrivers: virtio-blk, virtio-net, virtio-scsi, virtio-gpu, virtio-balloon, virtio-rng, virtio-console, bochs-vga\nFeatures: VirtIO Modern/Legacy, pvclock, fw_cfg\n");
+            }
+            crate::drivers::virt::HypervisorType::Xen => {
+                text.push_str("Platform: Xen Paravirtualization\nDrivers: xen-blkfront, xen-netfront, xen-platform\nFeatures: Hypercalls, Grant Tables v1, Event Channels\n");
+            }
+            crate::drivers::virt::HypervisorType::BareMetal => {
+                text.push_str("Platform: Physical Machine (Bare Metal)\nFeatures: Native Direct Hardware MMIO/Port Access\n");
+            }
+            _ => {
+                text.push_str("Platform: Generic Virtual Machine\n");
+            }
+        }
+        let _ = write_file_ramfs("/proc/hypervisor", text.as_bytes());
+    } else if path == "/sys/hypervisor/type" {
+        let hv = crate::drivers::virt::current_hypervisor();
+        let text = alloc::format!("{}\n", hv.name());
+        let _ = write_file_ramfs("/sys/hypervisor/type", text.as_bytes());
     }
 }

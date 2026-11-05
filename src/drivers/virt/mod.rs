@@ -1,5 +1,6 @@
 pub mod detect;
 pub mod hyperv;
+pub mod qemu;
 pub mod vbox;
 pub mod vmware;
 pub mod xen;

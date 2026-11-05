@@ -124,6 +124,17 @@ impl DeviceManager {
                 // VMware драйвер обработал устройство
             } else if virt::hyperv::probe_pci(dev, self) {
                 // Hyper-V синтетическое видео обработано
+            } else if virt::qemu::probe_pci(dev, self) {
+                // Bochs / QEMU Standard VGA
+            } else if virt::xen::platform::probe_pci(dev) {
+                // Xen Platform Device (HVM Unplug)
+            } else if let Some(nic) = super::e1000::probe_pci(dev) {
+                let mac = nic.mac_address();
+                serial_println!(
+                    "e1000: registered eth{} (Intel PRO/1000, MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+                    self.net_devices.len(), mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+                );
+                self.register_net_device(Arc::new(Mutex::new(nic)));
             }
         }
 
@@ -244,6 +255,12 @@ impl DeviceManager {
     /// Инициализация специфичных для платформы синтетических драйверов и сервисов.
     fn init_hypervisor_integrations(&mut self, hv: HypervisorType) {
         match hv {
+            HypervisorType::VirtualBox => {
+                virt::vbox::init_integrations(self);
+            }
+            HypervisorType::Kvm | HypervisorType::Qemu => {
+                virt::qemu::init_integrations(self);
+            }
             HypervisorType::VMware => {
                 virt::vmware::init_integrations(self);
             }

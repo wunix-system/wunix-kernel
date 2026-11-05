@@ -60,3 +60,14 @@ pub fn probe_pci(dev: &PciDevice, dm: &mut DeviceManager) -> bool {
         _ => false,
     }
 }
+
+/// Инициализирует глобальные сервисы интеграции гостевой ОС VirtualBox.
+pub fn init_integrations(_dm: &mut DeviceManager) {
+    if VBOX_GUEST.lock().is_some() {
+        serial_println!("vbox: guest services and integrations active");
+        if let Some(host_ms) = sync_time_with_host() {
+            serial_println!("vbox: host time sync check: {} ms UTC", host_ms);
+        }
+    }
+}
+
