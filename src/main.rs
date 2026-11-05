@@ -157,7 +157,7 @@ pub extern "C" fn _start() -> ! {
         );
     }
 
-    // Инициализация шины PCI и VirtIO
+    // Инициализация шины PCI и драйверов оборудования (SATA/AHCI, ATA, VirtIO, VMware, VBox, Hyper-V)
     wunix_kernel::drivers::init();
     let pci_count = wunix_kernel::drivers::with_device_manager(|dm| dm.pci_devices().len()).unwrap_or(0);
     klog!(

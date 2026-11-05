@@ -1,8 +1,7 @@
 use x86_64::structures::paging::PhysFrame;
 
 use crate::drivers::pci::PciDevice;
-use crate::drivers::traits::BlockDevice;
-use crate::drivers::virtio::VirtioError;
+use crate::drivers::traits::{BlockDevice, BlockDeviceError};
 use crate::memory::{allocate_contiguous_frames, deallocate_frame, hhdm_offset, map_kernel_mmio};
 
 pub const VMWARE_PVSCSI_DEVICE_ID: u16 = 0x07C0;
@@ -137,7 +136,7 @@ impl PvscsiDevice {
         Ok(dev)
     }
 
-    fn read_capacity(&mut self) -> Result<(), VirtioError> {
+    fn read_capacity(&mut self) -> Result<(), BlockDeviceError> {
         let mut buf = [0u8; 8];
         let mut cdb = [0u8; 16];
         cdb[0] = SCSI_READ_CAPACITY_10;
@@ -158,7 +157,7 @@ impl PvscsiDevice {
         Ok(())
     }
 
-    fn execute_scsi_cmd(&mut self, cdb: &[u8; 16], cdb_len: u8, data: &mut [u8], flags: u8) -> Result<(), VirtioError> {
+    fn execute_scsi_cmd(&mut self, cdb: &[u8; 16], cdb_len: u8, data: &mut [u8], flags: u8) -> Result<(), BlockDeviceError> {
         let req_ring = unsafe {
             core::slice::from_raw_parts_mut((self.dma_virt as usize + 0x1000) as *mut PvscsiRingReqDesc, 32)
         };
@@ -204,7 +203,7 @@ impl PvscsiDevice {
 }
 
 impl BlockDevice for PvscsiDevice {
-    fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), VirtioError> {
+    fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
         let num_sectors = (buf.len() / self.sector_size) as u32;
         let mut offset = 0;
 
@@ -230,7 +229,7 @@ impl BlockDevice for PvscsiDevice {
         Ok(())
     }
 
-    fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), VirtioError> {
+    fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
         let num_sectors = (buf.len() / self.sector_size) as u32;
         let mut offset = 0;
 

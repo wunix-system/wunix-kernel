@@ -7,7 +7,7 @@ use super::{
     VirtioDevice, VirtioDeviceType, VirtioError, VIRTIO_STATUS_ACKNOWLEDGE, VIRTIO_STATUS_DRIVER,
     VIRTIO_STATUS_DRIVER_OK, VIRTIO_STATUS_FEATURES_OK,
 };
-use crate::drivers::BlockDevice;
+use crate::drivers::{BlockDevice, BlockDeviceError};
 
 // Типы операций VirtIO Block
 pub const VIRTIO_BLK_T_IN: u32 = 0; // Чтение секторов (Read)
@@ -241,17 +241,17 @@ impl VirtioDevice for VirtioBlock {
 }
 
 impl BlockDevice for VirtioBlock {
-    fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), VirtioError> {
+    fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
         if buf.is_empty() {
             return Ok(());
         }
         if buf.len() % SECTOR_SIZE != 0 {
-            return Err(VirtioError::Unsupported);
+            return Err(BlockDeviceError::Unsupported);
         }
 
         let sector_count = (buf.len() / SECTOR_SIZE) as u64;
         if start_sector + sector_count > self.capacity_sectors {
-            return Err(VirtioError::Unsupported);
+            return Err(BlockDeviceError::OutOfBounds);
         }
 
         // Выполняем чтение порциями не более 14 секторов (7 КиБ) за раз, чтобы уместиться в DMA буфер
@@ -268,7 +268,7 @@ impl BlockDevice for VirtioBlock {
                 VIRTIO_BLK_T_IN,
                 current_sector,
                 &mut buf[offset..offset + chunk_bytes],
-            )?;
+            ).map_err(BlockDeviceError::from)?;
 
             current_sector += chunk_sectors as u64;
             offset += chunk_bytes;
@@ -277,17 +277,17 @@ impl BlockDevice for VirtioBlock {
         Ok(())
     }
 
-    fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), VirtioError> {
+    fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
         if buf.is_empty() {
             return Ok(());
         }
         if buf.len() % SECTOR_SIZE != 0 {
-            return Err(VirtioError::Unsupported);
+            return Err(BlockDeviceError::Unsupported);
         }
 
         let sector_count = (buf.len() / SECTOR_SIZE) as u64;
         if start_sector + sector_count > self.capacity_sectors {
-            return Err(VirtioError::Unsupported);
+            return Err(BlockDeviceError::OutOfBounds);
         }
 
         let max_chunk_sectors = 14;
@@ -304,7 +304,7 @@ impl BlockDevice for VirtioBlock {
             let mut chunk = alloc::vec![0u8; chunk_bytes];
             chunk.copy_from_slice(&buf[offset..offset + chunk_bytes]);
 
-            self.do_io(VIRTIO_BLK_T_OUT, current_sector, &mut chunk)?;
+            self.do_io(VIRTIO_BLK_T_OUT, current_sector, &mut chunk).map_err(BlockDeviceError::from)?;
 
             current_sector += chunk_sectors as u64;
             offset += chunk_bytes;

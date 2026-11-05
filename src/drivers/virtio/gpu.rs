@@ -7,7 +7,7 @@ use super::{
     VirtioDevice, VirtioDeviceType, VirtioError, VIRTIO_STATUS_ACKNOWLEDGE, VIRTIO_STATUS_DRIVER,
     VIRTIO_STATUS_DRIVER_OK, VIRTIO_STATUS_FEATURES_OK,
 };
-use crate::drivers::DisplayDevice;
+use crate::drivers::{DisplayDevice, DisplayDeviceError};
 
 // Команды протокола VirtIO-GPU
 pub const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32 = 0x0100;
@@ -404,8 +404,8 @@ impl DisplayDevice for VirtioGpu {
         }
     }
 
-    fn flush(&mut self) -> Result<(), VirtioError> {
-        VirtioGpu::flush(self)
+    fn flush(&mut self) -> Result<(), DisplayDeviceError> {
+        VirtioGpu::flush(self).map_err(DisplayDeviceError::from)
     }
 }
 

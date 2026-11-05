@@ -4,8 +4,7 @@ use x86_64::structures::paging::PhysFrame;
 
 use crate::drivers::manager::DeviceManager;
 use crate::drivers::pci::PciDevice;
-use crate::drivers::traits::BlockDevice;
-use crate::drivers::virtio::VirtioError;
+use crate::drivers::traits::{BlockDevice, BlockDeviceError};
 use crate::memory::{allocate_frame, hhdm_offset, map_kernel_mmio};
 use crate::serial_println;
 
@@ -37,7 +36,7 @@ impl AhciDisk {
         (hhdm_offset() + self.dma_frame.start_address().as_u64()) as *mut u8
     }
 
-    fn wait_not_busy(&self) -> Result<(), VirtioError> {
+    fn wait_not_busy(&self) -> Result<(), BlockDeviceError> {
         let tfd_ptr = (self.port_base + 0x20) as *mut u32;
         for _ in 0..100_000 {
             let tfd = unsafe { tfd_ptr.read_volatile() };
@@ -46,10 +45,10 @@ impl AhciDisk {
             }
             core::hint::spin_loop();
         }
-        Err(VirtioError::IoError)
+        Err(BlockDeviceError::IoError)
     }
 
-    fn execute_cmd(&mut self, is_write: bool, ata_cmd: u8, lba: u64, count: u16) -> Result<(), VirtioError> {
+    fn execute_cmd(&mut self, is_write: bool, ata_cmd: u8, lba: u64, count: u16) -> Result<(), BlockDeviceError> {
         self.wait_not_busy()?;
 
         let base_phys = self.dma_frame.start_address().as_u64();
@@ -120,7 +119,7 @@ impl AhciDisk {
                 if (ci_ptr.read_volatile() & 1) == 0 {
                     let tfd = tfd_ptr.read_volatile();
                     if (tfd & ATA_DEV_ERR) != 0 {
-                        return Err(VirtioError::IoError);
+                        return Err(BlockDeviceError::IoError);
                     }
                     return Ok(());
                 }
@@ -128,12 +127,12 @@ impl AhciDisk {
             }
         }
 
-        Err(VirtioError::IoError)
+        Err(BlockDeviceError::IoError)
     }
 }
 
 impl BlockDevice for AhciDisk {
-    fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), VirtioError> {
+    fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
         let count = buf.len() / 512;
         let bounce_virt = unsafe { self.dma_virt().add(0x800) };
 
@@ -152,7 +151,7 @@ impl BlockDevice for AhciDisk {
         Ok(())
     }
 
-    fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), VirtioError> {
+    fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
         let count = buf.len() / 512;
         let bounce_virt = unsafe { self.dma_virt().add(0x800) };
 

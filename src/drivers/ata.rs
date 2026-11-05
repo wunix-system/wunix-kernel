@@ -1,6 +1,5 @@
 use x86_64::instructions::port::Port;
-use crate::drivers::traits::BlockDevice;
-use crate::drivers::virtio::VirtioError;
+use crate::drivers::traits::{BlockDevice, BlockDeviceError};
 
 const ATA_DATA: u16 = 0x00;
 const ATA_SECCOUNT: u16 = 0x02;
@@ -26,7 +25,7 @@ pub struct AtaDevice {
 }
 
 impl AtaDevice {
-    fn wait_ready(&self) -> Result<(), VirtioError> {
+    fn wait_ready(&self) -> Result<(), BlockDeviceError> {
         let mut status_port = Port::<u8>::new(self.base_port + ATA_STATUS_CMD);
         for _ in 0..100_000 {
             let status = unsafe { status_port.read() };
@@ -34,14 +33,14 @@ impl AtaDevice {
                 return Ok(());
             }
             if (status & ATA_STATUS_ERR) != 0 {
-                return Err(VirtioError::IoError);
+                return Err(BlockDeviceError::IoError);
             }
             core::hint::spin_loop();
         }
-        Err(VirtioError::IoError)
+        Err(BlockDeviceError::IoError)
     }
 
-    fn wait_not_busy(&self) -> Result<(), VirtioError> {
+    fn wait_not_busy(&self) -> Result<(), BlockDeviceError> {
         let mut status_port = Port::<u8>::new(self.base_port + ATA_STATUS_CMD);
         for _ in 0..100_000 {
             let status = unsafe { status_port.read() };
@@ -50,7 +49,7 @@ impl AtaDevice {
             }
             core::hint::spin_loop();
         }
-        Err(VirtioError::IoError)
+        Err(BlockDeviceError::IoError)
     }
 
     /// Проверяет наличие и идентифицирует жесткий диск ATA
@@ -130,7 +129,7 @@ impl AtaDevice {
 }
 
 impl BlockDevice for AtaDevice {
-    fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), VirtioError> {
+    fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
         let count = buf.len() / 512;
         let mut data_port = Port::<u16>::new(self.base_port + ATA_DATA);
         let mut seccount_port = Port::<u8>::new(self.base_port + ATA_SECCOUNT);
@@ -165,7 +164,7 @@ impl BlockDevice for AtaDevice {
         Ok(())
     }
 
-    fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), VirtioError> {
+    fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
         let count = buf.len() / 512;
         let mut data_port = Port::<u16>::new(self.base_port + ATA_DATA);
         let mut seccount_port = Port::<u8>::new(self.base_port + ATA_SECCOUNT);

@@ -1,8 +1,7 @@
 use x86_64::structures::paging::PhysFrame;
 
 use super::grant_table::GRANT_TABLE;
-use crate::drivers::traits::BlockDevice;
-use crate::drivers::virtio::VirtioError;
+use crate::drivers::traits::{BlockDevice, BlockDeviceError};
 use crate::memory::{allocate_contiguous_frames, deallocate_frame, hhdm_offset};
 
 const BLKIF_OP_READ: u8 = 0;
@@ -66,7 +65,7 @@ impl XenBlkFront {
         })
     }
 
-    fn execute_io(&mut self, is_write: bool, sector: u64, buf: &mut [u8]) -> Result<(), VirtioError> {
+    fn execute_io(&mut self, is_write: bool, sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
         let op = if is_write { BLKIF_OP_WRITE } else { BLKIF_OP_READ };
         let req_ptr = self.dma_virt as *mut BlkifRequest;
         let data_virt = unsafe { self.dma_virt.add(4096) };
@@ -102,7 +101,7 @@ impl XenBlkFront {
 }
 
 impl BlockDevice for XenBlkFront {
-    fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), VirtioError> {
+    fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
         let num_sectors = buf.len() / self.sector_size;
         for s in 0..num_sectors {
             let offset = s * self.sector_size;
@@ -111,7 +110,7 @@ impl BlockDevice for XenBlkFront {
         Ok(())
     }
 
-    fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), VirtioError> {
+    fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
         let num_sectors = buf.len() / self.sector_size;
         for s in 0..num_sectors {
             let offset = s * self.sector_size;

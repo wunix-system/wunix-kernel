@@ -8,7 +8,7 @@ use super::{
     VirtioDevice, VirtioDeviceType, VirtioError, VIRTIO_STATUS_ACKNOWLEDGE, VIRTIO_STATUS_DRIVER,
     VIRTIO_STATUS_DRIVER_OK, VIRTIO_STATUS_FEATURES_OK,
 };
-use crate::drivers::InputDevice;
+use crate::drivers::{InputDevice, InputEvent};
 
 // Типы событий стандарта Linux Input Event
 pub const EV_SYN: u16 = 0x00;
@@ -22,14 +22,8 @@ pub const BTN_LEFT: u16 = 0x110;
 pub const BTN_RIGHT: u16 = 0x111;
 pub const BTN_MIDDLE: u16 = 0x112;
 
-/// Структура события ввода VirtIO-Input (8 байт)
-#[repr(C)]
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
-pub struct VirtioInputEvent {
-    pub type_: u16,
-    pub code: u16,
-    pub value: u32,
-}
+/// Событие ввода VirtIO (псевдоним нейтрального типа InputEvent)
+pub type VirtioInputEvent = InputEvent;
 
 const EVENT_BUFFER_COUNT: usize = 32;
 

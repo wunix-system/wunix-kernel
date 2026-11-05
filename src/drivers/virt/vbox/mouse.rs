@@ -1,6 +1,5 @@
-use crate::drivers::traits::InputDevice;
+use crate::drivers::traits::{InputDevice, InputEvent};
 use crate::drivers::virt::vbox::vmmdev::VBOX_GUEST;
-use crate::drivers::virtio::input::VirtioInputEvent;
 
 /// Драйвер абсолютного указателя мыши VirtualBox (Mouse Integration).
 pub struct VBoxMouseDevice {
@@ -44,7 +43,7 @@ impl InputDevice for VBoxMouseDevice {
         "VirtualBox Absolute Mouse"
     }
 
-    fn poll_event(&mut self) -> Option<VirtioInputEvent> {
+    fn poll_event(&mut self) -> Option<InputEvent> {
         self.update();
         None
     }

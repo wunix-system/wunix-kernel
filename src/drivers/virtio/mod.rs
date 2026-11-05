@@ -139,6 +139,38 @@ pub enum VirtioError {
     AllocationFailed,
 }
 
+impl From<VirtioError> for crate::drivers::traits::NetDeviceError {
+    fn from(err: VirtioError) -> Self {
+        match err {
+            VirtioError::IoError => Self::IoError,
+            VirtioError::QueueFull | VirtioError::QueueTooSmall => Self::NotReady,
+            VirtioError::Unsupported => Self::Unsupported,
+            _ => Self::IoError,
+        }
+    }
+}
+
+impl From<VirtioError> for crate::drivers::traits::BlockDeviceError {
+    fn from(err: VirtioError) -> Self {
+        match err {
+            VirtioError::IoError => Self::IoError,
+            VirtioError::QueueFull | VirtioError::QueueTooSmall => Self::NotReady,
+            VirtioError::Unsupported => Self::Unsupported,
+            _ => Self::IoError,
+        }
+    }
+}
+
+impl From<VirtioError> for crate::drivers::traits::DisplayDeviceError {
+    fn from(err: VirtioError) -> Self {
+        match err {
+            VirtioError::IoError => Self::IoError,
+            VirtioError::Unsupported => Self::Unsupported,
+            _ => Self::IoError,
+        }
+    }
+}
+
 /// Базовый интерфейс устройства VirtIO
 pub trait VirtioDevice: Send + Sync {
     fn name(&self) -> &str;

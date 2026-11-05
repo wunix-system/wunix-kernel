@@ -7,7 +7,7 @@ use super::{
     VirtioDevice, VirtioDeviceType, VirtioError, VIRTIO_STATUS_ACKNOWLEDGE, VIRTIO_STATUS_DRIVER,
     VIRTIO_STATUS_DRIVER_OK, VIRTIO_STATUS_FEATURES_OK,
 };
-use crate::drivers::traits::BlockDevice;
+use crate::drivers::traits::{BlockDevice, BlockDeviceError};
 use crate::memory::{allocate_contiguous_frames, deallocate_frame, hhdm_offset};
 
 const SCSI_READ_10: u8 = 0x28;
@@ -244,7 +244,7 @@ impl VirtioScsi {
 }
 
 impl BlockDevice for VirtioScsi {
-    fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), VirtioError> {
+    fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
         let num_sectors = (buf.len() / self.sector_size) as u32;
         let mut offset = 0;
 
@@ -258,14 +258,15 @@ impl BlockDevice for VirtioScsi {
             cdb[5] = (sector_lba & 0xFF) as u8;
             cdb[8] = 1;
 
-            self.execute_cmd(&cdb, &mut buf[offset..offset + self.sector_size], false)?;
+            self.execute_cmd(&cdb, &mut buf[offset..offset + self.sector_size], false)
+                .map_err(BlockDeviceError::from)?;
             offset += self.sector_size;
         }
 
         Ok(())
     }
 
-    fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), VirtioError> {
+    fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
         let num_sectors = (buf.len() / self.sector_size) as u32;
         let mut offset = 0;
 
@@ -282,7 +283,8 @@ impl BlockDevice for VirtioScsi {
             let mut sec_buf = [0u8; 512];
             sec_buf.copy_from_slice(&buf[offset..offset + self.sector_size]);
 
-            self.execute_cmd(&cdb, &mut sec_buf, true)?;
+            self.execute_cmd(&cdb, &mut sec_buf, true)
+                .map_err(BlockDeviceError::from)?;
             offset += self.sector_size;
         }
 

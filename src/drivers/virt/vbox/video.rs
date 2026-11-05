@@ -1,8 +1,7 @@
 use x86_64::instructions::port::Port;
 
 use crate::drivers::pci::PciDevice;
-use crate::drivers::traits::DisplayDevice;
-use crate::drivers::virtio::VirtioError;
+use crate::drivers::traits::{DisplayDevice, DisplayDeviceError};
 use crate::memory::map_kernel_mmio;
 
 const VBE_DISPI_IOPORT_INDEX: u16 = 0x01CE;
@@ -81,7 +80,7 @@ impl DisplayDevice for VBoxVideoDevice {
         }
     }
 
-    fn flush(&mut self) -> Result<(), VirtioError> {
+    fn flush(&mut self) -> Result<(), DisplayDeviceError> {
         Ok(())
     }
 }

@@ -1,8 +1,7 @@
 use x86_64::instructions::port::Port;
 
 use crate::drivers::pci::PciDevice;
-use crate::drivers::traits::DisplayDevice;
-use crate::drivers::virtio::VirtioError;
+use crate::drivers::traits::{DisplayDevice, DisplayDeviceError};
 use crate::memory::map_kernel_mmio;
 
 pub const VMWARE_PCI_VENDOR_ID: u16 = 0x15AD;
@@ -106,7 +105,7 @@ impl DisplayDevice for VmwareSvgaDevice {
         }
     }
 
-    fn flush(&mut self) -> Result<(), VirtioError> {
+    fn flush(&mut self) -> Result<(), DisplayDeviceError> {
         self.write_reg(SVGA_REG_SYNC, 1);
         let _ = self.read_reg(SVGA_REG_BUSY);
         Ok(())

@@ -64,56 +64,8 @@ pub fn sys_arch_prctl(code: u64, addr: u64) -> u64 {
     }
 }
 
-static HAS_RDRAND: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
-
-fn can_rdrand() -> bool {
-    match HAS_RDRAND.load(core::sync::atomic::Ordering::Relaxed) {
-        1 => true,
-        2 => false,
-        _ => {
-            let supported = (core::arch::x86_64::__cpuid(1).ecx & (1 << 30)) != 0;
-            HAS_RDRAND.store(if supported { 1 } else { 2 }, core::sync::atomic::Ordering::Relaxed);
-            supported
-        }
-    }
-}
-
 pub fn fill_random_bytes(slice: &mut [u8]) {
-    let mut seed = unsafe { core::arch::x86_64::_rdtsc() };
-    let mut i = 0;
-    while i < slice.len() {
-        let mut val: u64 = 0;
-        let mut ok = false;
-        if can_rdrand() {
-            let mut r_val: u64 = 0;
-            let mut r_ok: u8 = 0;
-            unsafe {
-                core::arch::asm!(
-                    "rdrand {0}",
-                    "setc {1}",
-                    out(reg) r_val,
-                    out(reg_byte) r_ok,
-                );
-            }
-            if r_ok != 0 {
-                val = r_val;
-                ok = true;
-            }
-        }
-        if !ok {
-            let tsc = unsafe { core::arch::x86_64::_rdtsc() };
-            let ticks = crate::arch::x86_64::timer::ticks();
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-            val = tsc ^ ticks.wrapping_mul(0x9E3779B97F4A7C15) ^ seed;
-            val ^= val << 13;
-            val ^= val >> 7;
-            val ^= val << 17;
-        }
-        let bytes = val.to_ne_bytes();
-        let chunk = (slice.len() - i).min(8);
-        slice[i..i + chunk].copy_from_slice(&bytes[..chunk]);
-        i += chunk;
-    }
+    crate::arch::x86_64::cpu::get_random_bytes(slice);
 }
 
 pub fn sys_getrandom(buf_ptr: u64, len: u64, _flags: u64) -> u64 {

@@ -1,6 +1,5 @@
 use crate::drivers::pci::PciDevice;
-use crate::drivers::traits::DisplayDevice;
-use crate::drivers::virtio::VirtioError;
+use crate::drivers::traits::{DisplayDevice, DisplayDeviceError};
 use crate::memory::map_kernel_mmio;
 
 pub const MICROSOFT_PCI_VENDOR_ID: u16 = 0x1414;
@@ -52,7 +51,7 @@ impl DisplayDevice for HyperVSynthVidDevice {
         }
     }
 
-    fn flush(&mut self) -> Result<(), VirtioError> {
+    fn flush(&mut self) -> Result<(), DisplayDeviceError> {
         Ok(())
     }
 }

@@ -1,6 +1,5 @@
-use crate::drivers::traits::InputDevice;
+use crate::drivers::traits::{InputDevice, InputEvent};
 use crate::drivers::virt::vmware::backdoor::{backdoor_call, VMWARE_CMD_VMMOUSE_COMMAND, VMWARE_CMD_VMMOUSE_DATA, VMWARE_CMD_VMMOUSE_STATUS};
-use crate::drivers::virtio::input::VirtioInputEvent;
 
 const VMMOUSE_READ_ID: u32 = 0x4541_4552;
 const VMMOUSE_ENABLE: u32 = 0x4542_4545;
@@ -64,7 +63,7 @@ impl InputDevice for VmwareMouseDevice {
         "VMware VMMOUSE Integration"
     }
 
-    fn poll_event(&mut self) -> Option<VirtioInputEvent> {
+    fn poll_event(&mut self) -> Option<InputEvent> {
         self.poll();
         None
     }

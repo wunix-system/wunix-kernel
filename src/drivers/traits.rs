@@ -1,5 +1,3 @@
-use crate::drivers::virtio::VirtioError;
-
 /// Ошибки канального уровня сетевого адаптера
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetDeviceError {
@@ -15,24 +13,48 @@ pub enum NetDeviceError {
     Unsupported,
 }
 
-impl From<VirtioError> for NetDeviceError {
-    fn from(err: VirtioError) -> Self {
-        match err {
-            VirtioError::IoError => NetDeviceError::IoError,
-            VirtioError::QueueFull | VirtioError::QueueTooSmall => NetDeviceError::NotReady,
-            VirtioError::Unsupported => NetDeviceError::Unsupported,
-            _ => NetDeviceError::IoError,
-        }
-    }
+/// Ошибки операций блочного накопителя
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockDeviceError {
+    /// Ошибка ввода-вывода или аппаратный таймаут контроллера
+    IoError,
+    /// Обращение за пределы доступного количества секторов накопителя
+    OutOfBounds,
+    /// Контроллер или диск занят / не готов
+    NotReady,
+    /// Операция не поддерживается данным типом устройства
+    Unsupported,
+    /// Устройство защищено от записи
+    WriteProtected,
 }
 
-/// Унифицированный интерфейс блочного накопителя (/dev/vda, ATA, NVMe)
+/// Ошибки графического адаптера
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayDeviceError {
+    /// Ошибка передачи данных в кадровый буфер или аппаратный сбой
+    IoError,
+    /// Операция не поддерживается адаптером
+    Unsupported,
+    /// Графический адаптер занят
+    NotReady,
+}
+
+/// Унифицированное событие устройства ввода (мышь, клавиатура, сенсорный экран)
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct InputEvent {
+    pub type_: u16,
+    pub code: u16,
+    pub value: u32,
+}
+
+/// Унифицированный интерфейс блочного накопителя (/dev/vda, ATA, SATA/AHCI, NVMe).
 pub trait BlockDevice: Send + Sync {
     /// Считывает последовательность 512-байтных секторов, начиная с `start_sector`
-    fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), VirtioError>;
+    fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError>;
 
     /// Записывает последовательность 512-байтных секторов, начиная с `start_sector`
-    fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), VirtioError>;
+    fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), BlockDeviceError>;
 
     /// Размер одного сектора в байтах (обычно 512)
     fn sector_size(&self) -> usize;
@@ -42,9 +64,6 @@ pub trait BlockDevice: Send + Sync {
 }
 
 /// Унифицированный интерфейс сетевого адаптера (Ethernet, Wi-Fi, Loopback).
-///
-/// Сетевой стек ядра взаимодействует только с этим типажом, не привязываясь
-/// к конкретной реализации оборудования (VirtIO, VMXNET3, NetVSC, e1000).
 pub trait NetDevice: Send + Sync {
     /// Название драйвера устройства (например, "virtio-net", "vmware-vmxnet3")
     fn driver_name(&self) -> &'static str {
@@ -61,13 +80,13 @@ pub trait NetDevice: Send + Sync {
     fn receive_packet(&mut self, buf: &mut [u8]) -> Result<Option<usize>, NetDeviceError>;
 }
 
-/// Унифицированный интерфейс устройства ввода (планшет, мышь, тачпад)
+/// Унифицированный интерфейс устройства ввода (планшет, мышь, тачпад, клавиатура).
 pub trait InputDevice: Send + Sync {
     /// Название устройства
     fn name(&self) -> &str;
 
     /// Извлекает следующее событие ввода из очереди (если доступно)
-    fn poll_event(&mut self) -> Option<crate::drivers::virtio::input::VirtioInputEvent>;
+    fn poll_event(&mut self) -> Option<InputEvent>;
 
     /// Текущие абсолютные координаты курсора (X, Y)
     fn current_coordinates(&self) -> (u32, u32);
@@ -76,7 +95,7 @@ pub trait InputDevice: Send + Sync {
     fn button_mask(&self) -> u32;
 }
 
-/// Унифицированный интерфейс графического адаптера (GPU, Framebuffer)
+/// Унифицированный интерфейс графического адаптера (GPU, Framebuffer).
 pub trait DisplayDevice: Send + Sync {
     /// Разрешение экрана (ширина, высота)
     fn resolution(&self) -> (u32, u32);
@@ -85,5 +104,5 @@ pub trait DisplayDevice: Send + Sync {
     fn draw_pixel(&mut self, x: u32, y: u32, color: u32);
 
     /// Сбрасывает измененный кадровый буфер на экран
-    fn flush(&mut self) -> Result<(), VirtioError>;
+    fn flush(&mut self) -> Result<(), DisplayDeviceError>;
 }

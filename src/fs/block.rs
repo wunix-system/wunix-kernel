@@ -4,7 +4,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::{Mutex, RwLock};
 
-use crate::drivers::{BlockDevice, VirtioError};
+use crate::drivers::{BlockDevice, BlockDeviceError};
 use crate::fs::vfs::{Inode, InodeType, Metadata, VfsError};
 use crate::serial_println;
 
@@ -131,20 +131,20 @@ impl PartitionDevice {
 }
 
 impl BlockDevice for PartitionDevice {
-    fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), VirtioError> {
+    fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
         let count = (buf.len() / 512) as u64;
         if start_sector + count > self.sector_count {
-            return Err(VirtioError::IoError);
+            return Err(BlockDeviceError::OutOfBounds);
         }
         self.parent
             .lock()
             .read_sectors(self.start_lba + start_sector, buf)
     }
 
-    fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), VirtioError> {
+    fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
         let count = (buf.len() / 512) as u64;
         if start_sector + count > self.sector_count {
-            return Err(VirtioError::IoError);
+            return Err(BlockDeviceError::OutOfBounds);
         }
         self.parent
             .lock()

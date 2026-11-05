@@ -1,6 +1,5 @@
-use crate::drivers::traits::BlockDevice;
+use crate::drivers::traits::{BlockDevice, BlockDeviceError};
 use crate::drivers::virt::hyperv::vmbus::{VmbusChannel, GUID_STORVSC};
-use crate::drivers::virtio::VirtioError;
 
 const VSTOR_OP_EXECUTE_SRB: u32 = 1;
 const VSTOR_OP_BEGIN_INIT: u32 = 2;
@@ -64,7 +63,7 @@ impl StorVscDevice {
         Ok(())
     }
 
-    fn read_capacity(&mut self) -> Result<(), VirtioError> {
+    fn read_capacity(&mut self) -> Result<(), BlockDeviceError> {
         let mut pkt = VstorPacket {
             operation: VSTOR_OP_EXECUTE_SRB,
             cdb_len: 10,
@@ -76,14 +75,14 @@ impl StorVscDevice {
         let raw = unsafe {
             core::slice::from_raw_parts(&pkt as *const _ as *const u8, core::mem::size_of::<VstorPacket>())
         };
-        self.channel.send_packet(1, raw).map_err(|_| VirtioError::IoError)?;
+        self.channel.send_packet(1, raw).map_err(|_| BlockDeviceError::IoError)?;
 
         Ok(())
     }
 }
 
 impl BlockDevice for StorVscDevice {
-    fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), VirtioError> {
+    fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
         let num_sectors = (buf.len() / self.sector_size) as u32;
 
         for s in 0..num_sectors {
@@ -104,13 +103,13 @@ impl BlockDevice for StorVscDevice {
             let raw = unsafe {
                 core::slice::from_raw_parts(&pkt as *const _ as *const u8, core::mem::size_of::<VstorPacket>())
             };
-            self.channel.send_packet(1, raw).map_err(|_| VirtioError::IoError)?;
+            self.channel.send_packet(1, raw).map_err(|_| BlockDeviceError::IoError)?;
         }
 
         Ok(())
     }
 
-    fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), VirtioError> {
+    fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
         let num_sectors = (buf.len() / self.sector_size) as u32;
 
         for s in 0..num_sectors {
@@ -131,7 +130,7 @@ impl BlockDevice for StorVscDevice {
             let raw = unsafe {
                 core::slice::from_raw_parts(&pkt as *const _ as *const u8, core::mem::size_of::<VstorPacket>())
             };
-            self.channel.send_packet(1, raw).map_err(|_| VirtioError::IoError)?;
+            self.channel.send_packet(1, raw).map_err(|_| BlockDeviceError::IoError)?;
         }
 
         Ok(())
