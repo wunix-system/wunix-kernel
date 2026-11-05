@@ -118,6 +118,8 @@ impl DeviceManager {
                 self.probe_ide(dev);
             } else if super::ahci::probe_pci(dev, self, &mut block_count) {
                 // Контроллер SATA / AHCI обработал устройство
+            } else if super::nvme::probe_pci(dev, self) {
+                // Высокоскоростной SSD накопитель NVMe (PCI Express)
             } else if virt::vbox::probe_pci(dev, self) {
                 // VirtualBox драйвер обработал устройство
             } else if virt::vmware::probe_pci(dev, self) {
