@@ -7,7 +7,7 @@ use x86_64::instructions::port::{PortReadOnly, PortWriteOnly};
 
 use crate::drivers::manager::DeviceManager;
 use crate::drivers::pci::PciDevice;
-use crate::drivers::redox_compat::Dma;
+use crate::drivers::dma::Dma;
 use crate::drivers::traits::{NetDevice, NetDeviceError};
 use crate::serial_println;
 

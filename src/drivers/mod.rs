@@ -2,14 +2,15 @@ pub mod ahci;
 pub mod ata;
 pub mod audio;
 pub mod display;
+pub mod dma;
 pub mod e1000;
 pub mod font;
+pub mod io;
 pub mod keyboard;
 pub mod manager;
 pub mod net;
 pub mod nvme;
 pub mod pci;
-pub mod redox_compat;
 pub mod registry;
 pub mod rtc;
 pub mod serial;
@@ -18,6 +19,8 @@ pub mod usb;
 pub mod virt;
 pub mod virtio;
 
+pub use dma::Dma;
+pub use io::{Io, Mmio, Pio};
 pub use manager::{
     get_audio_device, get_block_device, get_display_device, get_input_device, get_net_device, init,
     with_device_manager, DeviceManager,

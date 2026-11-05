@@ -3,10 +3,11 @@ use x86_64::structures::paging::{PhysFrame, Size4KiB};
 
 use crate::memory::{allocate_contiguous_frames, deallocate_frame, hhdm_offset};
 
-/// Умный DMA-буфер в стиле Redox OS.
-/// Выделяет физически непрерывные 4-КиБ страницы для контроллеров PCI (NVMe, AHCI, xHCI, сетевые карты),
-/// сохраняя физический адрес (передаваемый в дескрипторы устройства)
-/// и отображение в адресное пространство ядра Higher-Half (HHDM) для прямого чтения/записи процессором.
+/// Умный DMA-буфер ядра Wunix.
+/// Выделяет физически непрерывные 4-КиБ страницы для контроллеров прямого доступа к памяти
+/// (NVMe, AHCI, xHCI, сетевые адаптеры e1000/RTL8139/RTL8168/RTL8125, звуковые контроллеры HDA/AC97).
+/// Сохраняет физический адрес (передаваемый в аппаратные дескрипторы устройства)
+/// и отображение в адресное пространство ядра Higher-Half (HHDM) для чтения и записи ЦП.
 pub struct Dma<T: ?Sized> {
     phys_frame: PhysFrame<Size4KiB>,
     page_count: usize,
@@ -17,7 +18,7 @@ unsafe impl<T: ?Sized + Send> Send for Dma<T> {}
 unsafe impl<T: ?Sized + Sync> Sync for Dma<T> {}
 
 impl<T> Dma<T> {
-    /// Выделяет DMA буфер под тип T, зануляя память.
+    /// Выделяет физически непрерывный DMA-буфер под тип T и зануляет память.
     pub fn zeroed() -> Result<Self, &'static str> {
         let size = core::mem::size_of::<T>();
         let page_count = (size + 4095) / 4096;

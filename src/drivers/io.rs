@@ -2,7 +2,7 @@ use core::marker::PhantomData;
 use core::ptr::{read_volatile, write_volatile};
 use x86_64::instructions::port::{PortReadOnly, PortWriteOnly};
 
-/// Базовый типаж ввода-вывода Redox OS.
+/// Базовый типаж аппаратного ввода-вывода ядра Wunix.
 /// Унифицирует доступ к регистрам железа независимо от того,
 /// сидят ли они на портах x86 (Port I/O) или отображены в физическую память (MMIO).
 pub trait Io {
@@ -37,7 +37,6 @@ pub trait Io {
 }
 
 /// Портовый ввод-вывод (Port I/O) для архитектуры x86_64.
-/// Обёртка над инструкциями IN и OUT.
 pub struct Pio<T> {
     port: u16,
     _phantom: PhantomData<T>,
@@ -107,8 +106,8 @@ impl Io for Pio<u32> {
 }
 
 /// Отображаемый в память ввод-вывод (MMIO).
-/// Гарантирует volatile-доступ, чтобы оптимизатор LLVM не выкинул и не склеил
-/// обращения к регистрам контроллера, зависящим от внешних аппаратных событий.
+/// Гарантирует volatile-доступ, чтобы компилятор не оптимизировал
+/// обращения к регистрам контроллеров оборудования.
 #[repr(transparent)]
 pub struct Mmio<T> {
     value: T,
