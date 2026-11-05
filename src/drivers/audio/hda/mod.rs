@@ -207,13 +207,36 @@ impl AudioDevice for IntelHdaDevice {
     }
 
     fn set_volume(&mut self, volume_percent: u8) -> Result<(), AudioDeviceError> {
-        self.volume = volume_percent.min(100);
+        let vol = volume_percent.min(100);
+        self.volume = vol;
+
+        // Масштабируем 0..100% в 0..127 аппаратный шаг гейна (Gain: 0x00..0x7F)
+        let gain = ((vol as u32) * 127) / 100;
+        let payload = (1 << 15) | (1 << 13) | (1 << 12) | (gain & 0x7F);
+
+        // Посылаем верб 0x300 (SET_AMP_GAIN_MUTE) на выходные NID
+        for nid in 2..=8 {
+            self.send_verb(nid, 0x300, payload);
+        }
+
         Ok(())
     }
 
     fn is_busy(&self) -> bool {
         let s_off = self.out_stream_offset;
         let ctl = self.read_reg32(s_off + SD_CTL);
+        let sts = self.read_reg32(s_off + SD_CTL) >> 24; // Байт SD_STS находится по смещению +3
+
+        // Если бит BCIS (Buffer Completion Interrupt Status = бит 2 в STS) установлен,
+        // воспроизведение завершилось: останавливаем циклический стрим
+        if (sts & 0x04) != 0 {
+            // Сбрасываем флаг завершения записью 1 в бит BCIS
+            self.write_reg8(s_off + SD_STS, 0x04);
+            // Останавливаем стрим снятием RUN
+            self.write_reg32(s_off + SD_CTL, ctl & !SD_CTL_RUN);
+            return false;
+        }
+
         (ctl & SD_CTL_RUN) != 0
     }
 }

@@ -60,7 +60,7 @@ impl UsbStorageDevice {
         _rt_base: *mut u8,
     ) -> Result<(), &'static str> {
         // Формируем SCSI READ CAPACITY (10) (0x25)
-        let mut _cbw = UsbCbw {
+        let mut cbw = UsbCbw {
             signature: 0x43425355,
             tag: self.tag,
             data_length: 8,
@@ -69,11 +69,16 @@ impl UsbStorageDevice {
             cdb_length: 10,
             cdb: [0; 16],
         };
-        _cbw.cdb[0] = 0x25; // READ CAPACITY (10)
+        cbw.cdb[0] = 0x25; // READ CAPACITY (10)
         self.tag += 1;
 
-        // По умолчанию для USB флешек задаем размер сектора 512 и дефолтный объем
-        // (при отсутствии ответа или базовой эмуляции)
+        if let Some(ref mut bounce) = self.memory_bounce {
+            let cbw_bytes = unsafe {
+                core::slice::from_raw_parts(&cbw as *const UsbCbw as *const u8, 31)
+            };
+            bounce[..31].copy_from_slice(cbw_bytes);
+        }
+
         self.sector_size = 512;
         if self.sector_count == 0 {
             self.sector_count = 2097152; // 1 ГБ (2097152 * 512)
