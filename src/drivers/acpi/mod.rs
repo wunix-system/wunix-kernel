@@ -33,18 +33,29 @@ pub fn init() {
         }
     };
 
-    let rsdp_virt = if rsdp_raw >= 0xFFFF_8000_0000_0000 {
-        rsdp_raw
+    // Всегда получаем физический адрес RSDP и мапим его через MMIO
+    let rsdp_phys = if rsdp_raw >= 0xFFFF_8000_0000_0000 {
+        rsdp_raw.saturating_sub(crate::memory::hhdm_offset())
     } else {
-        match map_table(rsdp_raw, 64) {
-            Some(v) => v,
-            None => return,
+        rsdp_raw
+    };
+
+    if rsdp_phys == 0 {
+        crate::klog!("acpi: RSDP physical address is 0");
+        return;
+    }
+
+    let rsdp_virt = match map_table(rsdp_phys, 128) {
+        Some(v) => v,
+        None => {
+            crate::klog!("acpi: failed to map RSDP at {:#x}", rsdp_phys);
+            return;
         }
     };
 
     let rsdp = unsafe { &*(rsdp_virt as *const Rsdp) };
     if !rsdp.is_valid() {
-        crate::klog!("acpi: invalid RSDP structure at {:#x}", rsdp_raw);
+        crate::klog!("acpi: invalid RSDP structure at {:#x}", rsdp_phys);
         return;
     }
     crate::klog!("acpi: RSDP registered (revision {})", rsdp.revision);
@@ -60,11 +71,13 @@ pub fn init() {
         };
         let xsdt = unsafe { &*(xsdt_virt as *const AcpiHeader) };
         if xsdt.is_valid() && &xsdt.signature == b"XSDT" {
-            let entries_count = (xsdt.length as usize - core::mem::size_of::<AcpiHeader>()) / 8;
+            let entries_count = (xsdt.length as usize).saturating_sub(core::mem::size_of::<AcpiHeader>()) / 8;
             let entries_ptr = (xsdt_virt + core::mem::size_of::<AcpiHeader>() as u64) as *const u64;
             for i in 0..entries_count {
                 let table_phys = unsafe { *entries_ptr.add(i) };
-                process_table(table_phys, &mut fadt_found, &mut madt_found);
+                if table_phys != 0 {
+                    process_table(table_phys, &mut fadt_found, &mut madt_found);
+                }
             }
         }
     } else if rsdp.rsdt_address != 0 {
@@ -74,11 +87,13 @@ pub fn init() {
         };
         let rsdt = unsafe { &*(rsdt_virt as *const AcpiHeader) };
         if rsdt.is_valid() && &rsdt.signature == b"RSDT" {
-            let entries_count = (rsdt.length as usize - core::mem::size_of::<AcpiHeader>()) / 4;
+            let entries_count = (rsdt.length as usize).saturating_sub(core::mem::size_of::<AcpiHeader>()) / 4;
             let entries_ptr = (rsdt_virt + core::mem::size_of::<AcpiHeader>() as u64) as *const u32;
             for i in 0..entries_count {
                 let table_phys = unsafe { *entries_ptr.add(i) } as u64;
-                process_table(table_phys, &mut fadt_found, &mut madt_found);
+                if table_phys != 0 {
+                    process_table(table_phys, &mut fadt_found, &mut madt_found);
+                }
             }
         }
     }
