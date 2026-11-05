@@ -64,10 +64,11 @@ impl UhciController {
 }
 
 /// Поиск и регистрация контроллеров USB 1.1 UHCI (Class 0x0C, Subclass 0x03, ProgIF 0x00)
-pub fn probe_pci(dev: &PciDevice, _dm: &mut DeviceManager) -> bool {
+pub fn probe_pci(dev: &mut PciDevice, _dm: &mut DeviceManager) -> bool {
     if dev.class_code == 0x0C && dev.subclass == 0x03 && dev.prog_if == 0x00 {
         match UhciController::new(dev) {
             Ok(_) => {
+                dev.driver_name = Some("uhci");
                 serial_println!(
                     "uhci: registered USB 1.1 Host Controller ({:04x}:{:04x})",
                     dev.vendor_id, dev.device_id

@@ -521,6 +521,14 @@ pub fn key_queue_len() -> usize {
     interrupts::without_interrupts(|| KEY_QUEUE.lock().len())
 }
 
+/// Помещает символ в очередь клавиатуры ядра (используется USB HID клавиатурами)
+pub fn push_char(ch: char) {
+    interrupts::without_interrupts(|| {
+        let mut queue = KEY_QUEUE.lock();
+        let _ = queue.push(ch);
+    });
+}
+
 // Неблокирующее чтение символа из очереди.
 // Отключение прерываний гарантирует защиту от взаимной блокировки (дедлока),
 // если в этот момент сработает прерывание IRQ1 на том же ядре.

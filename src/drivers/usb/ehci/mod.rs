@@ -104,10 +104,11 @@ impl EhciController {
 }
 
 /// Поиск и регистрация контроллеров USB 2.0 EHCI (Class 0x0C, Subclass 0x03, ProgIF 0x20)
-pub fn probe_pci(dev: &PciDevice, _dm: &mut DeviceManager) -> bool {
+pub fn probe_pci(dev: &mut PciDevice, _dm: &mut DeviceManager) -> bool {
     if dev.class_code == 0x0C && dev.subclass == 0x03 && dev.prog_if == 0x20 {
         match EhciController::new(dev) {
             Ok(ehci) => {
+                dev.driver_name = Some("ehci");
                 serial_println!(
                     "ehci: registered USB 2.0 Host Controller ({:04x}:{:04x}, {} ports)",
                     dev.vendor_id, dev.device_id, ehci.port_count

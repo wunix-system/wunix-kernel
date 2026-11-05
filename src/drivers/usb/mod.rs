@@ -1,17 +1,21 @@
 pub mod classes;
 pub mod ehci;
+pub mod ohci;
 pub mod uhci;
 pub mod xhci;
 
 use crate::drivers::manager::DeviceManager;
 use crate::drivers::pci::PciDevice;
 
-/// Проверяет, является ли PCI устройство хост-контроллером USB (xHCI, EHCI, UHCI)
-pub fn probe_pci(dev: &PciDevice, dm: &mut DeviceManager) -> bool {
-    if xhci::probe_pci(dev, dm) {
+/// Проверяет, является ли PCI устройство хост-контроллером USB (xHCI, EHCI, OHCI, UHCI)
+pub fn probe_pci(dev: &mut PciDevice, dm: &mut DeviceManager, block_count: &mut usize) -> bool {
+    if xhci::probe_pci(dev, dm, block_count) {
         return true;
     }
     if ehci::probe_pci(dev, dm) {
+        return true;
+    }
+    if ohci::probe_pci(dev, dm) {
         return true;
     }
     if uhci::probe_pci(dev, dm) {
