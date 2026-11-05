@@ -21,9 +21,6 @@ static MOUNT_TABLE: RwLock<Vec<MountEntry>> = RwLock::new(Vec::new());
 /// Монтирует файловую систему раздела в указанную точку монтирования VFS
 pub fn mount(source: &str, target: &str, fstype: &str, _flags: u64) -> Result<(), VfsError> {
     let norm_target = normalize_path(target);
-    if norm_target == "/" {
-        return Err(VfsError::AlreadyExists);
-    }
 
     let fs: Arc<dyn FileSystem> = if fstype == "vboxsf" {
         // Общие папки VirtualBox обращаются напрямую к гипервизору без блочного диска
@@ -47,8 +44,10 @@ pub fn mount(source: &str, target: &str, fstype: &str, _flags: u64) -> Result<()
         }
     };
 
-    // Создаем директорию точки монтирования, если она еще не создана
-    let _ = crate::fs::mkdir_p(&norm_target);
+    // Создаем директорию точки монтирования (если это не корень)
+    if norm_target != "/" {
+        let _ = crate::fs::mkdir_p(&norm_target);
+    }
 
     let mut table = MOUNT_TABLE.write();
     // Проверяем, не смонтирована ли уже эта точка
@@ -88,6 +87,11 @@ pub fn umount(target: &str, _flags: i32) -> Result<(), VfsError> {
 /// Возвращает файловую систему и относительный путь внутри неё.
 pub fn find_mount(path: &str) -> Option<(Arc<dyn FileSystem>, String)> {
     let norm = normalize_path(path);
+    // Системные псевдофайловые системы ядра обслуживаются в памяти (RamFS)
+    if norm.starts_with("/proc") || norm.starts_with("/sys") || norm.starts_with("/dev") {
+        return None;
+    }
+
     let table = MOUNT_TABLE.read();
 
     let mut best_match: Option<(Arc<dyn FileSystem>, String)> = None;
@@ -95,6 +99,14 @@ pub fn find_mount(path: &str) -> Option<(Arc<dyn FileSystem>, String)> {
 
     for entry in table.iter() {
         let tgt = &entry.target;
+        if tgt == "/" {
+            if longest_len == 0 {
+                let rest = norm.trim_start_matches('/');
+                best_match = Some((entry.fs.clone(), String::from(rest)));
+            }
+            continue;
+        }
+
         if norm == *tgt {
             return Some((entry.fs.clone(), String::new()));
         }

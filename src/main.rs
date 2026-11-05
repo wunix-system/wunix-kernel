@@ -187,10 +187,16 @@ pub extern "C" fn _start() -> ! {
 
     wunix_kernel::fs::init(initramfs_data);
 
-    // Фиксация параметров командной строки загрузчика в /proc/cmdline
+    // Фиксация параметров командной строки загрузчика в /proc/cmdline и монтирование root раздела (при mode=disk)
     if let Some(file_response) = EXECUTABLE_FILE_REQUEST.response() {
         let cmdline = file_response.executable_file().cmdline();
         let _ = wunix_kernel::fs::ops::write_file_ramfs("/proc/cmdline", cmdline.as_bytes());
+
+        for token in cmdline.split_whitespace() {
+            if let Some(root_dev) = token.strip_prefix("root=") {
+                let _ = wunix_kernel::fs::mount(root_dev, "/", "fat32", 0);
+            }
+        }
     }
 
     // Инициализация сетевого стека ядра smoltcp поверх зарегистрированного сетевого адаптера
