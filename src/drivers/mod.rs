@@ -1,5 +1,6 @@
 pub mod ahci;
 pub mod ata;
+pub mod audio;
 pub mod display;
 pub mod e1000;
 pub mod font;
@@ -18,13 +19,13 @@ pub mod virt;
 pub mod virtio;
 
 pub use manager::{
-    get_block_device, get_display_device, get_input_device, get_net_device, init,
+    get_audio_device, get_block_device, get_display_device, get_input_device, get_net_device, init,
     with_device_manager, DeviceManager,
 };
 pub use registry::{list_drivers, DriverInfo};
 pub use traits::{
-    BlockDevice, BlockDeviceError, DisplayDevice, DisplayDeviceError, InputDevice, InputEvent,
-    NetDevice, NetDeviceError,
+    AudioDevice, AudioDeviceError, BlockDevice, BlockDeviceError, DisplayDevice,
+    DisplayDeviceError, InputDevice, InputEvent, NetDevice, NetDeviceError,
 };
 pub use virtio::VirtioError;
 

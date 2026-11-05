@@ -39,6 +39,17 @@ pub enum DisplayDeviceError {
     NotReady,
 }
 
+/// Ошибки воспроизведения звука
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioDeviceError {
+    /// Ошибка передачи данных через DMA или таймаут контроллера
+    IoError,
+    /// Операция не поддерживается данным типом звукового чипа
+    Unsupported,
+    /// Звуковой буфер или кольцо воспроизведения переполнено
+    NotReady,
+}
+
 /// Унифицированное событие устройства ввода (мышь, клавиатура, сенсорный экран)
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
@@ -106,3 +117,19 @@ pub trait DisplayDevice: Send + Sync {
     /// Сбрасывает измененный кадровый буфер на экран
     fn flush(&mut self) -> Result<(), DisplayDeviceError>;
 }
+
+/// Унифицированный интерфейс звукового контроллера (Intel HDA, AC'97, SB16).
+pub trait AudioDevice: Send + Sync {
+    /// Название звукового устройства
+    fn device_name(&self) -> &'static str;
+
+    /// Воспроизводит порцию PCM аудиоданных (16-бит, 44.1/48 кГц stereo)
+    fn play_pcm(&mut self, samples: &[u8]) -> Result<(), AudioDeviceError>;
+
+    /// Устанавливает громкость воспроизведения (0..100%)
+    fn set_volume(&mut self, volume_percent: u8) -> Result<(), AudioDeviceError>;
+
+    /// Проверяет, занят ли аудиовыход воспроизведением
+    fn is_busy(&self) -> bool;
+}
+

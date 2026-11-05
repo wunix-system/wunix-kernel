@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use spin::{Mutex, RwLock};
 
 use crate::drivers::pci;
-use crate::drivers::traits::{BlockDevice, DisplayDevice, InputDevice, NetDevice};
+use crate::drivers::traits::{AudioDevice, BlockDevice, DisplayDevice, InputDevice, NetDevice};
 use crate::drivers::virt::{self, HypervisorType};
 use crate::drivers::virtio;
 use crate::serial_println;
@@ -18,6 +18,7 @@ pub struct DeviceManager {
     pub(crate) net_devices: Vec<Arc<Mutex<dyn NetDevice>>>,
     pub(crate) input_devices: Vec<Arc<Mutex<dyn InputDevice>>>,
     pub(crate) display_devices: Vec<Arc<Mutex<dyn DisplayDevice>>>,
+    pub(crate) audio_devices: Vec<Arc<Mutex<dyn AudioDevice>>>,
 }
 
 impl DeviceManager {
@@ -28,6 +29,7 @@ impl DeviceManager {
             net_devices: Vec::new(),
             input_devices: Vec::new(),
             display_devices: Vec::new(),
+            audio_devices: Vec::new(),
         }
     }
 
@@ -51,6 +53,11 @@ impl DeviceManager {
         self.display_devices.push(dev);
     }
 
+    /// Регистрирует звуковое устройство
+    pub fn register_audio_device(&mut self, dev: Arc<Mutex<dyn AudioDevice>>) {
+        self.audio_devices.push(dev);
+    }
+
     /// Возвращает блочное устройство по системному имени
     pub fn get_block_device(&self, name: &str) -> Option<Arc<Mutex<dyn BlockDevice>>> {
         self.block_devices.get(name).cloned()
@@ -69,6 +76,11 @@ impl DeviceManager {
     /// Возвращает графическое устройство по его индексу
     pub fn get_display_device(&self, index: usize) -> Option<Arc<Mutex<dyn DisplayDevice>>> {
         self.display_devices.get(index).cloned()
+    }
+
+    /// Возвращает звуковое устройство по его индексу
+    pub fn get_audio_device(&self, index: usize) -> Option<Arc<Mutex<dyn AudioDevice>>> {
+        self.audio_devices.get(index).cloned()
     }
 
     /// Список всех обнаруженных устройств на шине PCI
@@ -94,6 +106,11 @@ impl DeviceManager {
     /// Количество активных видеоадаптеров
     pub fn display_device_count(&self) -> usize {
         self.display_devices.len()
+    }
+
+    /// Количество активных звуковых контроллеров
+    pub fn audio_device_count(&self) -> usize {
+        self.audio_devices.len()
     }
 
     /// Сканирует шину PCI, инициализирует контроллеры и интеграции сред виртуализации.
@@ -134,6 +151,8 @@ impl DeviceManager {
                 // Сетевые контроллеры Realtek RTL8139 / RTL8168
             } else if super::usb::probe_pci(dev, self) {
                 // Хост-контроллеры шины USB (xHCI, EHCI, UHCI)
+            } else if super::audio::probe_pci(dev, self) {
+                // Звуковые контроллеры Intel HDA и AC'97
             } else if let Some(nic) = super::e1000::probe_pci(dev) {
                 let mac = nic.mac_address();
                 serial_println!(
@@ -146,6 +165,7 @@ impl DeviceManager {
 
         self.pci_devices = pci_list;
         self.init_hypervisor_integrations(hv);
+        super::audio::init_legacy(self);
     }
 
     /// Инициализация обнаруженного контроллера IDE/ATA
@@ -312,6 +332,12 @@ pub fn get_input_device(index: usize) -> Option<Arc<Mutex<dyn InputDevice>>> {
 pub fn get_display_device(index: usize) -> Option<Arc<Mutex<dyn DisplayDevice>>> {
     let guard = DEVICE_MANAGER.read();
     guard.as_ref()?.get_display_device(index)
+}
+
+/// Получает звуковое устройство по его номеру
+pub fn get_audio_device(index: usize) -> Option<Arc<Mutex<dyn AudioDevice>>> {
+    let guard = DEVICE_MANAGER.read();
+    guard.as_ref()?.get_audio_device(index)
 }
 
 /// Предоставляет доступ к глобальному DeviceManager для чтения информации
