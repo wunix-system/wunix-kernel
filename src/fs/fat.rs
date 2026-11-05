@@ -280,6 +280,8 @@ pub fn lfn_checksum(name: &[u8; 8], ext: &[u8; 3]) -> u8 {
 
 #[derive(Clone, Debug)]
 pub struct ParsedDirEntry {
+    pub cluster: u32,
+    pub slot_offset: usize,
     pub offset: usize,
     pub raw: RawDirEntry,
     pub lfn: Option<String>,
@@ -368,8 +370,8 @@ pub struct Fat32FileInode {
     pub inner: Arc<Fat32Inner>,
     pub start_cluster: Mutex<u32>,
     pub file_size: Mutex<usize>,
-    pub parent_cluster: u32,
-    pub dir_entry_offset: usize,
+    pub dir_cluster: u32,
+    pub dir_slot_offset: usize,
     pub inode_id: u64,
     pub cluster_chain: Mutex<Vec<u32>>,
 }
@@ -485,23 +487,18 @@ impl Inode for Fat32FileInode {
             *size_guard = end_offset;
 
             // Обновляем размер файла и начальный кластер в записи родительского каталога на диске
-            if self.parent_cluster >= 2 {
-                let parent_chain = self.inner.get_cluster_chain(self.parent_cluster)?;
-                let clus_idx = self.dir_entry_offset / clus_size;
-                let offset_in_clus = self.dir_entry_offset % clus_size;
+            if self.dir_cluster >= 2 {
+                let mut dir_buf = alloc::vec![0u8; clus_size];
+                if self.inner.read_cluster(self.dir_cluster, &mut dir_buf).is_ok() {
+                    if self.dir_slot_offset + core::mem::size_of::<RawDirEntry>() <= clus_size {
+                        let entry_ptr = unsafe {
+                            &mut *(dir_buf.as_mut_ptr().add(self.dir_slot_offset) as *mut RawDirEntry)
+                        };
+                        entry_ptr.file_size = end_offset as u32;
+                        entry_ptr.set_first_cluster(start_clus);
 
-                if clus_idx < parent_chain.len() {
-                    let mut dir_buf = alloc::vec![0u8; clus_size];
-                    let dir_clus = parent_chain[clus_idx];
-                    let _ = self.inner.read_cluster(dir_clus, &mut dir_buf);
-
-                    let entry_ptr = unsafe {
-                        &mut *(dir_buf.as_mut_ptr().add(offset_in_clus) as *mut RawDirEntry)
-                    };
-                    entry_ptr.file_size = end_offset as u32;
-                    entry_ptr.set_first_cluster(start_clus);
-
-                    let _ = self.inner.write_cluster(dir_clus, &dir_buf);
+                        let _ = self.inner.write_cluster(self.dir_cluster, &dir_buf);
+                    }
                 }
             }
         }
@@ -518,23 +515,22 @@ impl Inode for Fat32FileInode {
         let start_clus = *self.start_cluster.lock();
         let clus_size = self.inner.cluster_bytes;
 
-        if self.parent_cluster >= 2 {
-            let parent_chain = self.inner.get_cluster_chain(self.parent_cluster)?;
-            let clus_idx = self.dir_entry_offset / clus_size;
-            let offset_in_clus = self.dir_entry_offset % clus_size;
-
-            if clus_idx < parent_chain.len() {
-                let mut dir_buf = alloc::vec![0u8; clus_size];
-                let dir_clus = parent_chain[clus_idx];
-                let _ = self.inner.read_cluster(dir_clus, &mut dir_buf);
-
-                let entry_ptr = unsafe {
-                    &mut *(dir_buf.as_mut_ptr().add(offset_in_clus) as *mut RawDirEntry)
-                };
-                entry_ptr.file_size = len as u32;
-                entry_ptr.set_first_cluster(start_clus);
-
-                let _ = self.inner.write_cluster(dir_clus, &dir_buf);
+        if self.dir_cluster >= 2 {
+            let mut dir_buf = alloc::vec![0u8; clus_size];
+            if self.inner.read_cluster(self.dir_cluster, &mut dir_buf).is_ok() {
+                if self.dir_slot_offset + core::mem::size_of::<RawDirEntry>() <= clus_size {
+                    let entry_ptr = unsafe {
+                        &mut *(dir_buf.as_mut_ptr().add(self.dir_slot_offset) as *mut RawDirEntry)
+                    };
+                    entry_ptr.file_size = len as u32;
+                    if len == 0 {
+                        entry_ptr.set_first_cluster(0);
+                        *self.start_cluster.lock() = 0;
+                    } else {
+                        entry_ptr.set_first_cluster(start_clus);
+                    }
+                    let _ = self.inner.write_cluster(self.dir_cluster, &dir_buf);
+                }
             }
         }
         Ok(())
@@ -626,6 +622,8 @@ impl Fat32DirInode {
                 lfn_chars.fill(0);
 
                 list.push(ParsedDirEntry {
+                    cluster: c,
+                    slot_offset: offset,
                     offset: global_offset,
                     raw,
                     lfn: lfn_name,
@@ -682,8 +680,8 @@ impl Inode for Fat32DirInode {
                         inner: self.inner.clone(),
                         start_cluster: Mutex::new(first_clus),
                         file_size: Mutex::new(entry.raw.file_size as usize),
-                        parent_cluster: self.cluster,
-                        dir_entry_offset: entry.offset,
+                        dir_cluster: entry.cluster,
+                        dir_slot_offset: entry.slot_offset,
                         inode_id: (first_clus as u64) + 2000,
                         cluster_chain: Mutex::new(alloc::vec::Vec::new()),
                     }));
@@ -755,14 +753,15 @@ impl Inode for Fat32DirInode {
         }
 
         if !found {
-            // Выделяем новый кластер для каталога
+            // Выделяем новый кластер для каталога и инициализируем нулями
             let new_c = self.inner.alloc_cluster()?;
             let last = *chain.last().unwrap_or(&self.cluster);
             self.inner.set_fat_entry(last, new_c)?;
             chain.push(new_c);
             target_clus = new_c;
             target_slot_idx = 0;
-            self.inner.read_cluster(target_clus, &mut clus_buf)?;
+            clus_buf.fill(0);
+            self.inner.write_cluster(target_clus, &clus_buf)?;
         }
 
         // Генерируем 8.3 короткое имя файла с суффиксом ~1
@@ -825,7 +824,45 @@ impl Inode for Fat32DirInode {
         // 2. Записываем стандартную запись каталога RawDirEntry
         let is_dir = itype == InodeType::Directory;
         let first_clus = if is_dir {
-            self.inner.alloc_cluster()?
+            let clus = self.inner.alloc_cluster()?;
+            let mut new_dir_buf = alloc::vec![0u8; self.inner.cluster_bytes];
+            let dot_raw = RawDirEntry {
+                name: *b".       ",
+                ext: *b"   ",
+                attr: FAT32_ATTR_DIRECTORY,
+                reserved: 0,
+                ctime_tenth: 0,
+                ctime: 0,
+                cdate: 0x5500,
+                adate: 0x5500,
+                cluster_high: ((clus >> 16) & 0xFFFF) as u16,
+                mtime: 0,
+                mdate: 0x5500,
+                cluster_low: (clus & 0xFFFF) as u16,
+                file_size: 0,
+            };
+            let dotdot_raw = RawDirEntry {
+                name: *b"..      ",
+                ext: *b"   ",
+                attr: FAT32_ATTR_DIRECTORY,
+                reserved: 0,
+                ctime_tenth: 0,
+                ctime: 0,
+                cdate: 0x5500,
+                adate: 0x5500,
+                cluster_high: ((self.cluster >> 16) & 0xFFFF) as u16,
+                mtime: 0,
+                mdate: 0x5500,
+                cluster_low: (self.cluster & 0xFFFF) as u16,
+                file_size: 0,
+            };
+            unsafe {
+                let ptr = new_dir_buf.as_mut_ptr() as *mut RawDirEntry;
+                core::ptr::write(ptr, dot_raw);
+                core::ptr::write(ptr.add(1), dotdot_raw);
+            }
+            self.inner.write_cluster(clus, &new_dir_buf)?;
+            clus
         } else {
             0
         };
@@ -871,8 +908,8 @@ impl Inode for Fat32DirInode {
                 inner: self.inner.clone(),
                 start_cluster: Mutex::new(first_clus),
                 file_size: Mutex::new(0),
-                parent_cluster: self.cluster,
-                dir_entry_offset: raw_dir_offset,
+                dir_cluster: target_clus,
+                dir_slot_offset: raw_dir_offset,
                 inode_id: (first_clus as u64) + 2000,
                 cluster_chain: Mutex::new(alloc::vec::Vec::new()),
             }))

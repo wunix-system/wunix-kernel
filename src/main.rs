@@ -194,7 +194,23 @@ pub extern "C" fn _start() -> ! {
 
         for token in cmdline.split_whitespace() {
             if let Some(root_dev) = token.strip_prefix("root=") {
-                let _ = wunix_kernel::fs::mount(root_dev, "/", "fat32", 0);
+                match wunix_kernel::fs::mount(root_dev, "/", "fat32", 0) {
+                    Ok(_) => {
+                        klog!(
+                            "  {}: {} смонтирован в / (FAT32)",
+                            t("Корневой раздел", "Root partition"),
+                            root_dev
+                        );
+                    }
+                    Err(e) => {
+                        klog!(
+                            "  {}: ошибка монтирования {} в /: {:?}",
+                            t("Корневой раздел", "Root partition"),
+                            root_dev,
+                            e
+                        );
+                    }
+                }
             }
         }
     }
