@@ -132,6 +132,8 @@ impl DeviceManager {
                 // Xen Platform Device (HVM Unplug)
             } else if super::net::probe_pci(dev, self) {
                 // Сетевые контроллеры Realtek RTL8139 / RTL8168
+            } else if super::usb::probe_pci(dev, self) {
+                // Хост-контроллеры шины USB (xHCI, EHCI, UHCI)
             } else if let Some(nic) = super::e1000::probe_pci(dev) {
                 let mac = nic.mac_address();
                 serial_println!(

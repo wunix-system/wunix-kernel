@@ -13,6 +13,7 @@ pub mod registry;
 pub mod rtc;
 pub mod serial;
 pub mod traits;
+pub mod usb;
 pub mod virt;
 pub mod virtio;
 
