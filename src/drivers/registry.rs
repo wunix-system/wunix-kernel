@@ -237,6 +237,70 @@ pub fn list_drivers() -> Vec<DriverInfo> {
             });
         }
 
+        let ixgbe_c = count_pci("intel-ixgbe");
+        if ixgbe_c > 0 {
+            list.push(DriverInfo {
+                name: "ixgbe",
+                description: "Intel 82599/X540/X550 10 Gigabit Ethernet",
+                category: "net",
+                version: "1.0.0",
+                author: "Wunix Kernel Team",
+                license: "MIT/Apache-2.0",
+                devices_count: ixgbe_c,
+                status: "Live",
+                size: 40960,
+                dependencies: "pci_core",
+            });
+        }
+
+        let tg3_c = count_pci("broadcom-tg3");
+        if tg3_c > 0 {
+            list.push(DriverInfo {
+                name: "tg3",
+                description: "Broadcom NetXtreme Gigabit Ethernet",
+                category: "net",
+                version: "1.0.0",
+                author: "Wunix Kernel Team",
+                license: "MIT/Apache-2.0",
+                devices_count: tg3_c,
+                status: "Live",
+                size: 36864,
+                dependencies: "pci_core",
+            });
+        }
+
+        let iwl_c = count_pci("intel-iwlwifi");
+        if iwl_c > 0 {
+            list.push(DriverInfo {
+                name: "iwlwifi",
+                description: "Intel Wireless Wi-Fi 6/6E/7 (AX200/AX210)",
+                category: "net",
+                version: "1.0.0",
+                author: "Wunix Kernel Team",
+                license: "MIT/Apache-2.0",
+                devices_count: iwl_c,
+                status: "Live",
+                size: 49152,
+                dependencies: "pci_core",
+            });
+        }
+
+        let sdhci_c = count_pci("sdhci");
+        if sdhci_c > 0 {
+            list.push(DriverInfo {
+                name: "sdhci",
+                description: "SD Host Controller (SD/eMMC Card Reader)",
+                category: "block",
+                version: "1.0.0",
+                author: "Wunix Kernel Team",
+                license: "MIT/Apache-2.0",
+                devices_count: sdhci_c,
+                status: "Live",
+                size: 28672,
+                dependencies: "pci_core",
+            });
+        }
+
         // Драйверы шины USB
         let xhci_c = count_pci("xhci");
         if xhci_c > 0 {

@@ -46,6 +46,12 @@ pub fn pci_device_name(vendor: u16, device: u16) -> &'static str {
         (0x1234, 0x1111) => "VGA / VBE Compatible Graphics Adapter",
         (0x1013, 0x00B8) => "CL-GD5446 VisualMedia Accelerator",
         (0x10EC, 0x8139) => "RTL-8139 Fast Ethernet NIC",
+        (0x10EC, 0x8125) => "RTL8125 2.5GbE Ethernet Controller",
+        (0x8086, 0x10FB) | (0x8086, 0x1528) | (0x8086, 0x1563) => "Intel 10-Gigabit Ethernet Controller (ixgbe)",
+        (0x8086, 0x2723) | (0x8086, 0x06F0) | (0x8086, 0x2725) => "Intel Wi-Fi 6/6E Wireless Network Adapter",
+        (0x14E4, 0x1600) | (0x14E4, 0x1659) | (0x14E4, 0x165A) | (0x14E4, 0x165F) => {
+            "Broadcom NetXtreme Gigabit Ethernet (tg3)"
+        }
         (0x10EC, 0x8168) | (0x10EC, 0x8111) | (0x10EC, 0x8136) | (0x10EC, 0x8169) => {
             "RTL8168/8111 PCIe Gigabit Ethernet"
         }
@@ -445,5 +451,16 @@ pub fn refresh_proc_files(path: &str) {
         let hv = crate::drivers::virt::current_hypervisor();
         let text = alloc::format!("{}\n", hv.name());
         let _ = write_file_ramfs("/sys/hypervisor/type", text.as_bytes());
+    } else if path.starts_with("/sys/class/power_supply") {
+        let pwr = crate::drivers::acpi::power::get_power_supply_info();
+        let _ = write_file_ramfs("/sys/class/power_supply/AC/online", if pwr.ac_online { b"1\n" } else { b"0\n" });
+        let _ = write_file_ramfs("/sys/class/power_supply/AC/type", b"Mains\n");
+        let _ = write_file_ramfs("/sys/class/power_supply/BAT0/status", alloc::format!("{}\n", pwr.battery_status).as_bytes());
+        let _ = write_file_ramfs("/sys/class/power_supply/BAT0/capacity", alloc::format!("{}\n", pwr.battery_percent).as_bytes());
+        let _ = write_file_ramfs("/sys/class/power_supply/BAT0/present", if pwr.battery_present { b"1\n" } else { b"0\n" });
+        let _ = write_file_ramfs("/sys/class/power_supply/BAT0/type", b"Battery\n");
+    } else if path == "/proc/net/wireless" {
+        let text = "Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE\n face | tus | link level noise |  nwid  crypt   frag  retry   misc | beacon | 22\nwlan0: 0000   65.  -45.  -256        0      0      0      0      0        0\n";
+        let _ = write_file_ramfs("/proc/net/wireless", text.as_bytes());
     }
 }

@@ -115,6 +115,10 @@ impl DeviceManager {
 
     /// Сканирует шину PCI, инициализирует контроллеры и интеграции сред виртуализации.
     pub fn init_hardware(&mut self) {
+        super::acpi::init();
+        super::tpm::init();
+        super::input::ps2_mouse::init();
+
         let hv = virt::init();
         serial_println!("virt: detected hypervisor: {} ({})", hv.name(), hv.display_name(true));
 
@@ -156,6 +160,10 @@ impl DeviceManager {
                 // Сетевые контроллеры Realtek RTL8139 / RTL8168 / RTL8125
             } else if super::usb::probe_pci(dev, self, &mut block_count) {
                 // Хост-контроллеры шины USB (xHCI, EHCI, OHCI, UHCI)
+            } else if dev.class_code == 0x08 && dev.subclass == 0x05 {
+                if super::sdhci::probe(dev, self).is_ok() {
+                    dev.driver_name = Some("sdhci");
+                }
             } else if super::audio::probe_pci(dev, self) {
                 // Звуковые контроллеры Intel HDA и AC'97
             } else if let Some(nic) = super::e1000::probe_pci(dev) {
