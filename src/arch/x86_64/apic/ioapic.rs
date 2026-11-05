@@ -1,13 +1,20 @@
 use core::sync::atomic::{AtomicU64, Ordering};
+use spin::Mutex;
 use crate::memory::hhdm_offset;
 
 static IOAPIC_BASE_PHYS: AtomicU64 = AtomicU64::new(0xFEC0_0000);
+static IOAPIC_MMIO_VIRT: AtomicU64 = AtomicU64::new(0);
+static IOAPIC_LOCK: Mutex<()> = Mutex::new(());
 
 const _IOREGSEL: usize = 0x00;
 const IOWIN: usize = 0x10;
 
 unsafe fn read_reg(reg: u8) -> u32 {
-    let base = hhdm_offset() + IOAPIC_BASE_PHYS.load(Ordering::Relaxed);
+    let mut base = IOAPIC_MMIO_VIRT.load(Ordering::Relaxed);
+    if base == 0 {
+        base = hhdm_offset() + IOAPIC_BASE_PHYS.load(Ordering::Relaxed);
+    }
+    let _lock = IOAPIC_LOCK.lock();
     unsafe {
         core::ptr::write_volatile(base as *mut u32, reg as u32);
         core::ptr::read_volatile((base + IOWIN as u64) as *const u32)
@@ -15,7 +22,11 @@ unsafe fn read_reg(reg: u8) -> u32 {
 }
 
 unsafe fn write_reg(reg: u8, val: u32) {
-    let base = hhdm_offset() + IOAPIC_BASE_PHYS.load(Ordering::Relaxed);
+    let mut base = IOAPIC_MMIO_VIRT.load(Ordering::Relaxed);
+    if base == 0 {
+        base = hhdm_offset() + IOAPIC_BASE_PHYS.load(Ordering::Relaxed);
+    }
+    let _lock = IOAPIC_LOCK.lock();
     unsafe {
         core::ptr::write_volatile(base as *mut u32, reg as u32);
         core::ptr::write_volatile((base + IOWIN as u64) as *mut u32, val);
@@ -24,9 +35,14 @@ unsafe fn write_reg(reg: u8, val: u32) {
 
 /// Инициализирует I/O APIC контроллер по физическому адресу
 pub fn init(phys_addr: u64) {
-    if phys_addr != 0 {
-        IOAPIC_BASE_PHYS.store(phys_addr, Ordering::Relaxed);
-    }
+    let paddr = if phys_addr != 0 { phys_addr } else { 0xFEC0_0000 };
+    IOAPIC_BASE_PHYS.store(paddr, Ordering::Relaxed);
+
+    let mmio_virt = match crate::memory::map_kernel_mmio(paddr, 4096) {
+        Ok(v) => v.as_u64(),
+        Err(_) => hhdm_offset() + paddr,
+    };
+    IOAPIC_MMIO_VIRT.store(mmio_virt, Ordering::Relaxed);
 
     let id = unsafe { (read_reg(0x00) >> 24) & 0x0F };
     let ver_reg = unsafe { read_reg(0x01) };

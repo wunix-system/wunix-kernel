@@ -387,6 +387,8 @@ impl XhciController {
     }
 }
 
+pub static XHCI_INSTANCES: Mutex<alloc::vec::Vec<XhciController>> = Mutex::new(alloc::vec::Vec::new());
+
 pub fn probe_pci(dev: &mut PciDevice, dm: &mut DeviceManager, block_count: &mut usize) -> bool {
     if dev.class_code == 0x0C && dev.subclass == 0x03 && dev.prog_if == 0x30 {
         match XhciController::new(dev) {
@@ -397,6 +399,7 @@ pub fn probe_pci(dev: &mut PciDevice, dm: &mut DeviceManager, block_count: &mut 
                     dev.vendor_id, dev.device_id, xhci.max_ports
                 );
                 xhci.probe_devices(dm, block_count);
+                XHCI_INSTANCES.lock().push(xhci);
                 return true;
             }
             Err(e) => {

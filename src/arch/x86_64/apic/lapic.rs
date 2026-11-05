@@ -3,6 +3,7 @@ use crate::memory::hhdm_offset;
 
 // Базовый адрес Local APIC в физической памяти (по умолчанию 0xFEE00000)
 static LAPIC_BASE_PHYS: AtomicU64 = AtomicU64::new(0xFEE0_0000);
+static LAPIC_MMIO_VIRT: AtomicU64 = AtomicU64::new(0);
 
 // Смещения регистров Local APIC
 const LAPIC_ID: usize = 0x020;
@@ -16,24 +17,31 @@ const _LAPIC_LVT_TIMER: usize = 0x320;
 const LAPIC_LVT_ERROR: usize = 0x370;
 
 unsafe fn read_reg(offset: usize) -> u32 {
-    let base = hhdm_offset() + LAPIC_BASE_PHYS.load(Ordering::Relaxed);
-    unsafe {
-        core::ptr::read_volatile((base + offset as u64) as *const u32)
+    let mut base = LAPIC_MMIO_VIRT.load(Ordering::Relaxed);
+    if base == 0 {
+        base = hhdm_offset() + LAPIC_BASE_PHYS.load(Ordering::Relaxed);
     }
+    unsafe { core::ptr::read_volatile((base + offset as u64) as *const u32) }
 }
 
 unsafe fn write_reg(offset: usize, value: u32) {
-    let base = hhdm_offset() + LAPIC_BASE_PHYS.load(Ordering::Relaxed);
-    unsafe {
-        core::ptr::write_volatile((base + offset as u64) as *mut u32, value);
+    let mut base = LAPIC_MMIO_VIRT.load(Ordering::Relaxed);
+    if base == 0 {
+        base = hhdm_offset() + LAPIC_BASE_PHYS.load(Ordering::Relaxed);
     }
+    unsafe { core::ptr::write_volatile((base + offset as u64) as *mut u32, value); }
 }
 
 /// Инициализирует Local APIC текущего процессорного ядра
 pub fn init(phys_addr: u64) {
-    if phys_addr != 0 {
-        LAPIC_BASE_PHYS.store(phys_addr, Ordering::Relaxed);
-    }
+    let paddr = if phys_addr != 0 { phys_addr } else { 0xFEE0_0000 };
+    LAPIC_BASE_PHYS.store(paddr, Ordering::Relaxed);
+
+    let mmio_virt = match crate::memory::map_kernel_mmio(paddr, 4096) {
+        Ok(v) => v.as_u64(),
+        Err(_) => hhdm_offset() + paddr,
+    };
+    LAPIC_MMIO_VIRT.store(mmio_virt, Ordering::Relaxed);
 
     unsafe {
         // Проверяем бит APIC Global Enable в регистре MSR 0x1B (IA32_APIC_BASE)

@@ -88,7 +88,14 @@ impl Sb16Device {
             return None;
         }
 
-        let dma_buf = Dma::zeroed().ok()?;
+        let dma_buf: Dma<[u8; 4096]> = Dma::zeroed().ok()?;
+        if dma_buf.physical() >= 0x0100_0000 {
+            serial_println!(
+                "sb16: DMA buffer at {:#x} exceeds 16MB ISA limit (Zone DMA required), disabling SB16",
+                dma_buf.physical()
+            );
+            return None;
+        }
 
         let mut dev = Self {
             base,
@@ -187,6 +194,11 @@ impl AudioDevice for Sb16Device {
     }
 
     fn is_busy(&self) -> bool {
+        // Чтение портов 0x0E (8-бит) и 0x0F (16-бит) квитирует завершение воспроизведения в DSP SB16
+        let mut status_16 = PortReadOnly::<u8>::new(self.base + 0x0F);
+        let _ = unsafe { status_16.read() };
+        let mut status_8 = PortReadOnly::<u8>::new(self.base + REG_DSP_STATUS);
+        let _ = unsafe { status_8.read() };
         false
     }
 }

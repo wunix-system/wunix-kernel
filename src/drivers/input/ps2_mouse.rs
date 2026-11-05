@@ -1,4 +1,5 @@
 use alloc::collections::VecDeque;
+use alloc::sync::Arc;
 use spin::Mutex;
 use x86_64::instructions::port::Port;
 use crate::drivers::traits::{InputDevice, InputEvent};
@@ -25,7 +26,7 @@ pub struct Ps2Mouse {
     events: VecDeque<InputEvent>,
 }
 
-pub static MOUSE_INSTANCE: Mutex<Option<Ps2Mouse>> = Mutex::new(None);
+pub static MOUSE_INSTANCE: Mutex<Option<Arc<Mutex<Ps2Mouse>>>> = Mutex::new(None);
 
 impl Ps2Mouse {
     pub fn new(width: u32, height: u32) -> Self {
@@ -170,7 +171,7 @@ unsafe fn send_mouse_cmd(cmd: u8) -> u8 {
     }
 }
 
-pub fn init() {
+pub fn init() -> Option<Arc<Mutex<Ps2Mouse>>> {
     let mut mouse = Ps2Mouse::new(1024, 768);
 
     unsafe {
@@ -220,13 +221,15 @@ pub fn init() {
         send_mouse_cmd(MOUSE_CMD_ENABLE_DATA);
     }
 
-    *MOUSE_INSTANCE.lock() = Some(mouse);
+    let mouse_arc = Arc::new(Mutex::new(mouse));
+    *MOUSE_INSTANCE.lock() = Some(mouse_arc.clone());
+    Some(mouse_arc)
 }
 
 pub fn handle_interrupt() {
     let mut data_port = Port::<u8>::new(PS2_DATA_PORT);
     let byte = unsafe { data_port.read() };
-    if let Some(ref mut mouse) = *MOUSE_INSTANCE.lock() {
-        mouse.handle_byte(byte);
+    if let Some(ref mouse_arc) = *MOUSE_INSTANCE.lock() {
+        mouse_arc.lock().handle_byte(byte);
     }
 }

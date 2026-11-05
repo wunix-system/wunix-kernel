@@ -65,6 +65,9 @@ impl IxgbeDevice {
     }
 
     pub fn new(pci: &PciDevice, mmio_base_virt: u64) -> Result<Self, &'static str> {
+        pci.enable_memory_space();
+        pci.enable_bus_mastering();
+
         let mut dev = Self {
             base: mmio_base_virt,
             mac: [0; 6],
@@ -174,20 +177,33 @@ impl NetDevice for IxgbeDevice {
 
     fn receive_packet(&mut self, buf: &mut [u8]) -> Result<Option<usize>, NetDeviceError> {
         let cur = self.rx_cur;
-        let rdh = self.read_reg(IXGBE_RDH) as usize;
-        if cur == rdh {
+        if !self.rx_ring[cur].is_done() {
             return Ok(None);
         }
 
-        let len = BUFFER_SIZE.min(buf.len());
-        buf[..len].copy_from_slice(&self.rx_buffers[cur][..len]);
+        let pkt_len = self.rx_ring[cur].packet_length();
+        if pkt_len == 0 || pkt_len > BUFFER_SIZE {
+            // Сбрасываем дескриптор обратно контроллеру и переходим дальше
+            self.rx_ring[cur].reset_buffer(self.rx_buffers[cur].physical() as u64);
+            self.write_reg(IXGBE_RDT, cur as u32);
+            self.rx_cur = (cur + 1) % RING_SIZE;
+            return Ok(None);
+        }
 
+        if buf.len() < pkt_len {
+            return Err(NetDeviceError::BufferTooSmall);
+        }
+
+        buf[..pkt_len].copy_from_slice(&self.rx_buffers[cur][..pkt_len]);
+
+        // Возвращаем буфер дескриптора контроллеру
+        self.rx_ring[cur].reset_buffer(self.rx_buffers[cur].physical() as u64);
         self.write_reg(IXGBE_RDT, cur as u32);
         self.rx_cur = (cur + 1) % RING_SIZE;
 
         self.rx_packets += 1;
-        self.rx_bytes += len;
-        Ok(Some(len))
+        self.rx_bytes += pkt_len;
+        Ok(Some(pkt_len))
     }
 
     fn rx_bytes(&self) -> usize { self.rx_bytes }

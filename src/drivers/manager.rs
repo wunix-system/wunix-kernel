@@ -117,7 +117,9 @@ impl DeviceManager {
     pub fn init_hardware(&mut self) {
         super::acpi::init();
         super::tpm::init();
-        super::input::ps2_mouse::init();
+        if let Some(mouse) = super::input::ps2_mouse::init() {
+            self.register_input_device(mouse);
+        }
 
         let hv = virt::init();
         serial_println!("virt: detected hypervisor: {} ({})", hv.name(), hv.display_name(true));
