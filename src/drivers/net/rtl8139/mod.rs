@@ -203,10 +203,11 @@ impl NetDevice for Rtl8139Device {
 }
 
 /// Поиск и регистрация сетевых контроллеров Realtek RTL8139 (Vendor 0x10EC, Device 0x8139)
-pub fn probe_pci(dev: &PciDevice, dm: &mut DeviceManager) -> bool {
+pub fn probe_pci(dev: &mut PciDevice, dm: &mut DeviceManager) -> bool {
     if dev.vendor_id == 0x10EC && dev.device_id == 0x8139 {
         match Rtl8139Device::new(dev) {
             Ok(nic) => {
+                dev.driver_name = Some("rtl8139");
                 let mac = nic.mac_address();
                 let name = alloc::format!("eth{}", dm.net_device_count());
                 serial_println!(

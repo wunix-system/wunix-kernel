@@ -18,6 +18,10 @@ pub struct E1000Device {
     dma_virt: *mut u8,
     rx_cur: usize,
     tx_cur: usize,
+    rx_bytes_count: usize,
+    rx_packets_count: usize,
+    tx_bytes_count: usize,
+    tx_packets_count: usize,
 }
 
 unsafe impl Send for E1000Device {}
@@ -62,6 +66,10 @@ impl E1000Device {
             dma_virt,
             rx_cur: 0,
             tx_cur: 0,
+            rx_bytes_count: 0,
+            rx_packets_count: 0,
+            tx_bytes_count: 0,
+            tx_packets_count: 0,
         };
 
         // Сброс и программная инициализация контроллера
@@ -236,6 +244,8 @@ impl NetDevice for E1000Device {
 
         self.tx_cur = (self.tx_cur + 1) % NUM_TX_DESCRIPTORS;
         self.write_reg(REG_TDT, self.tx_cur as u32);
+        self.tx_packets_count += 1;
+        self.tx_bytes_count += packet.len();
 
         Ok(())
     }
@@ -263,9 +273,16 @@ impl NetDevice for E1000Device {
         rx_descs[idx].status = 0;
         self.rx_cur = idx;
         self.write_reg(REG_RDT, idx as u32);
+        self.rx_packets_count += 1;
+        self.rx_bytes_count += pkt_len;
 
         Ok(Some(pkt_len))
     }
+
+    fn rx_bytes(&self) -> usize { self.rx_bytes_count }
+    fn rx_packets(&self) -> usize { self.rx_packets_count }
+    fn tx_bytes(&self) -> usize { self.tx_bytes_count }
+    fn tx_packets(&self) -> usize { self.tx_packets_count }
 }
 
 impl Drop for E1000Device {
@@ -301,7 +318,12 @@ pub fn probe_pci(dev: &PciDevice) -> Option<E1000Device> {
         | E1000_DEV_82575EB
         | E1000_DEV_82576
         | E1000_DEV_I350
-        | E1000_DEV_I210 => E1000Device::new(dev).ok(),
+        | E1000_DEV_I210
+        | E1000_DEV_I211
+        | E1000_DEV_I225_LM
+        | E1000_DEV_I225_V
+        | E1000_DEV_I226_V
+        | E1000_DEV_I226_LM => E1000Device::new(dev).ok(),
         _ => None,
     }
 }

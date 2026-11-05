@@ -222,13 +222,14 @@ impl NetDevice for Rtl8168Device {
 }
 
 /// Поиск сетевых контроллеров Realtek RTL8168/8111/8169 (Vendor 0x10EC)
-pub fn probe_pci(dev: &PciDevice, dm: &mut DeviceManager) -> bool {
+pub fn probe_pci(dev: &mut PciDevice, dm: &mut DeviceManager) -> bool {
     let is_rtl8168 = dev.vendor_id == 0x10EC
         && matches!(dev.device_id, 0x8168 | 0x8111 | 0x8136 | 0x8167 | 0x8169);
 
     if is_rtl8168 {
         match Rtl8168Device::new(dev) {
             Ok(nic) => {
+                dev.driver_name = Some("rtl8168");
                 let mac = nic.mac_address();
                 let name = alloc::format!("eth{}", dm.net_device_count());
                 serial_println!(

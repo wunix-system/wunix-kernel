@@ -22,6 +22,11 @@ pub const E1000_DEV_82575EB: u16 = 0x10A7; // Семейство igb: много
 pub const E1000_DEV_82576: u16 = 0x10C9;   // igb PCIe Gen2
 pub const E1000_DEV_I350: u16 = 0x1521;    // igb Quad-Port Server
 pub const E1000_DEV_I210: u16 = 0x1533;    // igb промышленный чип
+pub const E1000_DEV_I211: u16 = 0x1539;    // igb потребительский чип PCIe
+pub const E1000_DEV_I225_LM: u16 = 0x15F2; // Intel 2.5GbE I225-LM
+pub const E1000_DEV_I225_V: u16 = 0x15F3;  // Intel 2.5GbE I225-V
+pub const E1000_DEV_I226_V: u16 = 0x125B;  // Intel 2.5GbE I226-V
+pub const E1000_DEV_I226_LM: u16 = 0x125C; // Intel 2.5GbE I226-LM
 
 // Смещения регистров MMIO Intel e1000
 pub const REG_CTRL: usize = 0x0000;
