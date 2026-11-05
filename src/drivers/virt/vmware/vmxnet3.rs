@@ -1,8 +1,7 @@
 use x86_64::structures::paging::PhysFrame;
 
 use crate::drivers::pci::PciDevice;
-use crate::drivers::traits::NetDevice;
-use crate::drivers::virtio::VirtioError;
+use crate::drivers::traits::{NetDevice, NetDeviceError};
 use crate::memory::{allocate_contiguous_frames, deallocate_frame, hhdm_offset, map_kernel_mmio};
 
 pub const VMXNET3_DEVICE_ID: u16 = 0x07B0;
@@ -172,13 +171,17 @@ impl Vmxnet3Device {
 }
 
 impl NetDevice for Vmxnet3Device {
+    fn driver_name(&self) -> &'static str {
+        "vmware-vmxnet3"
+    }
+
     fn mac_address(&self) -> [u8; 6] {
         self.mac
     }
 
-    fn send_packet(&mut self, packet: &[u8]) -> Result<(), VirtioError> {
+    fn send_packet(&mut self, packet: &[u8]) -> Result<(), NetDeviceError> {
         if packet.len() > PKT_BUF_SIZE {
-            return Err(VirtioError::IoError);
+            return Err(NetDeviceError::PacketTooLarge);
         }
 
         let tx_descs = unsafe {
@@ -203,7 +206,7 @@ impl NetDevice for Vmxnet3Device {
         Ok(())
     }
 
-    fn receive_packet(&mut self, buf: &mut [u8]) -> Result<Option<usize>, VirtioError> {
+    fn receive_packet(&mut self, buf: &mut [u8]) -> Result<Option<usize>, NetDeviceError> {
         let rx_comp = unsafe {
             core::slice::from_raw_parts((self.dma_virt as usize + 0xE00) as *const Vmxnet3CompDesc, RING_SIZE)
         };

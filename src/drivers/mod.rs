@@ -17,7 +17,7 @@ pub use manager::{
     with_device_manager, DeviceManager,
 };
 pub use registry::{list_drivers, DriverInfo};
-pub use traits::{BlockDevice, DisplayDevice, InputDevice, NetDevice};
+pub use traits::{BlockDevice, DisplayDevice, InputDevice, NetDevice, NetDeviceError};
 pub use virtio::VirtioError;
 
 #[cfg(test)]

@@ -1,5 +1,31 @@
 use crate::drivers::virtio::VirtioError;
 
+/// Ошибки канального уровня сетевого адаптера
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetDeviceError {
+    /// Аппаратный сбой или ошибка ввода-вывода контроллера
+    IoError,
+    /// Размер передаваемого кадра превышает поддерживаемый MTU
+    PacketTooLarge,
+    /// Буфер приёма недостаточен для входящего кадра
+    BufferTooSmall,
+    /// Очередь передачи переполнена или адаптер временно занят
+    NotReady,
+    /// Неподдерживаемая операция или некорректные параметры
+    Unsupported,
+}
+
+impl From<VirtioError> for NetDeviceError {
+    fn from(err: VirtioError) -> Self {
+        match err {
+            VirtioError::IoError => NetDeviceError::IoError,
+            VirtioError::QueueFull | VirtioError::QueueTooSmall => NetDeviceError::NotReady,
+            VirtioError::Unsupported => NetDeviceError::Unsupported,
+            _ => NetDeviceError::IoError,
+        }
+    }
+}
+
 /// Унифицированный интерфейс блочного накопителя (/dev/vda, ATA, NVMe)
 pub trait BlockDevice: Send + Sync {
     /// Считывает последовательность 512-байтных секторов, начиная с `start_sector`
@@ -15,16 +41,24 @@ pub trait BlockDevice: Send + Sync {
     fn sector_count(&self) -> u64;
 }
 
-/// Унифицированный интерфейс сетевого адаптера (Ethernet, Wi-Fi)
+/// Унифицированный интерфейс сетевого адаптера (Ethernet, Wi-Fi, Loopback).
+///
+/// Сетевой стек ядра взаимодействует только с этим типажом, не привязываясь
+/// к конкретной реализации оборудования (VirtIO, VMXNET3, NetVSC, e1000).
 pub trait NetDevice: Send + Sync {
+    /// Название драйвера устройства (например, "virtio-net", "vmware-vmxnet3")
+    fn driver_name(&self) -> &'static str {
+        "generic-eth"
+    }
+
     /// Аппаратный MAC-адрес устройства
     fn mac_address(&self) -> [u8; 6];
 
     /// Отправляет сетевой пакет (Ethernet-фрейм)
-    fn send_packet(&mut self, packet: &[u8]) -> Result<(), VirtioError>;
+    fn send_packet(&mut self, packet: &[u8]) -> Result<(), NetDeviceError>;
 
     /// Принимает входящий сетевой пакет из очереди RX
-    fn receive_packet(&mut self, buf: &mut [u8]) -> Result<Option<usize>, VirtioError>;
+    fn receive_packet(&mut self, buf: &mut [u8]) -> Result<Option<usize>, NetDeviceError>;
 }
 
 /// Унифицированный интерфейс устройства ввода (планшет, мышь, тачпад)

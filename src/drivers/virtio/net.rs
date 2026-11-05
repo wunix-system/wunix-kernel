@@ -7,7 +7,7 @@ use super::{
     VirtioDevice, VirtioDeviceType, VirtioError, VIRTIO_STATUS_ACKNOWLEDGE, VIRTIO_STATUS_DRIVER,
     VIRTIO_STATUS_DRIVER_OK, VIRTIO_STATUS_FEATURES_OK,
 };
-use crate::drivers::NetDevice;
+use crate::drivers::{NetDevice, NetDeviceError};
 
 // Флаги заголовка пакета VirtIO-Net
 pub const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
@@ -140,13 +140,20 @@ impl VirtioDevice for VirtioNet {
 }
 
 impl NetDevice for VirtioNet {
+    fn driver_name(&self) -> &'static str {
+        "virtio-net"
+    }
+
     fn mac_address(&self) -> [u8; 6] {
         self.mac
     }
 
-    fn send_packet(&mut self, packet: &[u8]) -> Result<(), VirtioError> {
-        if packet.is_empty() || packet.len() > 1514 {
-            return Err(VirtioError::Unsupported);
+    fn send_packet(&mut self, packet: &[u8]) -> Result<(), NetDeviceError> {
+        if packet.is_empty() {
+            return Ok(());
+        }
+        if packet.len() > 1514 {
+            return Err(NetDeviceError::PacketTooLarge);
         }
 
         let hdr_size = core::mem::size_of::<VirtioNetHdr>();
@@ -185,22 +192,22 @@ impl NetDevice for VirtioNet {
             x86_64::instructions::nop();
             spins += 1;
             if spins > 5_000_000 {
-                return Err(VirtioError::IoError);
+                return Err(NetDeviceError::IoError);
             }
         }
 
-        let (popped_head, _) = self.tx_queue.pop_used().ok_or(VirtioError::IoError)?;
+        let (popped_head, _) = self.tx_queue.pop_used().ok_or(NetDeviceError::IoError)?;
         self.tx_queue.free_chain(popped_head);
 
         Ok(())
     }
 
-    fn receive_packet(&mut self, buf: &mut [u8]) -> Result<Option<usize>, VirtioError> {
+    fn receive_packet(&mut self, buf: &mut [u8]) -> Result<Option<usize>, NetDeviceError> {
         if !self.rx_queue.can_pop() {
             return Ok(None);
         }
 
-        let (head, bytes_written) = self.rx_queue.pop_used().ok_or(VirtioError::IoError)?;
+        let (head, bytes_written) = self.rx_queue.pop_used().ok_or(NetDeviceError::IoError)?;
         let hdr_size = core::mem::size_of::<VirtioNetHdr>();
 
         if (bytes_written as usize) <= hdr_size {

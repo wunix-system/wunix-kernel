@@ -1,8 +1,7 @@
 use x86_64::structures::paging::PhysFrame;
 
 use super::grant_table::GRANT_TABLE;
-use crate::drivers::traits::NetDevice;
-use crate::drivers::virtio::VirtioError;
+use crate::drivers::traits::{NetDevice, NetDeviceError};
 use crate::memory::{allocate_contiguous_frames, deallocate_frame, hhdm_offset};
 
 #[repr(C)]
@@ -61,13 +60,17 @@ impl XenNetFront {
 }
 
 impl NetDevice for XenNetFront {
+    fn driver_name(&self) -> &'static str {
+        "xen-netfront"
+    }
+
     fn mac_address(&self) -> [u8; 6] {
         self.mac
     }
 
-    fn send_packet(&mut self, packet: &[u8]) -> Result<(), VirtioError> {
+    fn send_packet(&mut self, packet: &[u8]) -> Result<(), NetDeviceError> {
         if packet.len() > 1514 {
-            return Err(VirtioError::IoError);
+            return Err(NetDeviceError::PacketTooLarge);
         }
 
         let tx_req_ptr = self.dma_virt as *mut NetifTxRequest;
@@ -87,7 +90,7 @@ impl NetDevice for XenNetFront {
         Ok(())
     }
 
-    fn receive_packet(&mut self, buf: &mut [u8]) -> Result<Option<usize>, VirtioError> {
+    fn receive_packet(&mut self, buf: &mut [u8]) -> Result<Option<usize>, NetDeviceError> {
         let rx_resp_ptr = unsafe { self.dma_virt.add(1024) } as *const NetifRxResponse;
         let rx_resp = unsafe { *rx_resp_ptr };
 

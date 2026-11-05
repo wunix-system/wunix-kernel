@@ -1,6 +1,5 @@
-use crate::drivers::traits::NetDevice;
+use crate::drivers::traits::{NetDevice, NetDeviceError};
 use crate::drivers::virt::hyperv::vmbus::{VmbusChannel, GUID_NETVSC};
-use crate::drivers::virtio::VirtioError;
 
 const RNDIS_MSG_PACKET: u32 = 1;
 const RNDIS_MSG_INIT: u32 = 2;
@@ -68,13 +67,17 @@ impl NetVscDevice {
 }
 
 impl NetDevice for NetVscDevice {
+    fn driver_name(&self) -> &'static str {
+        "hyperv-netvsc"
+    }
+
     fn mac_address(&self) -> [u8; 6] {
         self.mac
     }
 
-    fn send_packet(&mut self, packet: &[u8]) -> Result<(), VirtioError> {
+    fn send_packet(&mut self, packet: &[u8]) -> Result<(), NetDeviceError> {
         if packet.len() > 1514 {
-            return Err(VirtioError::IoError);
+            return Err(NetDeviceError::PacketTooLarge);
         }
 
         let total_rndis_len = core::mem::size_of::<RndisPacketMsg>() + packet.len();
@@ -109,10 +112,10 @@ impl NetDevice for NetVscDevice {
 
         self.channel
             .send_packet(1, &msg_buf[..total_rndis_len])
-            .map_err(|_| VirtioError::IoError)
+            .map_err(|_| NetDeviceError::IoError)
     }
 
-    fn receive_packet(&mut self, buf: &mut [u8]) -> Result<Option<usize>, VirtioError> {
+    fn receive_packet(&mut self, buf: &mut [u8]) -> Result<Option<usize>, NetDeviceError> {
         let mut recv_buf = [0u8; 2048];
         match self.channel.receive_packet(&mut recv_buf) {
             Ok(Some(bytes_read)) if bytes_read >= core::mem::size_of::<RndisPacketMsg>() => {
@@ -131,7 +134,7 @@ impl NetDevice for NetVscDevice {
                 Ok(None)
             }
             Ok(_) => Ok(None),
-            Err(_) => Err(VirtioError::IoError),
+            Err(_) => Err(NetDeviceError::IoError),
         }
     }
 }

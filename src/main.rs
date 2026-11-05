@@ -193,12 +193,14 @@ pub extern "C" fn _start() -> ! {
         let _ = wunix_kernel::fs::ops::write_file_ramfs("/proc/cmdline", cmdline.as_bytes());
     }
 
-    // Инициализация сетевого стека ядра smoltcp поверх virtio-net
+    // Инициализация сетевого стека ядра smoltcp поверх зарегистрированного сетевого адаптера
     if let Some(net_dev) = wunix_kernel::drivers::get_net_device(0) {
+        let driver_name = net_dev.lock().driver_name();
         wunix_kernel::net::init(net_dev);
         klog!(
-            "  {}: сетевой стек virtio-net активен",
-            t("Сеть", "Network")
+            "  {}: {} (DHCP/smoltcp)",
+            t("Сетевой адаптер", "Network adapter"),
+            driver_name
         );
     }
 

@@ -10,7 +10,7 @@ use smoltcp::socket::dhcpv4;
 use smoltcp::time::Instant;
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address};
 
-use self::device::VirtioNetSmolDevice;
+use self::device::NetDeviceSmolAdapter;
 pub use self::socket::{create_socket, SockAddrIn, SocketFileHandle};
 use crate::drivers::NetDevice;
 use crate::serial_println;
@@ -30,7 +30,7 @@ pub fn prefix_to_netmask(prefix: u8) -> [u8; 4] {
 /// Глобальное состояние сетевого стека Wunix на базе `smoltcp`
 pub struct NetworkStack {
     pub iface: Interface,
-    pub device: VirtioNetSmolDevice,
+    pub device: NetDeviceSmolAdapter,
     pub sockets: SocketSet<'static>,
     pub dhcp_handle: SocketHandle,
     pub mac: [u8; 6],
@@ -52,10 +52,10 @@ pub struct NetInfo {
     pub dns: [u8; 4],
 }
 
-/// Инициализация сетевого стека ядра поверх сетевого адаптера `virtio-net` с автонастройкой по DHCP
+/// Инициализация сетевого стека ядра поверх сетевого адаптера `NetDevice` с автонастройкой по DHCP
 pub fn init(net_dev: Arc<Mutex<dyn NetDevice>>) {
     let mac = net_dev.lock().mac_address();
-    let mut device = VirtioNetSmolDevice::new(net_dev.clone());
+    let mut device = NetDeviceSmolAdapter::new(net_dev.clone());
 
     // Конфигурируем L2 MAC-адрес интерфейса
     let config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
