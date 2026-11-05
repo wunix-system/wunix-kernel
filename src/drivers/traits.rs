@@ -61,6 +61,11 @@ pub struct InputEvent {
 
 /// Унифицированный интерфейс блочного накопителя (/dev/vda, ATA, SATA/AHCI, NVMe).
 pub trait BlockDevice: Send + Sync {
+    /// Имя драйвера блочного накопителя (например, "nvme", "ahci", "ata", "virtio-blk")
+    fn driver_name(&self) -> &'static str {
+        "generic-blk"
+    }
+
     /// Считывает последовательность 512-байтных секторов, начиная с `start_sector`
     fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError>;
 
@@ -89,6 +94,26 @@ pub trait NetDevice: Send + Sync {
 
     /// Принимает входящий сетевой пакет из очереди RX
     fn receive_packet(&mut self, buf: &mut [u8]) -> Result<Option<usize>, NetDeviceError>;
+
+    /// Количество принятых байт
+    fn rx_bytes(&self) -> usize {
+        0
+    }
+
+    /// Количество принятых пакетов
+    fn rx_packets(&self) -> usize {
+        0
+    }
+
+    /// Количество переданных байт
+    fn tx_bytes(&self) -> usize {
+        0
+    }
+
+    /// Количество переданных пакетов
+    fn tx_packets(&self) -> usize {
+        0
+    }
 }
 
 /// Унифицированный интерфейс устройства ввода (планшет, мышь, тачпад, клавиатура).

@@ -287,10 +287,11 @@ impl BlockDevice for NvmeDevice {
 }
 
 /// Поиск и регистрация обнаруженных контроллеров NVMe (Class 0x01, Subclass 0x08)
-pub fn probe_pci(dev: &PciDevice, dm: &mut DeviceManager) -> bool {
+pub fn probe_pci(dev: &mut PciDevice, dm: &mut DeviceManager) -> bool {
     if dev.class_code == 0x01 && dev.subclass == 0x08 {
         match NvmeDevice::new(dev) {
             Ok(nvme) => {
+                dev.driver_name = Some("nvme");
                 let sec_sz = nvme.sector_size();
                 let cap_mb = (nvme.sector_count() * sec_sz as u64) / (1024 * 1024);
                 let name = alloc::string::String::from("nvme0n1");

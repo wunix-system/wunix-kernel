@@ -119,10 +119,10 @@ impl DeviceManager {
         serial_println!("virt: detected hypervisor: {} ({})", hv.name(), hv.display_name(true));
 
         serial_println!("pci: scanning bus topology...");
-        let pci_list = pci::scan::scan_all_busses();
+        let mut pci_list = pci::scan::scan_all_busses();
         let mut block_count = 0usize;
 
-        for dev in &pci_list {
+        for dev in &mut pci_list {
             let class_str = pci::PciClass::name(dev.class_code, dev.subclass);
             serial_println!(
                 "pci: [{}] {:04x}:{:04x} class: {:02x}:{:02x} ({})",
@@ -138,22 +138,28 @@ impl DeviceManager {
             } else if super::nvme::probe_pci(dev, self) {
                 // Высокоскоростной SSD накопитель NVMe (PCI Express)
             } else if virt::vbox::probe_pci(dev, self) {
-                // VirtualBox драйвер обработал устройство
+                dev.driver_name = Some(if dev.device_id == 0xBEEF { "vboxvideo" } else { "vboxguest" });
             } else if virt::vmware::probe_pci(dev, self) {
-                // VMware драйвер обработал устройство
+                dev.driver_name = Some(match dev.device_id {
+                    0x0405 => "vmw_svga",
+                    0x07B0 => "vmxnet3",
+                    0x07C0 => "pvscsi",
+                    _ => "vmware",
+                });
             } else if virt::hyperv::probe_pci(dev, self) {
-                // Hyper-V синтетическое видео обработано
+                dev.driver_name = Some("hyperv_fb");
             } else if virt::qemu::probe_pci(dev, self) {
-                // Bochs / QEMU Standard VGA
+                dev.driver_name = Some("bochs-vga");
             } else if virt::xen::platform::probe_pci(dev) {
-                // Xen Platform Device (HVM Unplug)
+                dev.driver_name = Some("xen-platform");
             } else if super::net::probe_pci(dev, self) {
-                // Сетевые контроллеры Realtek RTL8139 / RTL8168
-            } else if super::usb::probe_pci(dev, self) {
-                // Хост-контроллеры шины USB (xHCI, EHCI, UHCI)
+                // Сетевые контроллеры Realtek RTL8139 / RTL8168 / RTL8125
+            } else if super::usb::probe_pci(dev, self, &mut block_count) {
+                // Хост-контроллеры шины USB (xHCI, EHCI, OHCI, UHCI)
             } else if super::audio::probe_pci(dev, self) {
                 // Звуковые контроллеры Intel HDA и AC'97
             } else if let Some(nic) = super::e1000::probe_pci(dev) {
+                dev.driver_name = Some("e1000");
                 let mac = nic.mac_address();
                 serial_println!(
                     "e1000: registered eth{} (Intel PRO/1000, MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
@@ -169,7 +175,8 @@ impl DeviceManager {
     }
 
     /// Инициализация обнаруженного контроллера IDE/ATA
-    fn probe_ide(&mut self, dev: &pci::PciDevice) {
+    fn probe_ide(&mut self, dev: &mut pci::PciDevice) {
+        dev.driver_name = Some("ata_piix");
         dev.enable_io_space();
         dev.enable_bus_mastering();
 
@@ -196,8 +203,16 @@ impl DeviceManager {
     }
 
     /// Инициализация обнаруженных устройств VirtIO.
-    fn probe_virtio(&mut self, dev: &pci::PciDevice, block_count: &mut usize) {
+    fn probe_virtio(&mut self, dev: &mut pci::PciDevice, block_count: &mut usize) {
         let vtype = virtio::VirtioDeviceType::from_pci(dev.device_id, dev.subsystem_id);
+        dev.driver_name = Some(match vtype {
+            virtio::VirtioDeviceType::Block => "virtio_blk",
+            virtio::VirtioDeviceType::Net => "virtio_net",
+            virtio::VirtioDeviceType::Gpu => "virtio_gpu",
+            virtio::VirtioDeviceType::Input => "virtio_input",
+            virtio::VirtioDeviceType::Scsi => "virtio_scsi",
+            _ => "virtio_pci",
+        });
         serial_println!("virtio: found {} at {}", vtype, dev.address);
 
         let transport = match virtio::transport::create_transport_from_pci(dev) {

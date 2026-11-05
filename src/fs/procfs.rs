@@ -124,7 +124,18 @@ pub fn refresh_proc_files(path: &str) {
         let _ = write_file_ramfs("/sys/class/net/lo/ipv4_broadcast", b"127.255.255.255\n");
 
         if let Some(info) = crate::net::get_info() {
-            text.push_str("  eth0: 1048576      10    0    0    0     0          0         0  1048576      10    0    0    0     0       0          0\n");
+            let (rx_b, rx_p, tx_b, tx_p) = crate::drivers::with_device_manager(|dm| {
+                if let Some(nic) = dm.get_net_device(0) {
+                    let dev = nic.lock();
+                    (dev.rx_bytes(), dev.rx_packets(), dev.tx_bytes(), dev.tx_packets())
+                } else {
+                    (0, 0, 0, 0)
+                }
+            }).unwrap_or((0, 0, 0, 0));
+            text.push_str(&alloc::format!(
+                "  eth0: {:7} {:7}    0    0    0     0          0         0  {:7} {:7}    0    0    0     0       0          0\n",
+                rx_b, rx_p, tx_b, tx_p
+            ));
             let mac_str = alloc::format!(
                 "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n",
                 info.mac[0], info.mac[1], info.mac[2], info.mac[3], info.mac[4], info.mac[5]
@@ -221,7 +232,7 @@ pub fn refresh_proc_files(path: &str) {
                     | (((dev.address.device & 0x1F) as u32) << 3)
                     | ((dev.address.function & 0x07) as u32);
                 let vend_dev = ((dev.vendor_id as u32) << 16) | (dev.device_id as u32);
-                let drv = pci_driver_name(dev.vendor_id, dev.device_id);
+                let drv = dev.driver_name.unwrap_or_else(|| pci_driver_name(dev.vendor_id, dev.device_id));
 
                 let mut b_addrs = [0u64; 6];
                 let mut b_sizes = [0u64; 6];

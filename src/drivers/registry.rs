@@ -17,555 +17,356 @@ pub struct DriverInfo {
     pub dependencies: &'static str,
 }
 
-/// Возвращает реестр всех активных аппаратных драйверов ядра
+/// Динамически формирует реестр всех реально активных аппаратных драйверов ядра
 pub fn list_drivers() -> Vec<DriverInfo> {
-    let pci_count = with_device_manager(|dm| dm.pci_devices().len()).unwrap_or(0);
-    let blk_count = with_device_manager(|dm| dm.block_device_names().len()).unwrap_or(0);
-    let net_count = with_device_manager(|dm| dm.net_device_count()).unwrap_or(0);
-    let in_count = with_device_manager(|dm| dm.input_device_count()).unwrap_or(0);
-    let disp_count = with_device_manager(|dm| dm.display_device_count()).unwrap_or(0);
-    let audio_count = with_device_manager(|dm| dm.audio_device_count()).unwrap_or(0);
+    let mut list = Vec::new();
 
-    alloc::vec![
-        DriverInfo {
-            name: "virtio_blk",
-            description: "VirtIO Block Device Driver",
-            category: "block",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: blk_count,
-            status: "Live",
-            size: 24576,
-            dependencies: "virtio_pci",
-        },
-        DriverInfo {
-            name: "virtio_net",
-            description: "VirtIO Network Adapter Driver",
-            category: "net",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: net_count,
-            status: "Live",
-            size: 32768,
-            dependencies: "virtio_pci",
-        },
-        DriverInfo {
-            name: "virtio_gpu",
-            description: "VirtIO 2D/3D GPU Display Driver",
-            category: "display",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: disp_count,
-            status: "Live",
-            size: 28672,
-            dependencies: "virtio_pci",
-        },
-        DriverInfo {
-            name: "virtio_input",
-            description: "VirtIO Tablet and Pointer Input Driver",
-            category: "input",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: in_count,
-            status: "Live",
-            size: 16384,
-            dependencies: "virtio_pci",
-        },
-        DriverInfo {
-            name: "virtio_pci",
-            description: "VirtIO Modern/Legacy PCI Transport",
-            category: "bus",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: blk_count + net_count + disp_count + in_count,
-            status: "Live",
-            size: 20480,
-            dependencies: "pci_core",
-        },
-        DriverInfo {
-            name: "pci_core",
-            description: "PCI Bus Enumeration and Device Manager",
-            category: "bus",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: pci_count,
-            status: "Live",
-            size: 24576,
-            dependencies: "-",
-        },
-        DriverInfo {
-            name: "virtio_scsi",
-            description: "VirtIO Paravirtual SCSI Storage Controller",
-            category: "block",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 28672,
-            dependencies: "virtio_pci",
-        },
-        DriverInfo {
-            name: "virtio_balloon",
-            description: "VirtIO Memory Ballooning Driver",
-            category: "memory",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 16384,
-            dependencies: "virtio_pci",
-        },
-        DriverInfo {
-            name: "virtio_rng",
-            description: "VirtIO Hardware Entropy Generator Driver",
-            category: "char",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 12288,
-            dependencies: "virtio_pci",
-        },
-        DriverInfo {
-            name: "virtio_console",
-            description: "VirtIO Paravirtual Console Driver (/dev/hvc0)",
-            category: "char",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 16384,
-            dependencies: "virtio_pci",
-        },
-        DriverInfo {
-            name: "vboxguest",
-            description: "Oracle VM VirtualBox Guest Integration (VMMDev)",
-            category: "bus",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 24576,
-            dependencies: "pci_core",
-        },
-        DriverInfo {
-            name: "vboxvideo",
-            description: "Oracle VM VirtualBox Graphics Driver (VBoxSVGA)",
-            category: "display",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 20480,
-            dependencies: "pci_core",
-        },
-        DriverInfo {
-            name: "vboxsf",
-            description: "Oracle VM VirtualBox Host Shared Folders VFS Client",
-            category: "fs",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 28672,
-            dependencies: "vboxguest",
-        },
-        DriverInfo {
-            name: "vmw_svga",
-            description: "VMware SVGA II Display Controller Driver",
-            category: "display",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 24576,
-            dependencies: "pci_core",
-        },
-        DriverInfo {
-            name: "vmxnet3",
-            description: "VMware vmxnet3 Paravirtual 10GbE Network Driver",
-            category: "net",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 32768,
-            dependencies: "pci_core",
-        },
-        DriverInfo {
-            name: "pvscsi",
-            description: "VMware PVSCSI Paravirtual Storage Controller",
-            category: "block",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 32768,
-            dependencies: "pci_core",
-        },
-        DriverInfo {
-            name: "hyperv_vmbus",
-            description: "Microsoft Hyper-V VMBus Synthetic Bus Driver",
-            category: "bus",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 36864,
-            dependencies: "-",
-        },
-        DriverInfo {
-            name: "hyperv_fb",
-            description: "Microsoft Hyper-V Synthetic Video Driver",
-            category: "display",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 16384,
-            dependencies: "pci_core",
-        },
-        DriverInfo {
-            name: "netvsc",
-            description: "Microsoft Hyper-V Network Virtual Service Client (RNDIS)",
-            category: "net",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 28672,
-            dependencies: "hyperv_vmbus",
-        },
-        DriverInfo {
-            name: "storvsc",
-            description: "Microsoft Hyper-V Storage Virtual Service Client",
-            category: "block",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 28672,
-            dependencies: "hyperv_vmbus",
-        },
-        DriverInfo {
-            name: "xen_blkfront",
-            description: "Xen Paravirtualized Block Driver (/dev/xvdX)",
-            category: "block",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 24576,
-            dependencies: "xen_platform",
-        },
-        DriverInfo {
-            name: "xen_netfront",
-            description: "Xen Paravirtualized Network Driver",
-            category: "net",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 24576,
-            dependencies: "xen_platform",
-        },
-        DriverInfo {
-            name: "xen_platform",
-            description: "Xen Platform Device & Unplug Protocol Driver",
-            category: "bus",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 16384,
-            dependencies: "pci_core",
-        },
-        DriverInfo {
-            name: "bochs_vga",
-            description: "Bochs/QEMU Standard VGA Linear Framebuffer Driver",
-            category: "display",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 16384,
-            dependencies: "pci_core",
-        },
-        DriverInfo {
-            name: "qemu_fwcfg",
-            description: "QEMU/Proxmox Firmware Configuration Interface Driver",
-            category: "system",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 12288,
-            dependencies: "-",
-        },
-        DriverInfo {
-            name: "e1000",
-            description: "Intel PRO/1000 Gigabit Ethernet Controller Driver",
-            category: "net",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: net_count,
-            status: "Live",
-            size: 36864,
-            dependencies: "pci_core",
-        },
-        DriverInfo {
-            name: "ahci",
-            description: "Advanced Host Controller Interface (SATA AHCI 1.3)",
-            category: "block",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: blk_count,
-            status: "Live",
-            size: 32768,
-            dependencies: "pci_core",
-        },
-        DriverInfo {
-            name: "ata_piix",
-            description: "IDE/PATA Primary/Secondary Controller Driver",
-            category: "block",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: blk_count,
-            status: "Live",
-            size: 20480,
-            dependencies: "pci_core",
-        },
-        DriverInfo {
-            name: "ps2_keyboard",
-            description: "PS/2 Keyboard Driver (i8042 Controller)",
-            category: "input",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 12288,
-            dependencies: "-",
-        },
-        DriverInfo {
-            name: "uart16550",
-            description: "16550A Serial COM Port Driver",
-            category: "char",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 8192,
-            dependencies: "-",
-        },
-        DriverInfo {
-            name: "limine_fb",
-            description: "Limine Linear Framebuffer Console Driver",
-            category: "display",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 16384,
-            dependencies: "-",
-        },
-        DriverInfo {
-            name: "rtc_cmos",
-            description: "Motorola MC146818 CMOS Real-Time Clock Driver",
-            category: "system",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 4096,
-            dependencies: "-",
-        },
-        DriverInfo {
-            name: "pit8254",
-            description: "Intel 8254 Programmable Interval Timer",
-            category: "system",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 4096,
-            dependencies: "-",
-        },
-        DriverInfo {
-            name: "i8259_pic",
-            description: "Dual 8259 Programmable Interrupt Controller",
-            category: "system",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 4096,
-            dependencies: "-",
-        },
-        DriverInfo {
-            name: "nvme",
-            description: "NVM Express 1.x..2.x PCIe SSD Controller",
-            category: "block",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: blk_count,
-            status: "Live",
-            size: 32768,
-            dependencies: "pci_core",
-        },
-        DriverInfo {
-            name: "rtl8168",
-            description: "Realtek RTL8168/8111 PCIe Gigabit Ethernet",
-            category: "net",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: net_count,
-            status: "Live",
-            size: 28672,
-            dependencies: "pci_core",
-        },
-        DriverInfo {
-            name: "rtl8139",
-            description: "Realtek RTL8139 Fast Ethernet 10/100",
-            category: "net",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: net_count,
-            status: "Live",
-            size: 24576,
-            dependencies: "pci_core",
-        },
-        DriverInfo {
-            name: "xhci",
-            description: "eXtensible Host Controller Interface (USB 3.x)",
-            category: "bus",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 36864,
-            dependencies: "pci_core",
-        },
-        DriverInfo {
-            name: "ehci",
-            description: "Enhanced Host Controller Interface (USB 2.0)",
-            category: "bus",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 24576,
-            dependencies: "pci_core",
-        },
-        DriverInfo {
-            name: "uhci",
-            description: "Universal Host Controller Interface (USB 1.1)",
-            category: "bus",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: 1,
-            status: "Live",
-            size: 20480,
-            dependencies: "pci_core",
-        },
-        DriverInfo {
-            name: "usb_storage",
-            description: "USB Mass Storage Bulk-Only Transport Driver",
-            category: "block",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: blk_count,
-            status: "Live",
-            size: 16384,
-            dependencies: "xhci",
-        },
-        DriverInfo {
-            name: "usb_hid",
-            description: "USB Human Interface Devices (Keyboard & Mouse)",
-            category: "input",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: in_count,
-            status: "Live",
-            size: 16384,
-            dependencies: "xhci",
-        },
-        DriverInfo {
-            name: "snd_hda",
-            description: "Intel High Definition Audio Controller",
-            category: "sound",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: audio_count,
-            status: "Live",
-            size: 28672,
-            dependencies: "pci_core",
-        },
-        DriverInfo {
-            name: "snd_ac97",
-            description: "Intel ICH AC'97 Audio Controller",
-            category: "sound",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: audio_count,
-            status: "Live",
-            size: 24576,
-            dependencies: "pci_core",
-        },
-        DriverInfo {
-            name: "snd_sb16",
-            description: "Creative Sound Blaster 16 DSP Audio",
-            category: "sound",
-            version: "1.0.0",
-            author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
-            devices_count: audio_count,
-            status: "Live",
-            size: 16384,
-            dependencies: "-",
-        },
-    ]
+    // 1. Обязательные системные драйверы платформы x86_64
+    list.push(DriverInfo {
+        name: "ps2_keyboard",
+        description: "Standard PS/2 Keyboard Driver",
+        category: "input",
+        version: "1.0.0",
+        author: "Wunix Kernel Team",
+        license: "MIT/Apache-2.0",
+        devices_count: 1,
+        status: "Live",
+        size: 12288,
+        dependencies: "-",
+    });
+
+    list.push(DriverInfo {
+        name: "uart16550",
+        description: "UART 16550 Serial COM Port Driver",
+        category: "char",
+        version: "1.0.0",
+        author: "Wunix Kernel Team",
+        license: "MIT/Apache-2.0",
+        devices_count: 1,
+        status: "Live",
+        size: 8192,
+        dependencies: "-",
+    });
+
+    list.push(DriverInfo {
+        name: "limine_fb",
+        description: "Limine Linear Framebuffer Display Driver",
+        category: "display",
+        version: "1.0.0",
+        author: "Wunix Kernel Team",
+        license: "MIT/Apache-2.0",
+        devices_count: 1,
+        status: "Live",
+        size: 16384,
+        dependencies: "-",
+    });
+
+    list.push(DriverInfo {
+        name: "rtc_cmos",
+        description: "Motorola MC146818 CMOS Real-Time Clock",
+        category: "system",
+        version: "1.0.0",
+        author: "Wunix Kernel Team",
+        license: "MIT/Apache-2.0",
+        devices_count: 1,
+        status: "Live",
+        size: 4096,
+        dependencies: "-",
+    });
+
+    list.push(DriverInfo {
+        name: "pit8254",
+        description: "Intel 8254 Programmable Interval Timer",
+        category: "system",
+        version: "1.0.0",
+        author: "Wunix Kernel Team",
+        license: "MIT/Apache-2.0",
+        devices_count: 1,
+        status: "Live",
+        size: 4096,
+        dependencies: "-",
+    });
+
+    list.push(DriverInfo {
+        name: "i8259_pic",
+        description: "Dual 8259 Programmable Interrupt Controller",
+        category: "system",
+        version: "1.0.0",
+        author: "Wunix Kernel Team",
+        license: "MIT/Apache-2.0",
+        devices_count: 1,
+        status: "Live",
+        size: 4096,
+        dependencies: "-",
+    });
+
+    // 2. Динамический опрос активных шинных устройств через DeviceManager
+    with_device_manager(|dm| {
+        let pci_devs = dm.pci_devices();
+        if !pci_devs.is_empty() {
+            list.push(DriverInfo {
+                name: "pci_core",
+                description: "PCI Bus Enumeration and Device Manager",
+                category: "bus",
+                version: "1.0.0",
+                author: "Wunix Kernel Team",
+                license: "MIT/Apache-2.0",
+                devices_count: pci_devs.len(),
+                status: "Live",
+                size: 24576,
+                dependencies: "-",
+            });
+        }
+
+        // Подсчет конкретных драйверов по PCI устройствам
+        let count_pci = |drv_name: &str| -> usize {
+            pci_devs.iter().filter(|d| d.driver_name == Some(drv_name)).count()
+        };
+
+        // Драйверы накопителей
+        let nvme_c = count_pci("nvme");
+        if nvme_c > 0 {
+            list.push(DriverInfo {
+                name: "nvme",
+                description: "NVM Express 1.x..2.x PCIe SSD Controller",
+                category: "block",
+                version: "1.0.0",
+                author: "Wunix Kernel Team",
+                license: "MIT/Apache-2.0",
+                devices_count: nvme_c,
+                status: "Live",
+                size: 32768,
+                dependencies: "pci_core",
+            });
+        }
+
+        let ahci_c = count_pci("ahci");
+        if ahci_c > 0 {
+            list.push(DriverInfo {
+                name: "ahci",
+                description: "Serial ATA AHCI 1.0..1.3.1 Controller",
+                category: "block",
+                version: "1.0.0",
+                author: "Wunix Kernel Team",
+                license: "MIT/Apache-2.0",
+                devices_count: ahci_c,
+                status: "Live",
+                size: 32768,
+                dependencies: "pci_core",
+            });
+        }
+
+        let ata_c = count_pci("ata_piix");
+        if ata_c > 0 {
+            list.push(DriverInfo {
+                name: "ata_piix",
+                description: "Intel PIIX ATA/IDE Controller",
+                category: "block",
+                version: "1.0.0",
+                author: "Wunix Kernel Team",
+                license: "MIT/Apache-2.0",
+                devices_count: ata_c,
+                status: "Live",
+                size: 20480,
+                dependencies: "pci_core",
+            });
+        }
+
+        // Драйверы сетевых адаптеров
+        let e1000_c = count_pci("e1000");
+        if e1000_c > 0 {
+            list.push(DriverInfo {
+                name: "e1000",
+                description: "Intel PRO/1000 / e1000e Gigabit Ethernet",
+                category: "net",
+                version: "1.0.0",
+                author: "Wunix Kernel Team",
+                license: "MIT/Apache-2.0",
+                devices_count: e1000_c,
+                status: "Live",
+                size: 36864,
+                dependencies: "pci_core",
+            });
+        }
+
+        let rtl8139_c = count_pci("rtl8139");
+        if rtl8139_c > 0 {
+            list.push(DriverInfo {
+                name: "rtl8139",
+                description: "Realtek RTL8139 Fast Ethernet 10/100",
+                category: "net",
+                version: "1.0.0",
+                author: "Wunix Kernel Team",
+                license: "MIT/Apache-2.0",
+                devices_count: rtl8139_c,
+                status: "Live",
+                size: 24576,
+                dependencies: "pci_core",
+            });
+        }
+
+        let rtl8168_c = count_pci("rtl8168");
+        if rtl8168_c > 0 {
+            list.push(DriverInfo {
+                name: "rtl8168",
+                description: "Realtek RTL8168/8111 PCIe Gigabit Ethernet",
+                category: "net",
+                version: "1.0.0",
+                author: "Wunix Kernel Team",
+                license: "MIT/Apache-2.0",
+                devices_count: rtl8168_c,
+                status: "Live",
+                size: 28672,
+                dependencies: "pci_core",
+            });
+        }
+
+        let rtl8125_c = count_pci("rtl8125");
+        if rtl8125_c > 0 {
+            list.push(DriverInfo {
+                name: "rtl8125",
+                description: "Realtek RTL8125 2.5GbE Ethernet Adapter",
+                category: "net",
+                version: "1.0.0",
+                author: "Wunix Kernel Team",
+                license: "MIT/Apache-2.0",
+                devices_count: rtl8125_c,
+                status: "Live",
+                size: 32768,
+                dependencies: "pci_core",
+            });
+        }
+
+        // Драйверы шины USB
+        let xhci_c = count_pci("xhci");
+        if xhci_c > 0 {
+            list.push(DriverInfo {
+                name: "xhci",
+                description: "eXtensible Host Controller Interface (USB 3.x)",
+                category: "bus",
+                version: "1.0.0",
+                author: "Wunix Kernel Team",
+                license: "MIT/Apache-2.0",
+                devices_count: xhci_c,
+                status: "Live",
+                size: 36864,
+                dependencies: "pci_core",
+            });
+        }
+
+        let ehci_c = count_pci("ehci");
+        if ehci_c > 0 {
+            list.push(DriverInfo {
+                name: "ehci",
+                description: "Enhanced Host Controller Interface (USB 2.0)",
+                category: "bus",
+                version: "1.0.0",
+                author: "Wunix Kernel Team",
+                license: "MIT/Apache-2.0",
+                devices_count: ehci_c,
+                status: "Live",
+                size: 24576,
+                dependencies: "pci_core",
+            });
+        }
+
+        let ohci_c = count_pci("ohci");
+        if ohci_c > 0 {
+            list.push(DriverInfo {
+                name: "ohci",
+                description: "Open Host Controller Interface (USB 1.1)",
+                category: "bus",
+                version: "1.0.0",
+                author: "Wunix Kernel Team",
+                license: "MIT/Apache-2.0",
+                devices_count: ohci_c,
+                status: "Live",
+                size: 20480,
+                dependencies: "pci_core",
+            });
+        }
+
+        let uhci_c = count_pci("uhci");
+        if uhci_c > 0 {
+            list.push(DriverInfo {
+                name: "uhci",
+                description: "Universal Host Controller Interface (USB 1.1)",
+                category: "bus",
+                version: "1.0.0",
+                author: "Wunix Kernel Team",
+                license: "MIT/Apache-2.0",
+                devices_count: uhci_c,
+                status: "Live",
+                size: 20480,
+                dependencies: "pci_core",
+            });
+        }
+
+        // Аудиодрайверы
+        let hda_c = count_pci("snd_hda");
+        if hda_c > 0 {
+            list.push(DriverInfo {
+                name: "snd_hda",
+                description: "Intel High Definition Audio Controller",
+                category: "sound",
+                version: "1.0.0",
+                author: "Wunix Kernel Team",
+                license: "MIT/Apache-2.0",
+                devices_count: hda_c,
+                status: "Live",
+                size: 28672,
+                dependencies: "pci_core",
+            });
+        }
+
+        let ac97_c = count_pci("snd_ac97");
+        if ac97_c > 0 {
+            list.push(DriverInfo {
+                name: "snd_ac97",
+                description: "Intel ICH AC'97 Audio Controller",
+                category: "sound",
+                version: "1.0.0",
+                author: "Wunix Kernel Team",
+                license: "MIT/Apache-2.0",
+                devices_count: ac97_c,
+                status: "Live",
+                size: 24576,
+                dependencies: "pci_core",
+            });
+        }
+
+        if dm.audio_device_count() > 0 && hda_c == 0 && ac97_c == 0 {
+            list.push(DriverInfo {
+                name: "snd_sb16",
+                description: "Creative Sound Blaster 16 DSP Audio",
+                category: "sound",
+                version: "1.0.0",
+                author: "Wunix Kernel Team",
+                license: "MIT/Apache-2.0",
+                devices_count: 1,
+                status: "Live",
+                size: 16384,
+                dependencies: "-",
+            });
+        }
+
+        // Драйверы VirtIO
+        let virtio_c = pci_devs.iter().filter(|d| d.vendor_id == 0x1AF4).count();
+        if virtio_c > 0 {
+            list.push(DriverInfo {
+                name: "virtio_pci",
+                description: "VirtIO Modern/Legacy PCI Transport",
+                category: "bus",
+                version: "1.0.0",
+                author: "Wunix Kernel Team",
+                license: "MIT/Apache-2.0",
+                devices_count: virtio_c,
+                status: "Live",
+                size: 20480,
+                dependencies: "pci_core",
+            });
+        }
+    });
+
+    list
 }

@@ -14,11 +14,13 @@ pub use port::AhciDisk;
 use hba::{HBA_GHC_AE, PORT_CMD_CR, PORT_CMD_FR, PORT_CMD_FRE, PORT_CMD_ST, SATA_SIG_ATA};
 
 /// Проверяет PCI устройство контроллера SATA/AHCI и регистрирует найденные накопители
-pub fn probe_pci(dev: &PciDevice, dm: &mut DeviceManager, block_count: &mut usize) -> bool {
+pub fn probe_pci(dev: &mut PciDevice, dm: &mut DeviceManager, block_count: &mut usize) -> bool {
     // Class 01 (Mass Storage), Subclass 06 (SATA)
     if dev.class_code != 0x01 || (dev.subclass != 0x06 && dev.subclass != 0x04) {
         return false;
     }
+
+    dev.driver_name = Some("ahci");
 
     dev.enable_memory_space();
     dev.enable_bus_mastering();
