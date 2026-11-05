@@ -46,6 +46,17 @@ pub fn pci_device_name(vendor: u16, device: u16) -> &'static str {
         (0x1234, 0x1111) => "VGA / VBE Compatible Graphics Adapter",
         (0x1013, 0x00B8) => "CL-GD5446 VisualMedia Accelerator",
         (0x10EC, 0x8139) => "RTL-8139 Fast Ethernet NIC",
+        (0x10EC, 0x8168) | (0x10EC, 0x8111) | (0x10EC, 0x8136) | (0x10EC, 0x8169) => {
+            "RTL8168/8111 PCIe Gigabit Ethernet"
+        }
+        (0x8086, 0x2415) | (0x8086, 0x2445) | (0x8086, 0x7195) => "82801AA AC'97 Audio",
+        (0x8086, 0x2668) | (0x8086, 0x27D8) | (0x8086, 0x284B) | (0x8086, 0x293E) | (0x8086, 0x3B56) => {
+            "Intel High Definition Audio Controller"
+        }
+        (0x1B36, 0x000D) => "QEMU USB 3.0 xHCI Controller",
+        (0x1B36, 0x0010) => "NVM Express Controller",
+        (0x8086, 0x265C) | (0x8086, 0x293A) => "Intel USB 2.0 EHCI Controller",
+        (0x8086, 0x7020) | (0x8086, 0x7112) => "Intel USB 1.1 UHCI Controller",
         _ => "Generic Device",
     }
 }
@@ -53,6 +64,16 @@ pub fn pci_device_name(vendor: u16, device: u16) -> &'static str {
 pub fn pci_driver_name(vendor: u16, device: u16) -> &'static str {
     match (vendor, device) {
         (0x8086, 0x100E) | (0x8086, 0x100F) | (0x8086, 0x1004) | (0x8086, 0x10D3) => "e1000",
+        (0x10EC, 0x8139) => "rtl8139",
+        (0x10EC, 0x8168) | (0x10EC, 0x8111) | (0x10EC, 0x8136) | (0x10EC, 0x8169) => "rtl8168",
+        (0x8086, 0x2415) | (0x8086, 0x2445) | (0x8086, 0x7195) => "snd_ac97",
+        (0x8086, 0x2668) | (0x8086, 0x27D8) | (0x8086, 0x284B) | (0x8086, 0x293E) | (0x8086, 0x3B56) => {
+            "snd_hda"
+        }
+        (0x1B36, 0x000D) => "xhci",
+        (0x1B36, 0x0010) => "nvme",
+        (0x8086, 0x265C) | (0x8086, 0x293A) => "ehci",
+        (0x8086, 0x7020) | (0x8086, 0x7112) => "uhci",
         (0x80EE, 0xCAFE) => "vboxguest",
         (0x80EE, 0xBEEF) => "vboxvideo",
         (0x15AD, 0x0405) => "vmw_svga",
