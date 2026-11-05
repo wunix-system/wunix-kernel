@@ -2,11 +2,26 @@
 
 pub const INTEL_PCI_VENDOR_ID: u16 = 0x8086;
 
-// Поддерживаемые микросхемы семейства Intel PRO/1000
+// Поддерживаемые микросхемы семейства Intel PRO/1000, e1000e и igb
 pub const E1000_DEV_82540EM: u16 = 0x100E; // VirtualBox & QEMU default NIC
 pub const E1000_DEV_82545EM: u16 = 0x100F; // VMware ESXi / Workstation compatible NIC
 pub const E1000_DEV_82543GC: u16 = 0x1004; // Классический серверный адаптер Intel Gigabit
+pub const E1000_DEV_82571EB: u16 = 0x105E; // Двухпортовый PCIe контроллер
+pub const E1000_DEV_82572EI: u16 = 0x107D; // Серверный PCIe адаптер
+pub const E1000_DEV_82573L: u16 = 0x109A;  // Мобильный PCIe гигабитный чип
 pub const E1000_DEV_82574L: u16 = 0x10D3;  // PCIe Gigabit контроллер
+pub const E1000_DEV_82579LM: u16 = 0x1502; // Корпоративный гигабитный PHY
+pub const E1000_DEV_82579V: u16 = 0x1503;  // Потребительский чипсетный PHY
+pub const E1000_DEV_I217LM: u16 = 0x153A;  // Haswell Gigabit
+pub const E1000_DEV_I217V: u16 = 0x153B;
+pub const E1000_DEV_I218V: u16 = 0x15A1;   // Broadwell Gigabit
+pub const E1000_DEV_I219LM: u16 = 0x156F;  // Skylake/KabyLake Gigabit
+pub const E1000_DEV_I219V: u16 = 0x1570;
+pub const E1000_DEV_I219V2: u16 = 0x15B8;
+pub const E1000_DEV_82575EB: u16 = 0x10A7; // Семейство igb: многоочередной серверный адаптер
+pub const E1000_DEV_82576: u16 = 0x10C9;   // igb PCIe Gen2
+pub const E1000_DEV_I350: u16 = 0x1521;    // igb Quad-Port Server
+pub const E1000_DEV_I210: u16 = 0x1533;    // igb промышленный чип
 
 // Смещения регистров MMIO Intel e1000
 pub const REG_CTRL: usize = 0x0000;

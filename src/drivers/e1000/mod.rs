@@ -6,16 +6,7 @@ use crate::drivers::pci::PciDevice;
 use crate::drivers::traits::{NetDevice, NetDeviceError};
 use crate::memory::{allocate_contiguous_frames, deallocate_frame, hhdm_offset, map_kernel_mmio};
 
-pub use hw::{
-    E1000RxDesc, E1000TxDesc, BUFFER_SIZE, E1000_DEV_82540EM, E1000_DEV_82543GC,
-    E1000_DEV_82545EM, E1000_DEV_82574L, INTEL_PCI_VENDOR_ID, NUM_RX_DESCRIPTORS,
-    NUM_TX_DESCRIPTORS, RCTL_BAM, RCTL_BSIZE_2048, RCTL_EN, RCTL_MPE, RCTL_SBP, RCTL_SECRC,
-    RCTL_UPE, REG_CTRL, REG_EERD, REG_ICR, REG_IMC, REG_MTA, REG_RAH, REG_RAL, REG_RCTL,
-    REG_RDBAH, REG_RDBAL, REG_RDH, REG_RDLEN, REG_RDT, REG_TCTL, REG_TDBAH, REG_TDBAL,
-    REG_TDH, REG_TDLEN, REG_TDT, RXD_STAT_DD, RX_BUFFERS_OFFSET, TCTL_COLD_SHIFT, TCTL_CT_SHIFT,
-    TCTL_EN, TCTL_PSP, TXD_CMD_EOP, TXD_CMD_IFCS, TXD_CMD_RS, TXD_STAT_DD, TX_BUFFERS_OFFSET,
-    TX_RING_OFFSET,
-};
+pub use hw::*;
 
 /// Высокопроизводительный драйвер сетевых контроллеров Intel Gigabit Ethernet (e1000).
 /// Является универсальным стандартным сетевым адаптером во всех основных гипервизорах:
@@ -292,9 +283,25 @@ pub fn probe_pci(dev: &PciDevice) -> Option<E1000Device> {
     }
 
     match dev.device_id {
-        E1000_DEV_82540EM | E1000_DEV_82545EM | E1000_DEV_82543GC | E1000_DEV_82574L => {
-            E1000Device::new(dev).ok()
-        }
+        E1000_DEV_82540EM
+        | E1000_DEV_82545EM
+        | E1000_DEV_82543GC
+        | E1000_DEV_82571EB
+        | E1000_DEV_82572EI
+        | E1000_DEV_82573L
+        | E1000_DEV_82574L
+        | E1000_DEV_82579LM
+        | E1000_DEV_82579V
+        | E1000_DEV_I217LM
+        | E1000_DEV_I217V
+        | E1000_DEV_I218V
+        | E1000_DEV_I219LM
+        | E1000_DEV_I219V
+        | E1000_DEV_I219V2
+        | E1000_DEV_82575EB
+        | E1000_DEV_82576
+        | E1000_DEV_I350
+        | E1000_DEV_I210 => E1000Device::new(dev).ok(),
         _ => None,
     }
 }

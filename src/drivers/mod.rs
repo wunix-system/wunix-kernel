@@ -5,6 +5,7 @@ pub mod e1000;
 pub mod font;
 pub mod keyboard;
 pub mod manager;
+pub mod net;
 pub mod nvme;
 pub mod pci;
 pub mod redox_compat;

@@ -130,6 +130,8 @@ impl DeviceManager {
                 // Bochs / QEMU Standard VGA
             } else if virt::xen::platform::probe_pci(dev) {
                 // Xen Platform Device (HVM Unplug)
+            } else if super::net::probe_pci(dev, self) {
+                // Сетевые контроллеры Realtek RTL8139 / RTL8168
             } else if let Some(nic) = super::e1000::probe_pci(dev) {
                 let mac = nic.mac_address();
                 serial_println!(
