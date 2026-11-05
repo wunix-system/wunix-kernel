@@ -192,28 +192,118 @@ impl Fat32Inner {
             return Err(VfsError::IoError);
         }
         let lba = self.cluster_to_lba(cluster);
-        let mut dev = self.dev.lock();
-        for s in 0..self.sectors_per_cluster {
-            let offset = (s as usize) * 512;
-            dev.read_sectors(lba + s as u64, &mut buf[offset..offset + 512])
-                .map_err(|_| VfsError::IoError)?;
-        }
+        self.dev
+            .lock()
+            .read_sectors(lba, &mut buf[..self.cluster_bytes])
+            .map_err(|_| VfsError::IoError)?;
         Ok(())
     }
 
-    /// Записывает полный кластер данных
+    /// Записывает полный кластер данных за одно обращение к блочному устройству
     pub fn write_cluster(&self, cluster: u32, buf: &[u8]) -> Result<(), VfsError> {
         if buf.len() < self.cluster_bytes {
             return Err(VfsError::IoError);
         }
         let lba = self.cluster_to_lba(cluster);
-        let mut dev = self.dev.lock();
-        for s in 0..self.sectors_per_cluster {
-            let offset = (s as usize) * 512;
-            dev.write_sectors(lba + s as u64, &buf[offset..offset + 512])
-                .map_err(|_| VfsError::IoError)?;
-        }
+        self.dev
+            .lock()
+            .write_sectors(lba, &buf[..self.cluster_bytes])
+            .map_err(|_| VfsError::IoError)?;
         Ok(())
+    }
+
+    /// Выделяет и связывает цепочку из `needed_count` кластеров в таблице FAT,
+    /// группируя изменения по секторам FAT и сводя дисковые I/O к минимуму.
+    pub fn alloc_cluster_chain(&self, chain: &mut Vec<u32>, needed_count: usize) -> Result<(), VfsError> {
+        if needed_count == 0 {
+            return Ok(());
+        }
+        let max_clusters = (self.sectors_per_fat as u64 * 512) / 4;
+        let total_fat_secs = self.sectors_per_fat as u64;
+
+        let mut cursor = self.last_alloc_cluster.lock();
+        let start_cluster = if *cursor >= 2 && (*cursor as u64) < max_clusters {
+            *cursor
+        } else {
+            2
+        };
+
+        let start_sec = (start_cluster as u64 * 4) / 512;
+        let mut sec_buf = [0u8; 512];
+        let mut allocated = 0;
+        let mut prev_cluster = chain.last().copied();
+
+        for s in 0..total_fat_secs {
+            let sec_idx = (start_sec + s) % total_fat_secs;
+            let fat_sec_lba = self.fat_start_lba + sec_idx;
+
+            {
+                let mut dev = self.dev.lock();
+                dev.read_sectors(fat_sec_lba, &mut sec_buf)
+                    .map_err(|_| VfsError::IoError)?;
+            }
+
+            let mut sec_modified = false;
+
+            for entry_idx in 0..128 {
+                let cluster_num = (sec_idx * 128 + entry_idx as u64) as u32;
+                if cluster_num < 2 || (cluster_num as u64) >= max_clusters {
+                    continue;
+                }
+                let off = entry_idx * 4;
+                let val = u32::from_le_bytes([
+                    sec_buf[off],
+                    sec_buf[off + 1],
+                    sec_buf[off + 2],
+                    sec_buf[off + 3],
+                ]) & 0x0FFF_FFFF;
+
+                if val == 0 {
+                    if let Some(prev) = prev_cluster {
+                        let prev_sec_idx = (prev as u64 * 4) / 512;
+                        if prev_sec_idx == sec_idx {
+                            let prev_off = (prev as usize * 4) % 512;
+                            let pval_bytes = (cluster_num & 0x0FFF_FFFF).to_le_bytes();
+                            sec_buf[prev_off..prev_off + 4].copy_from_slice(&pval_bytes);
+                        } else {
+                            self.set_fat_entry(prev, cluster_num)?;
+                        }
+                    }
+
+                    let eoc_bytes = (FAT32_EOC & 0x0FFF_FFFF).to_le_bytes();
+                    sec_buf[off..off + 4].copy_from_slice(&eoc_bytes);
+
+                    chain.push(cluster_num);
+                    prev_cluster = Some(cluster_num);
+                    allocated += 1;
+                    sec_modified = true;
+                    *cursor = cluster_num + 1;
+
+                    if allocated == needed_count {
+                        break;
+                    }
+                }
+            }
+
+            if sec_modified {
+                let mut dev = self.dev.lock();
+                for f in 0..self.num_fats {
+                    let fat_sec = self.fat_start_lba + (f as u64 * self.sectors_per_fat as u64) + sec_idx;
+                    dev.write_sectors(fat_sec, &sec_buf)
+                        .map_err(|_| VfsError::IoError)?;
+                }
+            }
+
+            if allocated == needed_count {
+                return Ok(());
+            }
+        }
+
+        if allocated > 0 {
+            Ok(())
+        } else {
+            Err(VfsError::IoError)
+        }
     }
 
     /// Возвращает вектор всех номеров кластеров в цепочке
@@ -437,25 +527,24 @@ impl Inode for Fat32FileInode {
         }
 
         let mut start_clus = *self.start_cluster.lock();
-        if start_clus < 2 {
-            start_clus = self.inner.alloc_cluster()?;
-            *self.start_cluster.lock() = start_clus;
-        }
-
         let clus_size = self.inner.cluster_bytes;
         let mut chain_guard = self.cluster_chain.lock();
-        if chain_guard.is_empty() {
+        if chain_guard.is_empty() && start_clus >= 2 {
             *chain_guard = self.inner.get_cluster_chain(start_clus)?;
         }
 
         let end_offset = offset + buf.len();
         let needed_clusters = (end_offset + clus_size - 1) / clus_size;
 
-        while chain_guard.len() < needed_clusters {
-            let last = *chain_guard.last().unwrap_or(&start_clus);
-            let next = self.inner.alloc_cluster()?;
-            self.inner.set_fat_entry(last, next)?;
-            chain_guard.push(next);
+        if chain_guard.len() < needed_clusters {
+            let count = needed_clusters - chain_guard.len();
+            self.inner.alloc_cluster_chain(&mut chain_guard, count)?;
+            if start_clus < 2 {
+                if let Some(&first) = chain_guard.first() {
+                    start_clus = first;
+                    *self.start_cluster.lock() = first;
+                }
+            }
         }
 
         let chain = chain_guard.clone();
@@ -473,11 +562,12 @@ impl Inode for Fat32FileInode {
             let clus_id = chain[clus_idx];
             if offset_in_clus != 0 || chunk < clus_size {
                 self.inner.read_cluster(clus_id, &mut clus_buf)?;
+                clus_buf[offset_in_clus..offset_in_clus + chunk]
+                    .copy_from_slice(&buf[bytes_written..bytes_written + chunk]);
+                self.inner.write_cluster(clus_id, &clus_buf)?;
+            } else {
+                self.inner.write_cluster(clus_id, &buf[bytes_written..bytes_written + chunk])?;
             }
-
-            clus_buf[offset_in_clus..offset_in_clus + chunk]
-                .copy_from_slice(&buf[bytes_written..bytes_written + chunk]);
-            self.inner.write_cluster(clus_id, &clus_buf)?;
 
             bytes_written += chunk;
         }
