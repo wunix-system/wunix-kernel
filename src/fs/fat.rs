@@ -409,7 +409,11 @@ fn default_file_permissions(name: &str) -> (u16, u32, u32) {
         || name.eq_ignore_ascii_case("sudoadd");
     let perms = if is_suid {
         0o4755
-    } else if name.eq_ignore_ascii_case("shadow") {
+    } else if name.eq_ignore_ascii_case("shadow")
+        || (name.starts_with("ssh_host_") && !name.ends_with(".pub"))
+        || name.ends_with(".key")
+        || name.ends_with("_key")
+    {
         0o600
     } else {
         0o755
