@@ -223,12 +223,10 @@ impl Fat32Inner {
             return Err(VfsError::IoError);
         }
         let lba = self.cluster_to_lba(cluster);
-        let mut dev = self.dev.lock();
-        for s in 0..self.sectors_per_cluster {
-            let offset = (s as usize) * 512;
-            dev.read_sectors(lba + s as u64, &mut buf[offset..offset + 512])
-                .map_err(|_| VfsError::IoError)?;
-        }
+        self.dev
+            .lock()
+            .read_sectors(lba, &mut buf[..self.cluster_bytes])
+            .map_err(|_| VfsError::IoError)?;
         Ok(())
     }
 
@@ -238,12 +236,10 @@ impl Fat32Inner {
             return Err(VfsError::IoError);
         }
         let lba = self.cluster_to_lba(cluster);
-        let mut dev = self.dev.lock();
-        for s in 0..self.sectors_per_cluster {
-            let offset = (s as usize) * 512;
-            dev.write_sectors(lba + s as u64, &buf[offset..offset + 512])
-                .map_err(|_| VfsError::IoError)?;
-        }
+        self.dev
+            .lock()
+            .write_sectors(lba, &buf[..self.cluster_bytes])
+            .map_err(|_| VfsError::IoError)?;
         Ok(())
     }
 
