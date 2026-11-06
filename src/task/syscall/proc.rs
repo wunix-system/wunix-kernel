@@ -646,6 +646,12 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     // Сбрасываем старый сигнал SIGINT перед запуском нового процесса
     crate::task::signal::clear_sigint();
 
+    // Сохраняем FS_BASE родителя и очищаем его для дочернего процесса,
+    // чтобы изолировать TLS и предотвратить Page Fault от устаревших указателей
+    let old_fs_base = unsafe { crate::arch::x86_64::syscall::read_fs_base() };
+    unsafe { crate::arch::x86_64::syscall::write_fs_base(0); }
+    crate::task::set_current_fs_base(0);
+
     let exit_code = unsafe {
         crate::arch::x86_64::syscall::enter_user_child(
             elf_info.entry_point.as_u64(),
@@ -656,6 +662,10 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
             child_kstack_top,
         )
     };
+
+    // Восстанавливаем FS_BASE родительского процесса
+    unsafe { crate::arch::x86_64::syscall::write_fs_base(old_fs_base); }
+    crate::task::set_current_fs_base(old_fs_base);
 
     set_child_is_shell(next_depth, false);
 

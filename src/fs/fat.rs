@@ -1,6 +1,7 @@
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 use spin::Mutex;
 
 use crate::drivers::BlockDevice;
@@ -363,6 +364,21 @@ pub fn to_dos_83(name: &str) -> Option<([u8; 8], [u8; 3])> {
     Some((name_buf, ext_buf))
 }
 
+fn default_file_permissions(name: &str) -> (u16, u32, u32) {
+    let is_suid = name.eq_ignore_ascii_case("sudo")
+        || name.eq_ignore_ascii_case("su")
+        || name.eq_ignore_ascii_case("passwd")
+        || name.eq_ignore_ascii_case("sudoadd");
+    let perms = if is_suid {
+        0o4755
+    } else if name.eq_ignore_ascii_case("shadow") {
+        0o600
+    } else {
+        0o755
+    };
+    (perms, 0, 0)
+}
+
 /// Индексный узел обычного файла на FAT32
 pub struct Fat32FileInode {
     pub inner: Arc<Fat32Inner>,
@@ -372,6 +388,9 @@ pub struct Fat32FileInode {
     pub dir_entry_offset: usize,
     pub inode_id: u64,
     pub cluster_chain: Mutex<Vec<u32>>,
+    pub permissions: AtomicU16,
+    pub uid: AtomicU32,
+    pub gid: AtomicU32,
 }
 
 impl Inode for Fat32FileInode {
@@ -380,10 +399,21 @@ impl Inode for Fat32FileInode {
             itype: InodeType::File,
             size: *self.file_size.lock(),
             inode_id: self.inode_id,
-            permissions: 0o664,
-            uid: 0,
-            gid: 0,
+            permissions: self.permissions.load(Ordering::Relaxed),
+            uid: self.uid.load(Ordering::Relaxed),
+            gid: self.gid.load(Ordering::Relaxed),
         }
+    }
+
+    fn chmod(&self, mode: u16) -> Result<(), VfsError> {
+        self.permissions.store(mode, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn chown(&self, uid: u32, gid: u32) -> Result<(), VfsError> {
+        self.uid.store(uid, Ordering::Relaxed);
+        self.gid.store(gid, Ordering::Relaxed);
+        Ok(())
     }
 
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> Result<usize, VfsError> {
@@ -547,6 +577,9 @@ pub struct Fat32DirInode {
     pub cluster: u32,
     pub parent_cluster: u32,
     pub inode_id: u64,
+    pub permissions: AtomicU16,
+    pub uid: AtomicU32,
+    pub gid: AtomicU32,
 }
 
 impl Fat32DirInode {
@@ -644,10 +677,21 @@ impl Inode for Fat32DirInode {
             itype: InodeType::Directory,
             size: 4096,
             inode_id: self.inode_id,
-            permissions: 0o775,
-            uid: 0,
-            gid: 0,
+            permissions: self.permissions.load(Ordering::Relaxed),
+            uid: self.uid.load(Ordering::Relaxed),
+            gid: self.gid.load(Ordering::Relaxed),
         }
+    }
+
+    fn chmod(&self, mode: u16) -> Result<(), VfsError> {
+        self.permissions.store(mode, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn chown(&self, uid: u32, gid: u32) -> Result<(), VfsError> {
+        self.uid.store(uid, Ordering::Relaxed);
+        self.gid.store(gid, Ordering::Relaxed);
+        Ok(())
     }
 
     fn lookup(&self, name: &str) -> Result<Arc<dyn Inode>, VfsError> {
@@ -657,6 +701,9 @@ impl Inode for Fat32DirInode {
                 cluster: self.cluster,
                 parent_cluster: self.parent_cluster,
                 inode_id: self.inode_id,
+                permissions: AtomicU16::new(self.permissions.load(Ordering::Relaxed)),
+                uid: AtomicU32::new(self.uid.load(Ordering::Relaxed)),
+                gid: AtomicU32::new(self.gid.load(Ordering::Relaxed)),
             }));
         }
 
@@ -671,13 +718,18 @@ impl Inode for Fat32DirInode {
                 let is_dir = (entry.raw.attr & FAT32_ATTR_DIRECTORY) != 0;
 
                 if is_dir {
+                    let perms = if display.eq_ignore_ascii_case("tmp") { 0o777 } else { 0o755 };
                     return Ok(Arc::new(Fat32DirInode {
                         inner: self.inner.clone(),
                         cluster: first_clus,
                         parent_cluster: self.cluster,
                         inode_id: (first_clus as u64) + 1000,
+                        permissions: AtomicU16::new(perms),
+                        uid: AtomicU32::new(0),
+                        gid: AtomicU32::new(0),
                     }));
                 } else {
+                    let (perms, uid, gid) = default_file_permissions(&display);
                     return Ok(Arc::new(Fat32FileInode {
                         inner: self.inner.clone(),
                         start_cluster: Mutex::new(first_clus),
@@ -686,6 +738,9 @@ impl Inode for Fat32DirInode {
                         dir_entry_offset: entry.offset,
                         inode_id: (first_clus as u64) + 2000,
                         cluster_chain: Mutex::new(alloc::vec::Vec::new()),
+                        permissions: AtomicU16::new(perms),
+                        uid: AtomicU32::new(uid),
+                        gid: AtomicU32::new(gid),
                     }));
                 }
             }
@@ -717,6 +772,11 @@ impl Inode for Fat32DirInode {
     }
 
     fn create(&self, name: &str, itype: InodeType) -> Result<Arc<dyn Inode>, VfsError> {
+        // Проверяем наличие файла/директории с таким именем: предотвращаем появление дубликатов в каталоге
+        if self.lookup(name).is_ok() {
+            return Err(VfsError::AlreadyExists);
+        }
+
         let name_utf16: Vec<u16> = name.encode_utf16().collect();
         let num_lfn = (name_utf16.len() + 12) / 13;
         let slots_needed = 1 + num_lfn;
@@ -755,14 +815,15 @@ impl Inode for Fat32DirInode {
         }
 
         if !found {
-            // Выделяем новый кластер для каталога
+            // Выделяем новый кластер для каталога и сразу обнуляем его, исключая мусорные записи
             let new_c = self.inner.alloc_cluster()?;
             let last = *chain.last().unwrap_or(&self.cluster);
             self.inner.set_fat_entry(last, new_c)?;
             chain.push(new_c);
             target_clus = new_c;
             target_slot_idx = 0;
-            self.inner.read_cluster(target_clus, &mut clus_buf)?;
+            clus_buf.fill(0);
+            self.inner.write_cluster(target_clus, &clus_buf)?;
         }
 
         // Генерируем 8.3 короткое имя файла с суффиксом ~1
@@ -825,7 +886,45 @@ impl Inode for Fat32DirInode {
         // 2. Записываем стандартную запись каталога RawDirEntry
         let is_dir = itype == InodeType::Directory;
         let first_clus = if is_dir {
-            self.inner.alloc_cluster()?
+            let clus = self.inner.alloc_cluster()?;
+            let mut new_dir_buf = alloc::vec![0u8; self.inner.cluster_bytes];
+            let dot_raw = RawDirEntry {
+                name: *b".       ",
+                ext: *b"   ",
+                attr: FAT32_ATTR_DIRECTORY,
+                reserved: 0,
+                ctime_tenth: 0,
+                ctime: 0,
+                cdate: 0x5500,
+                adate: 0x5500,
+                cluster_high: ((clus >> 16) & 0xFFFF) as u16,
+                mtime: 0,
+                mdate: 0x5500,
+                cluster_low: (clus & 0xFFFF) as u16,
+                file_size: 0,
+            };
+            let dotdot_raw = RawDirEntry {
+                name: *b"..      ",
+                ext: *b"   ",
+                attr: FAT32_ATTR_DIRECTORY,
+                reserved: 0,
+                ctime_tenth: 0,
+                ctime: 0,
+                cdate: 0x5500,
+                adate: 0x5500,
+                cluster_high: ((self.cluster >> 16) & 0xFFFF) as u16,
+                mtime: 0,
+                mdate: 0x5500,
+                cluster_low: (self.cluster & 0xFFFF) as u16,
+                file_size: 0,
+            };
+            unsafe {
+                let ptr = new_dir_buf.as_mut_ptr() as *mut RawDirEntry;
+                core::ptr::write(ptr, dot_raw);
+                core::ptr::write(ptr.add(1), dotdot_raw);
+            }
+            self.inner.write_cluster(clus, &new_dir_buf)?;
+            clus
         } else {
             0
         };
@@ -859,14 +958,22 @@ impl Inode for Fat32DirInode {
 
         self.inner.write_cluster(target_clus, &clus_buf)?;
 
+        let euid = crate::task::current_thread_euid();
+        let egid = crate::task::current_thread_egid();
+
         if is_dir {
+            let perms = if name.eq_ignore_ascii_case("tmp") { 0o777 } else { 0o755 };
             Ok(Arc::new(Fat32DirInode {
                 inner: self.inner.clone(),
                 cluster: first_clus,
                 parent_cluster: self.cluster,
                 inode_id: (first_clus as u64) + 1000,
+                permissions: AtomicU16::new(perms),
+                uid: AtomicU32::new(euid),
+                gid: AtomicU32::new(egid),
             }))
         } else {
+            let (default_perms, _, _) = default_file_permissions(name);
             Ok(Arc::new(Fat32FileInode {
                 inner: self.inner.clone(),
                 start_cluster: Mutex::new(first_clus),
@@ -875,6 +982,9 @@ impl Inode for Fat32DirInode {
                 dir_entry_offset: raw_dir_offset,
                 inode_id: (first_clus as u64) + 2000,
                 cluster_chain: Mutex::new(alloc::vec::Vec::new()),
+                permissions: AtomicU16::new(default_perms),
+                uid: AtomicU32::new(euid),
+                gid: AtomicU32::new(egid),
             }))
         }
     }
@@ -936,6 +1046,9 @@ impl Fat32FileSystem {
             cluster: inner.root_cluster,
             parent_cluster: 0,
             inode_id: 1,
+            permissions: AtomicU16::new(0o777),
+            uid: AtomicU32::new(0),
+            gid: AtomicU32::new(0),
         });
 
         Ok(Self { inner, root_node })
