@@ -91,7 +91,15 @@ pub fn sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: i64) -> u64 {
             return 0;
         }
 
-        crate::task::yield_now();
+        // Переводим поток в состояние ожидания на 1 квант системного таймера (10 мс),
+        // чтобы избежать 100% холостой загрузки процессора (busy loop).
+        let now = crate::arch::x86_64::timer::ticks();
+        let sleep_until = if timeout_ms > 0 {
+            Some(now.saturating_add(1).min(deadline))
+        } else {
+            Some(now.saturating_add(1))
+        };
+        crate::task::block_current(sleep_until);
     }
 }
 
@@ -209,7 +217,13 @@ pub fn sys_select(
             return 0;
         }
 
-        crate::task::yield_now();
+        let now = crate::arch::x86_64::timer::ticks();
+        let sleep_until = if timeout_ms > 0 {
+            Some(now.saturating_add(1).min(deadline))
+        } else {
+            Some(now.saturating_add(1))
+        };
+        crate::task::block_current(sleep_until);
     }
 }
 

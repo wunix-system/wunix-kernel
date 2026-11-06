@@ -34,6 +34,8 @@ pub fn is_shell_binary_path(path: &str) -> bool {
     name == "wsh" || name == "sh" || name == "login" || name == "init"
 }
 
+static NEXT_PID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(10);
+
 pub fn sys_clone(
     flags: u64,
     newsp: u64,
@@ -106,8 +108,8 @@ pub fn sys_clone(
         // CLONE_THREAD: тот же процесс
         (crate::task::current_thread_tgid(), crate::task::current_thread_parent_tgid())
     } else {
-        // Новый процесс
-        (child_tid.0, crate::task::current_thread_tgid())
+        // Новый процесс: уникальный TGID из глобального счетчика (не коллидирует с PID 1 init)
+        (NEXT_PID.fetch_add(1, Ordering::Relaxed), crate::task::current_thread_tgid())
     };
     let child_pgid = crate::task::current_thread_pgid();
 
@@ -651,7 +653,6 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     let brk_start = (elf_info.max_vaddr + 4095) & !4095;
     super::mem::reset_process_vma(brk_start);
 
-    static NEXT_PID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(10);
     let parent_tgid = crate::task::current_thread_tgid();
     let child_tgid = NEXT_PID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     crate::fs::clone_fd_table(parent_tgid, child_tgid);
@@ -711,7 +712,6 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     crate::fs::remove_process_fd_table(child_tgid);
     crate::task::set_current_thread_tgid(parent_tgid);
 
-    crate::serial_println!("[execve done] ret={}", exit_code);
     exit_code
 }
 
@@ -738,7 +738,6 @@ pub fn sys_exit_group(status: u64) -> ! {
     let cur_tid = crate::task::current_thread_id();
     let is_sync = crate::task::is_current_thread_sync_child();
     let has_parent = unsafe { crate::arch::x86_64::syscall::has_parent_process() };
-    crate::serial_println!("[exit_group] cur_tgid={} cur_tid={} is_sync={} has_parent={}", cur_tgid, cur_tid.0, is_sync, has_parent);
 
     // Удаляем все остальные потоки этого процесса из очередей планировщика
     crate::task::terminate_process_threads(cur_tgid, cur_tid);
