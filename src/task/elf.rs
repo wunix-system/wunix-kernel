@@ -50,6 +50,7 @@ pub struct ElfLoadInfo {
     pub phdr_addr: u64,
     pub phent: u16,
     pub phnum: u16,
+    pub max_vaddr: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +166,7 @@ pub fn load_elf(elf_bytes: &[u8]) -> Result<(UserAddressSpace, ElfLoadInfo), Elf
 
     let mut user_space = UserAddressSpace::new().map_err(|_| ElfError::OutOfMemory)?;
     let mut phdr_addr = 0u64;
+    let mut max_vaddr = 0u64;
 
     for i in 0..ph_num {
         let entry_offset = ph_offset + i * ph_entry_size;
@@ -197,6 +199,11 @@ pub fn load_elf(elf_bytes: &[u8]) -> Result<(UserAddressSpace, ElfLoadInfo), Elf
         // Защита границы Higher-Half: пользовательские сегменты не могут залезать в адресное пространство ядра
         if vaddr >= 0x0000_8000_0000_0000 || (vaddr + ph.p_memsz) > 0x0000_8000_0000_0000 {
             return Err(ElfError::MappingFailed);
+        }
+
+        let seg_end = vaddr + ph.p_memsz;
+        if seg_end > max_vaddr {
+            max_vaddr = seg_end;
         }
 
         let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
@@ -255,6 +262,7 @@ pub fn load_elf(elf_bytes: &[u8]) -> Result<(UserAddressSpace, ElfLoadInfo), Elf
             phdr_addr,
             phent: header.e_phentsize,
             phnum: header.e_phnum,
+            max_vaddr,
         },
     ))
 }

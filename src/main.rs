@@ -194,7 +194,7 @@ pub extern "C" fn _start() -> ! {
 
         for token in cmdline.split_whitespace() {
             if let Some(root_dev) = token.strip_prefix("root=") {
-                let _ = wunix_kernel::fs::mount(root_dev, "/", "fat32", 0);
+                let _ = wunix_kernel::fs::mount(root_dev, "/", "", 0);
             }
         }
     }
@@ -235,6 +235,9 @@ pub extern "C" fn _start() -> ! {
 
     let (mut user_space, elf_info) = wunix_kernel::task::elf::load_elf(&init_binary)
         .expect("FATAL: Failed to load ELF binary for PID 1");
+
+    let brk_start = (elf_info.max_vaddr + 4095) & !4095;
+    wunix_kernel::task::syscall::mem::reset_process_vma(brk_start);
 
     let init_args = alloc::vec![alloc::string::String::from("/bin/init")];
     let init_env = alloc::vec![

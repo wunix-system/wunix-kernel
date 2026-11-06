@@ -3,8 +3,10 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::RwLock;
 
+use super::ext4::Ext4FileSystem;
 use super::fat::Fat32FileSystem;
 use super::path::normalize_path;
+use super::ufs::UfsFileSystem;
 use super::vfs::{FileSystem, VfsError};
 use crate::serial_println;
 
@@ -22,9 +24,9 @@ static MOUNT_TABLE: RwLock<Vec<MountEntry>> = RwLock::new(Vec::new());
 pub fn mount(source: &str, target: &str, fstype: &str, _flags: u64) -> Result<(), VfsError> {
     let norm_target = normalize_path(target);
 
-    let fs: Arc<dyn FileSystem> = if fstype == "vboxsf" {
+    let (fs, detected_fstype): (Arc<dyn FileSystem>, String) = if fstype == "vboxsf" {
         // Общие папки VirtualBox обращаются напрямую к гипервизору без блочного диска
-        Arc::new(crate::drivers::virt::vbox::VBoxSfFileSystem::new(source))
+        (Arc::new(crate::drivers::virt::vbox::VBoxSfFileSystem::new(source)), String::from("vboxsf"))
     } else {
         // Ищем блочное устройство по имени источника (например, "/dev/vda1" или "vda1")
         let dev = match crate::fs::block::get_block_device(source) {
@@ -32,13 +34,40 @@ pub fn mount(source: &str, target: &str, fstype: &str, _flags: u64) -> Result<()
             None => return Err(VfsError::NotFound),
         };
 
-        // Создаем экземпляр файловой системы (FAT32 по умолчанию)
+        // Создаем экземпляр файловой системы по типу
         match fstype {
-            "fat" | "vfat" | "fat32" | "" => {
-                Arc::new(Fat32FileSystem::open(dev).map_err(|e| {
+            "ufs" | "ufs2" => {
+                let ufs = Arc::new(UfsFileSystem::open(dev).map_err(|e| {
+                    serial_println!("mount: failed to open ufs2 on {}: {:?}", source, e);
+                    e
+                })?);
+                (ufs, String::from("ufs"))
+            }
+            "ext4" => {
+                let ext4 = Arc::new(Ext4FileSystem::open(dev).map_err(|e| {
+                    serial_println!("mount: failed to open ext4 on {}: {:?}", source, e);
+                    e
+                })?);
+                (ext4, String::from("ext4"))
+            }
+            "fat" | "vfat" | "fat32" => {
+                let fat = Arc::new(Fat32FileSystem::open(dev).map_err(|e| {
                     serial_println!("mount: failed to open fat32 on {}: {:?}", source, e);
                     e
-                })?)
+                })?);
+                (fat, String::from("fat32"))
+            }
+            "" | "auto" => {
+                // Автодетект: проверяем современные ФС UFS и Ext4, затем FAT32
+                if let Ok(ufs) = UfsFileSystem::open(dev.clone()) {
+                    (Arc::new(ufs), String::from("ufs"))
+                } else if let Ok(ext4) = Ext4FileSystem::open(dev.clone()) {
+                    (Arc::new(ext4), String::from("ext4"))
+                } else if let Ok(fat) = Fat32FileSystem::open(dev) {
+                    (Arc::new(fat), String::from("fat32"))
+                } else {
+                    return Err(VfsError::NotFound);
+                }
             }
             _ => return Err(VfsError::NotSupported),
         }
@@ -58,11 +87,11 @@ pub fn mount(source: &str, target: &str, fstype: &str, _flags: u64) -> Result<()
     table.push(MountEntry {
         source: String::from(source),
         target: norm_target.clone(),
-        fstype: String::from(if fstype.is_empty() { "fat32" } else { fstype }),
+        fstype: detected_fstype.clone(),
         fs,
     });
 
-    serial_println!("vfs: mounted {} on {} ({})", source, norm_target, fstype);
+    serial_println!("vfs: mounted {} on {} ({})", source, norm_target, detected_fstype);
     Ok(())
 }
 

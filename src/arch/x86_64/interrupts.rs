@@ -71,6 +71,11 @@ extern "x86-interrupt" fn page_fault_handler(
     let is_user = (stack_frame.code_segment.0 & 3) == 3;
 
     if is_user {
+        if let Ok(addr) = accessed_addr {
+            if crate::memory::handle_user_page_fault(addr, error_code).is_ok() {
+                return;
+            }
+        }
         serial_println!(
             "[kernel] #PF in Ring 3 at {:?}, error: {:?}, RIP {:#x} - terminating user task",
             accessed_addr,

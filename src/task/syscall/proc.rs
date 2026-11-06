@@ -630,6 +630,9 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     let pml4_phys = user_space.pml4_frame.start_address().as_u64();
     drop(user_space);
 
+    let brk_start = (elf_info.max_vaddr + 4095) & !4095;
+    super::mem::reset_process_vma(brk_start);
+
     static NEXT_PID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(10);
     let parent_tgid = crate::task::current_thread_tgid();
     let child_tgid = NEXT_PID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);

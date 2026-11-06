@@ -358,4 +358,26 @@ impl VirtualMemoryManager {
         self.brk_current = new_brk;
         self.brk_current
     }
+
+    /// Сбрасывает VMA-менеджер при запуске нового процесса (execve)
+    pub fn reset(&mut self, brk_start: u64) {
+        self.areas.clear();
+        self.next_alloc = VMA_START;
+        self.brk_start = brk_start;
+        self.brk_current = brk_start;
+    }
+
+    /// Проверяет, принадлежит ли виртуальный адрес валидному диапазону процесса (куча или VMA)
+    pub fn is_valid_addr(&self, addr: u64) -> bool {
+        let brk_top = (self.brk_current + 4095) & !4095;
+        if addr >= self.brk_start && addr < brk_top {
+            return true;
+        }
+        for area in &self.areas {
+            if addr >= area.start && addr < area.end {
+                return true;
+            }
+        }
+        false
+    }
 }

@@ -34,6 +34,16 @@ pub fn sys_brk(new_brk: u64) -> u64 {
     vma.brk(new_brk)
 }
 
+pub fn reset_process_vma(brk_start: u64) {
+    let mut vma = VMA_MANAGER.lock();
+    vma.reset(brk_start);
+}
+
+pub fn is_valid_user_vma_addr(addr: u64) -> bool {
+    let vma = VMA_MANAGER.lock();
+    vma.is_valid_addr(addr)
+}
+
 
 pub fn sys_arch_prctl(code: u64, addr: u64) -> u64 {
     const ARCH_SET_FS: u64 = 0x1002;

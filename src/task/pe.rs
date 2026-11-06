@@ -319,6 +319,8 @@ pub fn load_pe(bytes: &[u8]) -> Result<(UserAddressSpace, ElfLoadInfo), ElfError
 
     let entry_point = VirtAddr::new(opt.image_base + opt.address_of_entry_point as u64);
 
+    let max_vaddr = opt.image_base + opt.size_of_image as u64;
+
     Ok((
         user_space,
         ElfLoadInfo {
@@ -326,6 +328,7 @@ pub fn load_pe(bytes: &[u8]) -> Result<(UserAddressSpace, ElfLoadInfo), ElfError
             phdr_addr: 0,
             phent: 0,
             phnum: 0,
+            max_vaddr,
         },
     ))
 }

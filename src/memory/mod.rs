@@ -205,6 +205,59 @@ pub fn init(memory_map: &'static [&'static limine::memmap::Entry], hhdm_offset: 
         .expect("Failed to initialize kernel heap");
 }
 
+/// Обрабатывает пользовательский Page Fault (#PF) в Ring 3:
+/// Выполняет отложенное выделение физических страниц (demand paging) для стека пользователя,
+/// диапазона кучи brk и зарегистрированных виртуальных арен VMA.
+pub fn handle_user_page_fault(
+    addr: VirtAddr,
+    error_code: x86_64::structures::idt::PageFaultErrorCode,
+) -> Result<(), ()> {
+    use x86_64::structures::idt::PageFaultErrorCode;
+    if error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) {
+        return Err(());
+    }
+
+    let addr_u64 = addr.as_u64();
+    if addr_u64 >= 0x0000_8000_0000_0000 || addr_u64 < 0x1000 {
+        return Err(());
+    }
+
+    let is_stack = addr_u64 >= (crate::task::elf::USER_STACK_TOP.saturating_sub(8 * 1024 * 1024))
+        && addr_u64 < crate::task::elf::USER_STACK_TOP;
+    let is_vma = crate::task::syscall::mem::is_valid_user_vma_addr(addr_u64);
+
+    if !is_stack && !is_vma {
+        return Err(());
+    }
+
+    let page = Page::<Size4KiB>::containing_address(addr);
+    let hhdm = hhdm_offset();
+    let (current_pml4, _) = Cr3::read();
+    let pml4_virt = VirtAddr::new(hhdm + current_pml4.start_address().as_u64());
+    let pml4_table: &mut PageTable = unsafe { &mut *pml4_virt.as_mut_ptr() };
+    let mut mapper = unsafe { OffsetPageTable::new(pml4_table, VirtAddr::new(hhdm)) };
+
+    let frame = allocate_frame().ok_or(())?;
+    let frame_virt = hhdm + frame.start_address().as_u64();
+    unsafe {
+        core::ptr::write_bytes(frame_virt as *mut u8, 0, 4096);
+    }
+
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+    unsafe {
+        mapper
+            .map_to(page, frame, flags, &mut LockedFrameAllocator)
+            .map_err(|_| ())?
+            .flush();
+    }
+
+    let pml4_idx = page.start_address().p4_index();
+    let cur = pml4_table[pml4_idx].flags();
+    pml4_table[pml4_idx].set_flags(cur | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE);
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
