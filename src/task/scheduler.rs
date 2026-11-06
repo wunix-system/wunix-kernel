@@ -515,14 +515,16 @@ pub fn exit() -> ! {
         // Обработка clear_child_tid: при завершении потока ядро записывает 0 и пробуждает futex
         let clear_tid = prev.clear_child_tid;
         if clear_tid != 0 && clear_tid < 0x0000_8000_0000_0000 {
-            unsafe {
-                core::ptr::write_volatile(clear_tid as *mut u32, 0);
+            if crate::memory::translate_address(clear_tid).is_some() {
+                unsafe {
+                    core::ptr::write_volatile(clear_tid as *mut u32, 0);
+                }
+                drop(lock);
+                let _ = super::futex::futex_wake(clear_tid, 1);
+                lock = SCHEDULER.lock();
+                let sched_reacquired = lock.as_mut().expect("scheduler: reacquire on exit");
+                return do_exit_switch(sched_reacquired, prev);
             }
-            drop(lock);
-            let _ = super::futex::futex_wake(clear_tid, 1);
-            lock = SCHEDULER.lock();
-            let sched_reacquired = lock.as_mut().expect("scheduler: reacquire on exit");
-            return do_exit_switch(sched_reacquired, prev);
         }
 
         do_exit_switch(sched, prev)

@@ -367,10 +367,10 @@ impl VirtualMemoryManager {
         self.brk_current = brk_start;
     }
 
-    /// Проверяет, принадлежит ли виртуальный адрес валидному диапазону процесса (куча или VMA)
+    /// Проверяет, принадлежит ли виртуальный адрес валидному диапазону процесса (сегменты ELF, куча или VMA)
     pub fn is_valid_addr(&self, addr: u64) -> bool {
         let brk_top = (self.brk_current + 4095) & !4095;
-        if addr >= self.brk_start && addr < brk_top {
+        if addr >= 0x40_0000 && addr < brk_top {
             return true;
         }
         for area in &self.areas {

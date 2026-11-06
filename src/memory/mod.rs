@@ -258,6 +258,22 @@ pub fn handle_user_page_fault(
     Ok(())
 }
 
+/// Транслирует виртуальный адрес в физический через текущую активную таблицу страниц (CR3).
+pub fn translate_address(addr: u64) -> Option<u64> {
+    use x86_64::structures::paging::Translate;
+    let hhdm = hhdm_offset();
+    if hhdm == 0 {
+        return None;
+    }
+    let (level_4_table_frame, _) = Cr3::read();
+    let phys = level_4_table_frame.start_address();
+    let virt = VirtAddr::new(phys.as_u64() + hhdm);
+    let page_table_ptr: *mut PageTable = virt.as_mut_ptr();
+    let level_4_table = unsafe { &mut *page_table_ptr };
+    let mapper = unsafe { OffsetPageTable::new(level_4_table, VirtAddr::new(hhdm)) };
+    mapper.translate_addr(VirtAddr::new(addr)).map(|p| p.as_u64())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

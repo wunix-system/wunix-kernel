@@ -69,27 +69,30 @@ extern "x86-interrupt" fn page_fault_handler(
 
     let accessed_addr = Cr2::read();
     let is_user = (stack_frame.code_segment.0 & 3) == 3;
+    let is_user_addr = accessed_addr.as_ref().map(|a| a.as_u64() < 0x0000_8000_0000_0000).unwrap_or(false);
 
-    if is_user {
+    if is_user || is_user_addr {
         if let Ok(addr) = accessed_addr {
             if crate::memory::handle_user_page_fault(addr, error_code).is_ok() {
                 return;
             }
         }
-        serial_println!(
-            "[kernel] #PF in Ring 3 at {:?}, error: {:?}, RIP {:#x} - terminating user task",
-            accessed_addr,
-            error_code,
-            stack_frame.instruction_pointer.as_u64()
-        );
-        crate::task::syscall::sys_exit(128 + 14);
-    } else {
-        serial_println!("EXCEPTION: PAGE FAULT");
-        serial_println!("Accessed Address: {:?}", accessed_addr);
-        serial_println!("Error Code: {:?}", error_code);
-        serial_println!("{:#?}", stack_frame);
-        crate::halt_loop();
+        if is_user {
+            serial_println!(
+                "[kernel] #PF in Ring 3 at {:?}, error: {:?}, RIP {:#x} - terminating user task",
+                accessed_addr,
+                error_code,
+                stack_frame.instruction_pointer.as_u64()
+            );
+            crate::task::syscall::sys_exit(128 + 14);
+        }
     }
+
+    serial_println!("EXCEPTION: PAGE FAULT");
+    serial_println!("Accessed Address: {:?}", accessed_addr);
+    serial_println!("Error Code: {:?}", error_code);
+    serial_println!("{:#?}", stack_frame);
+    crate::halt_loop();
 }
 
 extern "x86-interrupt" fn general_protection_fault_handler(
