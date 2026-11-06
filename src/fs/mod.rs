@@ -20,7 +20,8 @@ use alloc::sync::Arc;
 pub use epoll::EpollInstance;
 pub use eventfd::EventFdHandle;
 pub use fd::{
-    get_file_handle, init_stdio, insert_file_handle, insert_file_handle_at, remove_file_handle,
+    clone_fd_table, get_file_handle, init_stdio, insert_file_handle, insert_file_handle_at,
+    remove_file_handle, remove_process_fd_table, share_fd_table,
 };
 pub use handle::{
     FileHandle, RegularFileHandle, StdinHandle, StdoutStderrHandle, EPOLLERR, EPOLLET, EPOLLHUP,

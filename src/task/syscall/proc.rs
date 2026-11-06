@@ -110,6 +110,12 @@ pub fn sys_clone(
     };
     let child_pgid = crate::task::current_thread_pgid();
 
+    if (flags & 0x00000400) != 0 {
+        crate::fs::share_fd_table(parent_tgid, child_tgid);
+    } else {
+        crate::fs::clone_fd_table(parent_tgid, child_tgid);
+    }
+
     let child_thread = alloc::boxed::Box::new(crate::task::Thread::new_clone(
         child_tid,
         child_tgid,
@@ -627,6 +633,7 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     static NEXT_PID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(10);
     let parent_tgid = crate::task::current_thread_tgid();
     let child_tgid = NEXT_PID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    crate::fs::clone_fd_table(parent_tgid, child_tgid);
     crate::task::set_current_thread_tgid(child_tgid);
 
     // Выделяем собственный изолированный стек ядра (32 КиБ) для дочернего процесса,
@@ -673,6 +680,7 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     crate::task::set_current_thread_gid(old_gid, old_egid, old_sgid);
     crate::task::set_current_thread_kernel_stack_top(old_kstack_top);
     crate::arch::x86_64::gdt::set_tss_rsp0(old_kstack_top);
+    crate::fs::remove_process_fd_table(child_tgid);
     crate::task::set_current_thread_tgid(parent_tgid);
 
     exit_code
@@ -700,6 +708,7 @@ pub fn sys_exit_group(status: u64) -> ! {
 
     // Удаляем все остальные потоки этого процесса из очередей планировщика
     crate::task::terminate_process_threads(cur_tgid, cur_tid);
+    crate::fs::remove_process_fd_table(cur_tgid);
 
     unsafe {
         crate::arch::x86_64::syscall::resume_parent_process(status);
