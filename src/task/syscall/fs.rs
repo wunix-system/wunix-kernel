@@ -150,9 +150,15 @@ pub fn sys_open(path_ptr: u64, flags: u64, mode: u64) -> u64 {
         }
     };
 
+    let initial_offset = if (flags & 0x400) != 0 {
+        node.metadata().size
+    } else {
+        0
+    };
+
     let handle = Arc::new(RegularFileHandle {
         inode: node,
-        offset: Mutex::new(0),
+        offset: Mutex::new(initial_offset),
         flags: core::sync::atomic::AtomicU32::new(flags as u32),
     });
 

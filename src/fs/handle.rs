@@ -100,6 +100,9 @@ impl FileHandle for RegularFileHandle {
 
     fn write(&self, buf: &[u8]) -> Result<usize, i64> {
         let mut offset_guard = self.offset.lock();
+        if (self.flags.load(Ordering::Relaxed) & 0x400) != 0 {
+            *offset_guard = self.inode.metadata().size;
+        }
         let bytes_written = self.inode.write_at(*offset_guard, buf).map_err(|_| -9i64)?;
         *offset_guard += bytes_written;
         Ok(bytes_written)
