@@ -390,6 +390,18 @@ pub fn to_dos_83(name: &str) -> Option<([u8; 8], [u8; 3])> {
     Some((name_buf, ext_buf))
 }
 
+fn default_dir_permissions(name: &str) -> (u16, u32, u32) {
+    if name.eq_ignore_ascii_case("tmp") {
+        (0o1777, 0, 0)
+    } else if name.eq_ignore_ascii_case("admin") {
+        (0o755, 1000, 1000)
+    } else if name.eq_ignore_ascii_case("root") {
+        (0o700, 0, 0)
+    } else {
+        (0o755, 0, 0)
+    }
+}
+
 fn default_file_permissions(name: &str) -> (u16, u32, u32) {
     let is_suid = name.eq_ignore_ascii_case("sudo")
         || name.eq_ignore_ascii_case("su")
@@ -748,15 +760,15 @@ impl Inode for Fat32DirInode {
                 let is_dir = (entry.raw.attr & FAT32_ATTR_DIRECTORY) != 0;
 
                 if is_dir {
-                    let perms = if display.eq_ignore_ascii_case("tmp") { 0o777 } else { 0o755 };
+                    let (perms, uid, gid) = default_dir_permissions(&display);
                     return Ok(Arc::new(Fat32DirInode {
                         inner: self.inner.clone(),
                         cluster: first_clus,
                         parent_cluster: self.cluster,
                         inode_id: (first_clus as u64) + 1000,
                         permissions: AtomicU16::new(perms),
-                        uid: AtomicU32::new(0),
-                        gid: AtomicU32::new(0),
+                        uid: AtomicU32::new(uid),
+                        gid: AtomicU32::new(gid),
                     }));
                 } else {
                     let (perms, uid, gid) = default_file_permissions(&display);
@@ -993,15 +1005,17 @@ impl Inode for Fat32DirInode {
         let egid = crate::task::current_thread_egid();
 
         if is_dir {
-            let perms = if name.eq_ignore_ascii_case("tmp") { 0o777 } else { 0o755 };
+            let (default_perms, default_uid, default_gid) = default_dir_permissions(name);
+            let uid = if euid != 0 { euid } else { default_uid };
+            let gid = if egid != 0 { egid } else { default_gid };
             Ok(Arc::new(Fat32DirInode {
                 inner: self.inner.clone(),
                 cluster: first_clus,
                 parent_cluster: self.cluster,
                 inode_id: (first_clus as u64) + 1000,
-                permissions: AtomicU16::new(perms),
-                uid: AtomicU32::new(euid),
-                gid: AtomicU32::new(egid),
+                permissions: AtomicU16::new(default_perms),
+                uid: AtomicU32::new(uid),
+                gid: AtomicU32::new(gid),
             }))
         } else {
             let (default_perms, _, _) = default_file_permissions(name);
