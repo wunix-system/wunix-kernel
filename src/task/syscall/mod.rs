@@ -77,6 +77,8 @@ pub const SYS_GETPEERNAME: u64 = 52;
 pub const SYS_SETSOCKOPT: u64 = 54;
 pub const SYS_GETSOCKOPT: u64 = 55;
 pub const SYS_CLONE: u64 = 56;
+pub const SYS_FORK: u64 = 57;
+pub const SYS_VFORK: u64 = 58;
 pub const SYS_EXECVE: u64 = 59;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_WAIT4: u64 = 61;
@@ -353,6 +355,8 @@ pub extern "C" fn syscall_dispatcher(
         SYS_SETTIMEOFDAY => sys_settimeofday(arg1, arg2),
         SYS_REBOOT => sys_reboot(arg1, arg2, arg3, arg4),
         SYS_CLONE => sys_clone(arg1, arg2, arg3, arg4, arg5, r),
+        SYS_FORK => sys_fork(r),
+        SYS_VFORK => sys_vfork(r),
         SYS_EXECVE => sys_execve(arg1, arg2, arg3),
         SYS_EXIT => sys_exit(arg1),
         SYS_WAIT4 => sys_wait4(arg1 as i64, arg2, arg3, arg4),

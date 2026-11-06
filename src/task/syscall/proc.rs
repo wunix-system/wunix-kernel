@@ -140,6 +140,16 @@ pub fn sys_clone(
     child_tid.0 as u64
 }
 
+pub fn sys_fork(regs: &SyscallRegisters) -> u64 {
+    // SIGCHLD = 17
+    sys_clone(17, 0, 0, 0, 0, regs)
+}
+
+pub fn sys_vfork(regs: &SyscallRegisters) -> u64 {
+    // CLONE_VFORK (0x4000) | CLONE_VM (0x100) | SIGCHLD (17)
+    sys_clone(0x00004000 | 0x00000100 | 17, 0, 0, 0, 0, regs)
+}
+
 pub fn sys_getppid() -> u64 {
     crate::task::current_thread_parent_tgid()
 }
