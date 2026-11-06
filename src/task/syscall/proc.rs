@@ -101,7 +101,8 @@ pub fn sys_clone(
         0
     };
 
-    let (child_tgid, parent_tgid) = if (flags & 0x00010000) != 0 {
+    let is_same_thread_group = (flags & 0x00010000) != 0;
+    let (child_tgid, parent_tgid) = if is_same_thread_group {
         // CLONE_THREAD: тот же процесс
         (crate::task::current_thread_tgid(), crate::task::current_thread_parent_tgid())
     } else {
@@ -121,7 +122,7 @@ pub fn sys_clone(
         core::arch::asm!("mov {}, cr3", out(reg) child_cr3);
     }
 
-    let child_thread = alloc::boxed::Box::new(crate::task::Thread::new_clone(
+    let mut child_thread = alloc::boxed::Box::new(crate::task::Thread::new_clone(
         child_tid,
         child_tgid,
         parent_tgid,
@@ -140,6 +141,7 @@ pub fn sys_clone(
         crate::task::current_thread_sgid(),
         crate::task::current_thread_umask(),
     ));
+    child_thread.is_main = !is_same_thread_group;
 
     crate::task::add_thread(child_thread);
 
@@ -661,6 +663,7 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     let old_kstack_top = crate::task::current_thread_kernel_stack_top();
     crate::task::set_current_thread_kernel_stack_top(child_kstack_top);
     crate::arch::x86_64::gdt::set_tss_rsp0(child_kstack_top);
+    crate::arch::x86_64::syscall::set_kernel_stack(child_kstack_top);
 
     crate::task::set_current_thread_uid(child_uid, child_euid, child_suid);
     crate::task::set_current_thread_gid(child_gid, child_egid, child_sgid);
@@ -678,6 +681,9 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     unsafe { crate::arch::x86_64::syscall::write_fs_base(0); }
     crate::task::set_current_fs_base(0);
 
+    let prev_sync = crate::task::is_current_thread_sync_child();
+    crate::task::set_current_thread_sync_child(true);
+
     let exit_code = unsafe {
         crate::arch::x86_64::syscall::enter_user_child(
             elf_info.entry_point.as_u64(),
@@ -689,6 +695,8 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
         )
     };
 
+    crate::task::set_current_thread_sync_child(prev_sync);
+
     // Восстанавливаем FS_BASE родительского процесса
     unsafe { crate::arch::x86_64::syscall::write_fs_base(old_fs_base); }
     crate::task::set_current_fs_base(old_fs_base);
@@ -699,9 +707,11 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     crate::task::set_current_thread_gid(old_gid, old_egid, old_sgid);
     crate::task::set_current_thread_kernel_stack_top(old_kstack_top);
     crate::arch::x86_64::gdt::set_tss_rsp0(old_kstack_top);
+    crate::arch::x86_64::syscall::set_kernel_stack(old_kstack_top);
     crate::fs::remove_process_fd_table(child_tgid);
     crate::task::set_current_thread_tgid(parent_tgid);
 
+    crate::serial_println!("[execve done] ret={}", exit_code);
     exit_code
 }
 
@@ -713,7 +723,9 @@ pub fn sys_yield() -> u64 {
 
 
 pub fn sys_exit(status: u64) -> ! {
-    if crate::task::is_current_main_thread() {
+    let is_sync = crate::task::is_current_thread_sync_child();
+    let has_parent = unsafe { crate::arch::x86_64::syscall::has_parent_process() };
+    if (is_sync && has_parent) || crate::task::is_current_main_thread() {
         sys_exit_group(status);
     } else {
         crate::task::exit();
@@ -724,13 +736,20 @@ pub fn sys_exit(status: u64) -> ! {
 pub fn sys_exit_group(status: u64) -> ! {
     let cur_tgid = crate::task::current_thread_tgid();
     let cur_tid = crate::task::current_thread_id();
+    let is_sync = crate::task::is_current_thread_sync_child();
+    let has_parent = unsafe { crate::arch::x86_64::syscall::has_parent_process() };
+    crate::serial_println!("[exit_group] cur_tgid={} cur_tid={} is_sync={} has_parent={}", cur_tgid, cur_tid.0, is_sync, has_parent);
 
     // Удаляем все остальные потоки этого процесса из очередей планировщика
     crate::task::terminate_process_threads(cur_tgid, cur_tid);
     crate::fs::remove_process_fd_table(cur_tgid);
 
-    unsafe {
-        crate::arch::x86_64::syscall::resume_parent_process(status);
+    if is_sync && has_parent {
+        unsafe {
+            crate::arch::x86_64::syscall::resume_parent_process(status);
+        }
+    } else {
+        crate::task::exit();
     }
 }
 

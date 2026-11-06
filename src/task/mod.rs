@@ -15,9 +15,9 @@ pub use scheduler::{
     current_thread_gid, current_thread_id, current_thread_kernel_stack_top,
     current_thread_parent_tgid, current_thread_pgid, current_thread_sgid, current_thread_suid,
     current_thread_tgid, current_thread_uid, current_thread_umask, exit, get_current_fs_base,
-    has_ready_threads, init, is_current_main_thread, is_initialized, set_current_clear_child_tid,
+    has_ready_threads, init, is_current_main_thread, is_current_thread_sync_child, is_initialized, set_current_clear_child_tid,
     set_current_fs_base, set_current_thread_gid, set_current_thread_kernel_stack_top,
-    set_current_thread_pgid, set_current_thread_tgid, set_current_thread_uid,
+    set_current_thread_pgid, set_current_thread_sync_child, set_current_thread_tgid, set_current_thread_uid,
     set_current_thread_umask, spawn, terminate_process_threads, unblock_thread, yield_now,
 };
 pub use syslib::{
@@ -55,6 +55,8 @@ pub fn on_timer_tick(is_user: bool) {
     let ticks = CURRENT_TIMESLICE.fetch_add(1, Ordering::Relaxed) + 1;
     if ticks >= TIMESLICE_TICKS {
         CURRENT_TIMESLICE.store(0, Ordering::Relaxed);
-        yield_now();
+        if has_ready_threads() {
+            yield_now();
+        }
     }
 }

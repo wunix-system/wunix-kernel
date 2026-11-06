@@ -248,6 +248,8 @@ pub fn rescan_partitions(base_name: &str) {
     for (i, p) in parts.iter().enumerate() {
         let part_num = i + 1;
         let part_name = alloc::format!("{}{}", base_name, part_num);
+        let is_new = !REGISTERED_BLOCK_DEVS.read().contains_key(&part_name);
+
         let part_dev = Arc::new(Mutex::new(PartitionDevice::new(
             base_dev.clone(),
             p.start_lba as u64,
@@ -256,19 +258,21 @@ pub fn rescan_partitions(base_name: &str) {
 
         register_block_device(part_name.clone(), part_dev);
 
-        if let Ok(dev_dir) = crate::fs::open("/dev") {
-            let _ = dev_dir.create(&part_name, InodeType::BlockDevice);
-        }
+        if is_new {
+            if let Ok(dev_dir) = crate::fs::open("/dev") {
+                let _ = dev_dir.create(&part_name, InodeType::BlockDevice);
+            }
 
-        let mb = ((p.sector_count as u64) * 512) / (1024 * 1024);
-        serial_println!(
-            "mbr: rescan registered /dev/{} start LBA {}, size {} MB ({} sectors), type {:#02x}",
-            part_name,
-            p.start_lba,
-            mb,
-            p.sector_count,
-            p.part_type
-        );
+            let mb = ((p.sector_count as u64) * 512) / (1024 * 1024);
+            serial_println!(
+                "mbr: registered /dev/{} start LBA {}, size {} MB ({} sectors), type {:#02x}",
+                part_name,
+                p.start_lba,
+                mb,
+                p.sector_count,
+                p.part_type
+            );
+        }
     }
 }
 

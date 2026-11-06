@@ -206,6 +206,27 @@ pub fn is_current_main_thread() -> bool {
     })
 }
 
+pub fn is_current_thread_sync_child() -> bool {
+    interrupts::without_interrupts(|| {
+        SCHEDULER
+            .lock()
+            .as_ref()
+            .and_then(|s| s.current.as_ref())
+            .map(|t| t.is_sync_child)
+            .unwrap_or(false)
+    })
+}
+
+pub fn set_current_thread_sync_child(val: bool) {
+    interrupts::without_interrupts(|| {
+        if let Some(sched) = SCHEDULER.lock().as_mut() {
+            if let Some(t) = sched.current.as_mut() {
+                t.is_sync_child = val;
+            }
+        }
+    });
+}
+
 pub fn set_current_thread_tgid(tgid: u64) {
     interrupts::without_interrupts(|| {
         if let Some(sched) = SCHEDULER.lock().as_mut() {
@@ -391,6 +412,13 @@ pub fn block_current(deadline: Option<u64>) {
             sched.blocked_threads.insert(prev_id, prev);
 
             let mut next = sched.ready_queue.pop_front().expect("scheduler: ready queue empty");
+            if next.rsp.is_null() {
+                sched.ready_queue.push_back(next);
+                if let Some(p) = sched.blocked_threads.remove(&prev_id) {
+                    sched.current = Some(p);
+                }
+                return None;
+            }
             next.state = ThreadState::Running;
 
             prepare_thread_hardware_context(&next);
@@ -484,6 +512,13 @@ pub fn yield_now() {
         sched.ready_queue.push_back(prev);
 
         let mut next = sched.ready_queue.pop_front().expect("scheduler: ready queue empty");
+        if next.rsp.is_null() {
+            sched.ready_queue.push_back(next);
+            if let Some(p) = sched.ready_queue.pop_back() {
+                sched.current = Some(p);
+            }
+            return None;
+        }
         next.state = ThreadState::Running;
 
         prepare_thread_hardware_context(&next);

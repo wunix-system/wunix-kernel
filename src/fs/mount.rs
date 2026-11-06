@@ -37,24 +37,15 @@ pub fn mount(source: &str, target: &str, fstype: &str, _flags: u64) -> Result<()
         // Создаем экземпляр файловой системы по типу
         match fstype {
             "ufs" | "ufs2" => {
-                let ufs = Arc::new(UfsFileSystem::open(dev).map_err(|e| {
-                    serial_println!("mount: failed to open ufs2 on {}: {:?}", source, e);
-                    e
-                })?);
+                let ufs = Arc::new(UfsFileSystem::open(dev)?);
                 (ufs, String::from("ufs"))
             }
             "ext4" => {
-                let ext4 = Arc::new(Ext4FileSystem::open(dev).map_err(|e| {
-                    serial_println!("mount: failed to open ext4 on {}: {:?}", source, e);
-                    e
-                })?);
+                let ext4 = Arc::new(Ext4FileSystem::open(dev)?);
                 (ext4, String::from("ext4"))
             }
             "fat" | "vfat" | "fat32" => {
-                let fat = Arc::new(Fat32FileSystem::open(dev).map_err(|e| {
-                    serial_println!("mount: failed to open fat32 on {}: {:?}", source, e);
-                    e
-                })?);
+                let fat = Arc::new(Fat32FileSystem::open(dev)?);
                 (fat, String::from("fat32"))
             }
             "" | "auto" => {
