@@ -183,7 +183,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFra
         crate::task::syscall::sys_exit(130);
     }
 
-    crate::task::on_timer_tick();
+    crate::task::on_timer_tick(is_user);
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {

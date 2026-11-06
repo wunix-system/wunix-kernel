@@ -37,13 +37,20 @@ pub fn reset_timeslice() {
     CURRENT_TIMESLICE.store(0, Ordering::Relaxed);
 }
 
-pub fn on_timer_tick() {
+pub fn on_timer_tick(is_user: bool) {
     if !is_initialized() {
         return;
     }
 
     // Проверяем дедлайны спящих потоков (futex, nanosleep, epoll)
     scheduler::check_timeouts();
+
+    // Вытеснение по кванту времени разрешено только при возврате в Ring 3 (пользовательский режим).
+    // Асинхронное переключение контекста внутри Ring 0 способно нарушить атомарность
+    // критических секций ядра под спинлоками и повредить фрейм возврата прерывания.
+    if !is_user {
+        return;
+    }
 
     let ticks = CURRENT_TIMESLICE.fetch_add(1, Ordering::Relaxed) + 1;
     if ticks >= TIMESLICE_TICKS {
