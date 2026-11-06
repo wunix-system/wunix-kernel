@@ -17,6 +17,12 @@ pub const FAT32_ATTR_LFN: u8 = 0x0F;
 
 pub const FAT32_EOC: u32 = 0x0FFF_FFFF;
 
+pub struct FatCache {
+    pub sector_idx: u64,
+    pub data: [u8; 512],
+    pub dirty: bool,
+}
+
 /// Внутреннее состояние и геометрия смонтированной файловой системы FAT32
 pub struct Fat32Inner {
     pub dev: Arc<Mutex<dyn BlockDevice>>,
@@ -30,6 +36,7 @@ pub struct Fat32Inner {
     pub data_start_lba: u64,
     pub cluster_bytes: usize,
     pub last_alloc_cluster: Mutex<u32>,
+    pub fat_cache: Mutex<FatCache>,
 }
 
 impl Fat32Inner {
@@ -74,6 +81,11 @@ impl Fat32Inner {
             data_start_lba,
             cluster_bytes,
             last_alloc_cluster: Mutex::new(2),
+            fat_cache: Mutex::new(FatCache {
+                sector_idx: u64::MAX,
+                data: [0u8; 512],
+                dirty: false,
+            }),
         })
     }
 
@@ -82,51 +94,74 @@ impl Fat32Inner {
         self.data_start_lba + ((cluster as u64 - 2) * self.sectors_per_cluster as u64)
     }
 
-    /// Считывает значение элемента таблицы FAT для заданного кластера
+    /// Сбрасывает «грязный» сектор кэша FAT на диск в обе копии таблицы FAT
+    pub fn flush_fat_cache(&self) -> Result<(), VfsError> {
+        let mut cache = self.fat_cache.lock();
+        if cache.dirty && cache.sector_idx != u64::MAX {
+            let mut dev = self.dev.lock();
+            for f in 0..self.num_fats {
+                let fat_sec = self.fat_start_lba + (f as u64 * self.sectors_per_fat as u64) + cache.sector_idx;
+                dev.write_sectors(fat_sec, &cache.data).map_err(|_| VfsError::IoError)?;
+            }
+            cache.dirty = false;
+        }
+        Ok(())
+    }
+
+    fn load_fat_cache_sector(&self, cache: &mut FatCache, sec_idx: u64) -> Result<(), VfsError> {
+        if cache.sector_idx == sec_idx {
+            return Ok(());
+        }
+        if cache.dirty && cache.sector_idx != u64::MAX {
+            let mut dev = self.dev.lock();
+            for f in 0..self.num_fats {
+                let fat_sec = self.fat_start_lba + (f as u64 * self.sectors_per_fat as u64) + cache.sector_idx;
+                dev.write_sectors(fat_sec, &cache.data).map_err(|_| VfsError::IoError)?;
+            }
+            cache.dirty = false;
+        }
+        let fat_sec = self.fat_start_lba + sec_idx;
+        self.dev.lock().read_sectors(fat_sec, &mut cache.data).map_err(|_| VfsError::IoError)?;
+        cache.sector_idx = sec_idx;
+        Ok(())
+    }
+
+    /// Считывает значение элемента таблицы FAT для заданного кластера через кэш секторов FAT
     pub fn get_fat_entry(&self, cluster: u32) -> Result<u32, VfsError> {
         let fat_offset = (cluster as u64) * 4;
-        let fat_sector = self.fat_start_lba + (fat_offset / 512);
+        let sec_idx = fat_offset / 512;
         let offset_in_sec = (fat_offset % 512) as usize;
 
-        let mut sec_buf = [0u8; 512];
-        self.dev
-            .lock()
-            .read_sectors(fat_sector, &mut sec_buf)
-            .map_err(|_| VfsError::IoError)?;
+        let mut cache = self.fat_cache.lock();
+        self.load_fat_cache_sector(&mut cache, sec_idx)?;
 
         let val = u32::from_le_bytes([
-            sec_buf[offset_in_sec],
-            sec_buf[offset_in_sec + 1],
-            sec_buf[offset_in_sec + 2],
-            sec_buf[offset_in_sec + 3],
+            cache.data[offset_in_sec],
+            cache.data[offset_in_sec + 1],
+            cache.data[offset_in_sec + 2],
+            cache.data[offset_in_sec + 3],
         ]);
 
         Ok(val & 0x0FFF_FFFF)
     }
 
-    /// Записывает новое значение в таблицу FAT (обновляя обе копии таблицы FAT1 и FAT2)
+    /// Записывает новое значение в таблицу FAT через кэш секторов
     pub fn set_fat_entry(&self, cluster: u32, value: u32) -> Result<(), VfsError> {
         let fat_offset = (cluster as u64) * 4;
+        let sec_idx = fat_offset / 512;
         let offset_in_sec = (fat_offset % 512) as usize;
         let val_bytes = (value & 0x0FFF_FFFF).to_le_bytes();
 
-        let mut sec_buf = [0u8; 512];
-
-        for f in 0..self.num_fats {
-            let fat_sector = self.fat_start_lba + (f as u64 * self.sectors_per_fat as u64) + (fat_offset / 512);
-            {
-                let mut dev = self.dev.lock();
-                dev.read_sectors(fat_sector, &mut sec_buf).map_err(|_| VfsError::IoError)?;
-                sec_buf[offset_in_sec..offset_in_sec + 4].copy_from_slice(&val_bytes);
-                dev.write_sectors(fat_sector, &sec_buf).map_err(|_| VfsError::IoError)?;
-            }
-        }
+        let mut cache = self.fat_cache.lock();
+        self.load_fat_cache_sector(&mut cache, sec_idx)?;
+        cache.data[offset_in_sec..offset_in_sec + 4].copy_from_slice(&val_bytes);
+        cache.dirty = true;
 
         Ok(())
     }
 
     /// Сканирует таблицу FAT и выделяет первый свободный кластер (значение 0).
-    /// Оптимизировано: чтение таблицы FAT целыми секторами (по 128 кластеров)
+    /// Оптимизировано: чтение таблицы FAT целыми секторами через кэш FAT
     /// и кэширование курсора для мгновенного линейного выделения кластеров без O(N^2) I/O.
     pub fn alloc_cluster(&self) -> Result<u32, VfsError> {
         let max_clusters = (self.sectors_per_fat as u64 * 512) / 4;
@@ -140,17 +175,11 @@ impl Fat32Inner {
         };
 
         let start_sec = (start_cluster as u64 * 4) / 512;
-        let mut sec_buf = [0u8; 512];
+        let mut cache = self.fat_cache.lock();
 
         for s in 0..total_fat_secs {
             let sec_idx = (start_sec + s) % total_fat_secs;
-            let fat_sec_lba = self.fat_start_lba + sec_idx;
-
-            {
-                let mut dev = self.dev.lock();
-                dev.read_sectors(fat_sec_lba, &mut sec_buf)
-                    .map_err(|_| VfsError::IoError)?;
-            }
+            self.load_fat_cache_sector(&mut cache, sec_idx)?;
 
             for entry_idx in 0..128 {
                 let cluster_num = (sec_idx * 128 + entry_idx as u64) as u32;
@@ -159,16 +188,16 @@ impl Fat32Inner {
                 }
                 let off = entry_idx * 4;
                 let val = u32::from_le_bytes([
-                    sec_buf[off],
-                    sec_buf[off + 1],
-                    sec_buf[off + 2],
-                    sec_buf[off + 3],
+                    cache.data[off],
+                    cache.data[off + 1],
+                    cache.data[off + 2],
+                    cache.data[off + 3],
                 ]) & 0x0FFF_FFFF;
 
                 if val == 0 {
                     *cursor = cluster_num + 1;
-                    drop(cursor);
-                    self.set_fat_entry(cluster_num, FAT32_EOC)?;
+                    cache.data[off..off + 4].copy_from_slice(&(FAT32_EOC & 0x0FFF_FFFF).to_le_bytes());
+                    cache.dirty = true;
                     return Ok(cluster_num);
                 }
             }
@@ -184,6 +213,7 @@ impl Fat32Inner {
             self.set_fat_entry(curr, 0)?;
             curr = next;
         }
+        self.flush_fat_cache()?;
         Ok(())
     }
 
@@ -501,14 +531,18 @@ impl Inode for Fat32FileInode {
             let clus_id = chain[clus_idx];
             if offset_in_clus != 0 || chunk < clus_size {
                 self.inner.read_cluster(clus_id, &mut clus_buf)?;
+                clus_buf[offset_in_clus..offset_in_clus + chunk]
+                    .copy_from_slice(&buf[bytes_written..bytes_written + chunk]);
+                self.inner.write_cluster(clus_id, &clus_buf)?;
+            } else {
+                // Прямая запись полного кластера без чтения и промежуточного буфера
+                self.inner.write_cluster(clus_id, &buf[bytes_written..bytes_written + chunk])?;
             }
-
-            clus_buf[offset_in_clus..offset_in_clus + chunk]
-                .copy_from_slice(&buf[bytes_written..bytes_written + chunk]);
-            self.inner.write_cluster(clus_id, &clus_buf)?;
 
             bytes_written += chunk;
         }
+
+        let _ = self.inner.flush_fat_cache();
 
         let mut size_guard = self.file_size.lock();
         if end_offset > *size_guard {
@@ -819,6 +853,7 @@ impl Inode for Fat32DirInode {
             let new_c = self.inner.alloc_cluster()?;
             let last = *chain.last().unwrap_or(&self.cluster);
             self.inner.set_fat_entry(last, new_c)?;
+            self.inner.flush_fat_cache()?;
             chain.push(new_c);
             target_clus = new_c;
             target_slot_idx = 0;
