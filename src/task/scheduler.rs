@@ -330,6 +330,25 @@ pub fn unblock_thread(id: ThreadId) {
     });
 }
 
+fn prepare_thread_hardware_context(next: &Thread) {
+    if next.kernel_stack_top != 0 {
+        crate::arch::x86_64::syscall::set_kernel_stack(next.kernel_stack_top);
+        crate::arch::x86_64::gdt::set_tss_rsp0(next.kernel_stack_top);
+    }
+    unsafe {
+        crate::arch::x86_64::syscall::write_fs_base(next.fs_base);
+    }
+    if next.cr3 != 0 {
+        let cur_cr3: u64;
+        unsafe {
+            core::arch::asm!("mov {}, cr3", out(reg) cur_cr3);
+            if next.cr3 != cur_cr3 {
+                core::arch::asm!("mov cr3, {}", in(reg) next.cr3);
+            }
+        }
+    }
+}
+
 /// Переводит текущий поток в состояние Blocked и переключает контекст на следующий готовый поток.
 pub fn block_current(deadline: Option<u64>) {
     loop {
@@ -362,7 +381,10 @@ pub fn block_current(deadline: Option<u64>) {
 
             let mut prev = sched.current.take().expect("scheduler: no current thread to block");
             let cur_fs = unsafe { crate::arch::x86_64::syscall::read_fs_base() };
+            let cur_cr3: u64;
+            unsafe { core::arch::asm!("mov {}, cr3", out(reg) cur_cr3); }
             prev.fs_base = cur_fs;
+            prev.cr3 = cur_cr3;
             prev.state = ThreadState::Blocked;
             prev.wait_deadline = deadline;
             let prev_id = prev.id;
@@ -371,13 +393,7 @@ pub fn block_current(deadline: Option<u64>) {
             let mut next = sched.ready_queue.pop_front().expect("scheduler: ready queue empty");
             next.state = ThreadState::Running;
 
-            if next.kernel_stack_top != 0 {
-                crate::arch::x86_64::syscall::set_kernel_stack(next.kernel_stack_top);
-                crate::arch::x86_64::gdt::set_tss_rsp0(next.kernel_stack_top);
-            }
-            unsafe {
-                crate::arch::x86_64::syscall::write_fs_base(next.fs_base);
-            }
+            prepare_thread_hardware_context(&next);
 
             let prev_rsp = &mut sched.blocked_threads.get_mut(&prev_id).unwrap().rsp as *mut *mut u8;
             let next_rsp = next.rsp as *const u8;
@@ -460,20 +476,17 @@ pub fn yield_now() {
 
         let mut prev = sched.current.take().expect("scheduler: no current thread");
         let cur_fs = unsafe { crate::arch::x86_64::syscall::read_fs_base() };
+        let cur_cr3: u64;
+        unsafe { core::arch::asm!("mov {}, cr3", out(reg) cur_cr3); }
         prev.fs_base = cur_fs;
+        prev.cr3 = cur_cr3;
         prev.state = ThreadState::Ready;
         sched.ready_queue.push_back(prev);
 
         let mut next = sched.ready_queue.pop_front().expect("scheduler: ready queue empty");
         next.state = ThreadState::Running;
 
-        if next.kernel_stack_top != 0 {
-            crate::arch::x86_64::syscall::set_kernel_stack(next.kernel_stack_top);
-            crate::arch::x86_64::gdt::set_tss_rsp0(next.kernel_stack_top);
-        }
-        unsafe {
-            crate::arch::x86_64::syscall::write_fs_base(next.fs_base);
-        }
+        prepare_thread_hardware_context(&next);
 
         // Извлекаем стабильный указатель на поле rsp внутри Box<Thread> в очереди
         let prev_rsp = &mut sched.ready_queue.back_mut().unwrap().rsp as *mut *mut u8;
@@ -536,13 +549,7 @@ fn do_exit_switch(sched: &mut Scheduler, mut prev: Box<Thread>) -> *const u8 {
     let mut next = sched.ready_queue.pop_front().expect("scheduler: no runnable threads on exit");
     next.state = ThreadState::Running;
 
-    if next.kernel_stack_top != 0 {
-        crate::arch::x86_64::syscall::set_kernel_stack(next.kernel_stack_top);
-        crate::arch::x86_64::gdt::set_tss_rsp0(next.kernel_stack_top);
-    }
-    unsafe {
-        crate::arch::x86_64::syscall::write_fs_base(next.fs_base);
-    }
+    prepare_thread_hardware_context(&next);
 
     let next_rsp = next.rsp as *const u8;
     sched.current = Some(next);

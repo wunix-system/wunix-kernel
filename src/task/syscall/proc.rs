@@ -116,6 +116,11 @@ pub fn sys_clone(
         crate::fs::clone_fd_table(parent_tgid, child_tgid);
     }
 
+    let child_cr3: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr3", out(reg) child_cr3);
+    }
+
     let child_thread = alloc::boxed::Box::new(crate::task::Thread::new_clone(
         child_tid,
         child_tgid,
@@ -124,6 +129,7 @@ pub fn sys_clone(
         stack,
         kernel_stack_top,
         child_rsp,
+        child_cr3,
         child_fs_base,
         clear_tid,
         crate::task::current_thread_uid(),
