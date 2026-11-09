@@ -351,6 +351,22 @@ pub fn handle_scancode(scancode: u8) {
             return;
         }
 
+        // 3. Аппаратная клавиша Tab (включая обратную табуляцию Shift+Tab).
+        // Обычный Tab передает байт 0x09 ('\t').
+        // Комбинация Shift+Tab генерирует последовательность ANSI \x1b[Z (CSI Z / Back-Tab),
+        // которая позволяет терминалам и шеллам циклически листать подсказки назад.
+        if state == KeyState::Down && key_event.code == KeyCode::Tab {
+            let mut queue = KEY_QUEUE.lock();
+            if is_shift {
+                for &ch in &['\x1b', '[', 'Z'] {
+                    let _ = queue.push(ch);
+                }
+            } else {
+                let _ = queue.push('\t');
+            }
+            return;
+        }
+
         // 2. Комбинации Ctrl+Shift (копирование и вставка как в Linux: Ctrl+Shift+C, Ctrl+Shift+V)
         if state == KeyState::Down && is_ctrl && is_shift {
             let seq: Option<&'static [char]> = match key_event.code {
@@ -375,15 +391,10 @@ pub fn handle_scancode(scancode: u8) {
                 KeyCode::A => Some('\x01'), // SOH (Start of heading / начало строки)
                 KeyCode::B => Some('\x02'), // STX (Курсор влево)
                 KeyCode::C => {
-                    crate::task::signal::raise_sigint();
-                    if !crate::task::syscall::proc::is_current_interactive_shell() {
-                        // Для дочернего процесса комбинация Ctrl+C - это безусловный сигнал SIGINT.
-                        // Очищаем накопленный ввод и немедленно выходим.
-                        KEY_QUEUE.lock().clear();
-                        crate::fs::handle::flush_stdin();
-                        return;
+                    if crate::task::syscall::fs::is_isig_enabled() {
+                        crate::task::signal::raise_sigint();
                     }
-                    Some('\x03') // ETX / SIGINT
+                    Some('\x03')
                 }
                 KeyCode::D => Some('\x04'), // EOT / EOF
                 KeyCode::E => Some('\x05'), // ENQ (Конец строки)
