@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use spin::Mutex;
 
 use super::{FileHandle, EPOLLERR, EPOLLHUP, EPOLLIN, EPOLLOUT, O_NONBLOCK};
@@ -38,6 +38,7 @@ impl PipeBuffer {
 pub struct PipeReadHandle {
     pipe: Arc<Mutex<PipeBuffer>>,
     flags: AtomicU32,
+    closed: AtomicBool,
 }
 
 impl PipeReadHandle {
@@ -45,6 +46,7 @@ impl PipeReadHandle {
         Self {
             pipe,
             flags: AtomicU32::new(flags),
+            closed: AtomicBool::new(false),
         }
     }
 }
@@ -120,6 +122,9 @@ impl FileHandle for PipeReadHandle {
     }
 
     fn close(&self) {
+        if self.closed.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let mut pipe = self.pipe.lock();
         if pipe.readers_open > 0 {
             pipe.readers_open -= 1;
@@ -132,9 +137,16 @@ impl FileHandle for PipeReadHandle {
     }
 }
 
+impl Drop for PipeReadHandle {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 pub struct PipeWriteHandle {
     pipe: Arc<Mutex<PipeBuffer>>,
     flags: AtomicU32,
+    closed: AtomicBool,
 }
 
 impl PipeWriteHandle {
@@ -142,6 +154,7 @@ impl PipeWriteHandle {
         Self {
             pipe,
             flags: AtomicU32::new(flags),
+            closed: AtomicBool::new(false),
         }
     }
 }
@@ -219,6 +232,9 @@ impl FileHandle for PipeWriteHandle {
     }
 
     fn close(&self) {
+        if self.closed.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let mut pipe = self.pipe.lock();
         if pipe.writers_open > 0 {
             pipe.writers_open -= 1;
@@ -231,10 +247,21 @@ impl FileHandle for PipeWriteHandle {
     }
 }
 
+impl Drop for PipeWriteHandle {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+// Двунаправленный локальный сокетный канал (AF_UNIX socketpair).
+// В отличие от однонаправленного анонимного pipe, здесь каждый дескриптор
+// имеет независимые кольцевые буферы на прием (rx) и передачу (tx),
+// а также реализует полный набор сокетных интерфейсов (SO_SNDBUF, shutdown, send/recv).
 pub struct SocketPairHandle {
     rx: Arc<Mutex<PipeBuffer>>,
     tx: Arc<Mutex<PipeBuffer>>,
     flags: AtomicU32,
+    closed: AtomicBool,
 }
 
 impl SocketPairHandle {
@@ -243,6 +270,7 @@ impl SocketPairHandle {
             rx,
             tx,
             flags: AtomicU32::new(flags),
+            closed: AtomicBool::new(false),
         }
     }
 }
@@ -362,7 +390,60 @@ impl FileHandle for SocketPairHandle {
         self.flags.store(flags, Ordering::Relaxed);
     }
 
+    fn socket_setsockopt(&self, _level: i32, _optname: i32, _optval: &[u8]) -> Result<(), i64> {
+        // OpenSSH перед re-exec вызывает setsockopt(fd, SOL_SOCKET, SO_SNDBUF, ...)
+        // на сокетной паре config_s. Успешно подтверждаем установку буферов.
+        Ok(())
+    }
+
+    fn socket_getsockopt(&self, _level: i32, _optname: i32) -> Result<alloc::vec::Vec<u8>, i64> {
+        Ok(alloc::vec![0u8; 4])
+    }
+
+    fn socket_sendto(&self, buf: &[u8], _flags: i32, _dest: Option<&crate::fs::SockAddrIn>) -> Result<usize, i64> {
+        self.write(buf)
+    }
+
+    fn socket_recvfrom(&self, buf: &mut [u8], _flags: i32) -> Result<(usize, crate::fs::SockAddrIn), i64> {
+        let n = self.read(buf)?;
+        Ok((
+            n,
+            crate::fs::SockAddrIn {
+                sin_family: 1, // AF_UNIX
+                sin_port: 0,
+                sin_addr: 0,
+                sin_zero: [0; 8],
+            },
+        ))
+    }
+
+    fn socket_shutdown(&self, how: i32) -> Result<(), i64> {
+        // how: 0 = SHUT_RD, 1 = SHUT_WR, 2 = SHUT_RDWR
+        if how == 0 || how == 2 {
+            let mut rx = self.rx.lock();
+            rx.readers_open = 0;
+            let writers = core::mem::take(&mut rx.waiting_writers);
+            drop(rx);
+            for tid in writers {
+                scheduler::unblock_thread(tid);
+            }
+        }
+        if how == 1 || how == 2 {
+            let mut tx = self.tx.lock();
+            tx.writers_open = 0;
+            let readers = core::mem::take(&mut tx.waiting_readers);
+            drop(tx);
+            for tid in readers {
+                scheduler::unblock_thread(tid);
+            }
+        }
+        Ok(())
+    }
+
     fn close(&self) {
+        if self.closed.swap(true, Ordering::SeqCst) {
+            return;
+        }
         {
             let mut rx = self.rx.lock();
             if rx.readers_open > 0 {
@@ -385,6 +466,12 @@ impl FileHandle for SocketPairHandle {
                 scheduler::unblock_thread(tid);
             }
         }
+    }
+}
+
+impl Drop for SocketPairHandle {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 

@@ -179,14 +179,8 @@ pub fn pump_stdin() -> bool {
 
     let mut rx_count = 0;
     while let Some(b) = crate::drivers::serial::try_receive() {
-        if b == 0x03 {
+        if b == 0x03 && crate::task::syscall::fs::is_isig_enabled() {
             crate::task::signal::raise_sigint();
-            if !crate::task::syscall::proc::is_current_interactive_shell() {
-                flush_stdin();
-                crate::drivers::keyboard::clear_key_queue();
-                got = true;
-                continue;
-            }
         }
         let byte_to_push = if b == b'\r' && icrnl {
             b'\n'
@@ -201,10 +195,7 @@ pub fn pump_stdin() -> bool {
         }
     }
 
-    if got
-        && crate::task::signal::is_sigint_pending()
-        && !crate::task::syscall::proc::is_current_interactive_shell()
-    {
+    if got && crate::task::signal::is_sigint_pending_for_current() {
         crate::task::signal::clear_sigint();
         flush_stdin();
         crate::drivers::keyboard::clear_key_queue();

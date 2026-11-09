@@ -46,7 +46,12 @@ pub fn share_fd_table(source_tgid: u64, target_tgid: u64) {
 }
 
 pub fn remove_process_fd_table(tgid: u64) {
-    PROCESS_FD_TABLES.write().remove(&tgid);
+    if let Some(table) = PROCESS_FD_TABLES.write().remove(&tgid) {
+        // Очищаем таблицу дескрипторов процесса. При освобождении ссылок Arc
+        // для ресурсов, у которых счетчик ссылок достигает нуля, автоматически
+        // срабатывает деструктор Drop (RAII), не затрагивая параллельные процессы.
+        table.write().clear();
+    }
 }
 
 fn get_current_process_fd_table() -> Arc<RwLock<FdMap>> {
@@ -101,13 +106,6 @@ pub fn insert_file_handle_at(fd: u64, handle: Arc<dyn FileHandle>) {
 }
 
 pub fn remove_file_handle(fd: u64) -> Option<Arc<dyn FileHandle>> {
-    if fd < 3 {
-        return None;
-    }
     let table = get_current_process_fd_table();
-    let handle = table.write().remove(&fd);
-    if let Some(ref h) = handle {
-        h.close();
-    }
-    handle
+    table.write().remove(&fd)
 }

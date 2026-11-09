@@ -390,6 +390,93 @@ pub fn to_dos_83(name: &str) -> Option<([u8; 8], [u8; 3])> {
     Some((name_buf, ext_buf))
 }
 
+/// Генерирует уникальное 8.3 короткое имя для файла в каталоге FAT32,
+/// предотвращая коллизии псевдонимов коротких имен при использовании LFN (длинных имен).
+pub fn generate_unique_dos_83(name: &str, existing: &[ParsedDirEntry]) -> Option<([u8; 8], [u8; 3])> {
+    let mut ext_buf = [b' '; 3];
+    let (base_part, ext_part) = match name.rfind('.') {
+        Some(idx) => (&name[..idx], &name[idx + 1..]),
+        None => (name, ""),
+    };
+
+    let mut ext_idx = 0;
+    for b in ext_part.bytes() {
+        if ext_idx >= 3 {
+            break;
+        }
+        if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
+            ext_buf[ext_idx] = b.to_ascii_uppercase();
+            ext_idx += 1;
+        }
+    }
+
+    let mut clean_base = alloc::vec::Vec::new();
+    for b in base_part.bytes() {
+        if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
+            clean_base.push(b.to_ascii_uppercase());
+        }
+    }
+    if clean_base.is_empty() {
+        clean_base.push(b'_');
+    }
+
+    // Если исходное имя изначально укладывается в 8.3 без спецсимволов и не занято
+    let is_simple = name.len() <= 12
+        && base_part.len() <= 8
+        && ext_part.len() <= 3
+        && base_part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+
+    if is_simple {
+        let mut candidate = [b' '; 8];
+        for (i, &b) in clean_base.iter().take(8).enumerate() {
+            candidate[i] = b;
+        }
+        let exists = existing.iter().any(|e| e.raw.name == candidate && e.raw.ext == ext_buf);
+        if !exists {
+            return Some((candidate, ext_buf));
+        }
+    }
+
+    // При длинных именах или коллизиях генерируем числовой хвост ~1, ~2 ... ~999
+    for i in 1..=999usize {
+        let mut tail = [0u8; 5];
+        let tail_len = {
+            use core::fmt::Write;
+            struct BufWriter<'a> {
+                buf: &'a mut [u8],
+                pos: usize,
+            }
+            impl<'a> core::fmt::Write for BufWriter<'a> {
+                fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                    for b in s.bytes() {
+                        if self.pos < self.buf.len() {
+                            self.buf[self.pos] = b;
+                            self.pos += 1;
+                        }
+                    }
+                    Ok(())
+                }
+            }
+            let mut w = BufWriter { buf: &mut tail, pos: 0 };
+            let _ = write!(w, "~{}", i);
+            w.pos
+        };
+
+        let prefix_len = 8usize.saturating_sub(tail_len);
+        let mut candidate = [b' '; 8];
+        let copy_len = clean_base.len().min(prefix_len);
+        candidate[..copy_len].copy_from_slice(&clean_base[..copy_len]);
+        candidate[copy_len..copy_len + tail_len].copy_from_slice(&tail[..tail_len]);
+
+        let exists = existing.iter().any(|e| e.raw.name == candidate && e.raw.ext == ext_buf);
+        if !exists {
+            return Some((candidate, ext_buf));
+        }
+    }
+
+    None
+}
+
 fn default_dir_permissions(name: &str) -> (u16, u32, u32) {
     if name.eq_ignore_ascii_case("tmp") {
         (0o1777, 0, 0)
@@ -753,12 +840,11 @@ impl Inode for Fat32DirInode {
             }));
         }
 
-        let target_83 = to_dos_83(name);
         let entries = self.read_parsed_entries()?;
         for entry in entries {
             let display = entry.display_name();
             let matches = display.eq_ignore_ascii_case(name)
-                || target_83.map_or(false, |(n, e)| entry.raw.name == n && entry.raw.ext == e);
+                || entry.raw.to_display_name().eq_ignore_ascii_case(name);
             if matches {
                 let first_clus = entry.raw.first_cluster();
                 let is_dir = (entry.raw.attr & FAT32_ATTR_DIRECTORY) != 0;
@@ -832,10 +918,11 @@ impl Inode for Fat32DirInode {
         let mut clus_buf = alloc::vec![0u8; clus_size];
 
         let mut target_clus = 0u32;
+        let mut target_clus_idx = 0usize;
         let mut target_slot_idx = 0usize;
         let mut found = false;
 
-        'search: for c in &chain {
+        'search: for (clus_idx, c) in chain.iter().enumerate() {
             self.inner.read_cluster(*c, &mut clus_buf)?;
             let total_entries = clus_size / 32;
             let mut consecutive = 0;
@@ -850,6 +937,7 @@ impl Inode for Fat32DirInode {
                     consecutive += 1;
                     if consecutive == slots_needed {
                         target_clus = *c;
+                        target_clus_idx = clus_idx;
                         target_slot_idx = start_idx;
                         found = true;
                         break 'search;
@@ -866,6 +954,7 @@ impl Inode for Fat32DirInode {
             let last = *chain.last().unwrap_or(&self.cluster);
             self.inner.set_fat_entry(last, new_c)?;
             self.inner.flush_fat_cache()?;
+            target_clus_idx = chain.len();
             chain.push(new_c);
             target_clus = new_c;
             target_slot_idx = 0;
@@ -873,8 +962,9 @@ impl Inode for Fat32DirInode {
             self.inner.write_cluster(target_clus, &clus_buf)?;
         }
 
-        // Генерируем 8.3 короткое имя файла с суффиксом ~1
-        let (dos_name, dos_ext) = match to_dos_83(name) {
+        // Генерируем уникальное 8.3 короткое имя файла с суффиксом ~1..~999 при необходимости
+        let existing_entries = self.read_parsed_entries()?;
+        let (dos_name, dos_ext) = match generate_unique_dos_83(name, &existing_entries) {
             Some(p) => p,
             None => return Err(VfsError::InvalidPath),
         };
@@ -996,7 +1086,7 @@ impl Inode for Fat32DirInode {
             file_size: 0,
         };
 
-        let raw_dir_offset = cur_slot * 32;
+        let raw_dir_offset = target_clus_idx * clus_size + cur_slot * 32;
 
         unsafe {
             let ptr = clus_buf.as_mut_ptr().add(cur_slot * 32) as *mut RawDirEntry;
@@ -1039,45 +1129,48 @@ impl Inode for Fat32DirInode {
     }
 
     fn unlink(&self, name: &str) -> Result<(), VfsError> {
-        let target_83 = to_dos_83(name);
+        let entries = self.read_parsed_entries()?;
+        let target = entries.into_iter().find(|e| {
+            e.display_name().eq_ignore_ascii_case(name)
+                || e.raw.to_display_name().eq_ignore_ascii_case(name)
+        });
+
+        let target_entry = match target {
+            Some(e) => e,
+            None => return Err(VfsError::NotFound),
+        };
+
         let chain = self.inner.get_cluster_chain(self.cluster)?;
         let clus_size = self.inner.cluster_bytes;
         let mut clus_buf = alloc::vec![0u8; clus_size];
 
-        for c in chain {
-            self.inner.read_cluster(c, &mut clus_buf)?;
-            let count = clus_size / 32;
+        let num_lfn = if let Some(ref s) = target_entry.lfn {
+            (s.encode_utf16().count() + 12) / 13
+        } else {
+            0
+        };
+        let slots_to_delete = 1 + num_lfn;
+        let start_offset = target_entry.offset.saturating_sub(num_lfn * 32);
 
-            for i in 0..count {
-                let off = i * 32;
-                let raw = unsafe { &mut *(clus_buf.as_mut_ptr().add(off) as *mut RawDirEntry) };
+        for slot_idx in 0..slots_to_delete {
+            let cur_offset = start_offset + slot_idx * 32;
+            let c_idx = cur_offset / clus_size;
+            let off_in_c = cur_offset % clus_size;
 
-                if raw.name[0] == 0x00 {
-                    return Err(VfsError::NotFound);
-                }
-                if raw.name[0] == 0xE5 {
-                    continue;
-                }
-
-                let matches = raw.to_display_name().eq_ignore_ascii_case(name)
-                    || target_83.map_or(false, |(n, e)| raw.name == n && raw.ext == e);
-
-                if matches {
-                    let first_clus = raw.first_cluster();
-                    // Помечаем запись удаленной (байт 0xE5)
-                    raw.name[0] = 0xE5;
-                    self.inner.write_cluster(c, &clus_buf)?;
-
-                    // Освобождаем кластеры файла/каталога
-                    if first_clus >= 2 {
-                        let _ = self.inner.free_cluster_chain(first_clus);
-                    }
-                    return Ok(());
-                }
+            if c_idx < chain.len() {
+                let clus = chain[c_idx];
+                self.inner.read_cluster(clus, &mut clus_buf)?;
+                clus_buf[off_in_c] = 0xE5;
+                self.inner.write_cluster(clus, &clus_buf)?;
             }
         }
 
-        Err(VfsError::NotFound)
+        let first_clus = target_entry.raw.first_cluster();
+        if first_clus >= 2 {
+            let _ = self.inner.free_cluster_chain(first_clus);
+        }
+
+        Ok(())
     }
 }
 
@@ -1131,6 +1224,40 @@ mod tests {
         let (name, ext) = to_dos_83("limine-bios.sys").unwrap();
         assert_eq!(&name, b"LIMINE-B");
         assert_eq!(&ext, b"SYS");
+    }
+
+    #[test]
+    fn test_generate_unique_dos_83_collision() {
+        let existing = alloc::vec::Vec::new();
+        let (n1, e1) = generate_unique_dos_83("ssh_host_ed25519_key", &existing).unwrap();
+        assert_eq!(&n1, b"SSH_HO~1");
+        assert_eq!(&e1, b"   ");
+
+        let mut existing_with_first = alloc::vec::Vec::new();
+        existing_with_first.push(ParsedDirEntry {
+            offset: 0,
+            raw: RawDirEntry {
+                name: n1,
+                ext: e1,
+                attr: 0,
+                reserved: 0,
+                ctime_tenth: 0,
+                ctime: 0,
+                cdate: 0,
+                adate: 0,
+                cluster_high: 0,
+                mtime: 0,
+                mdate: 0,
+                cluster_low: 3,
+                file_size: 100,
+            },
+            lfn: Some(String::from("ssh_host_ed25519_key")),
+        });
+
+        let (n2, e2) = generate_unique_dos_83("ssh_host_rsa_key", &existing_with_first).unwrap();
+        assert_eq!(&n2, b"SSH_HO~2");
+        assert_eq!(&e2, b"   ");
+        assert_ne!(n1, n2);
     }
 
     #[test]

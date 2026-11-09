@@ -41,11 +41,26 @@ static SIGNAL_ACTIONS: Mutex<[SigAction; NSIG]> =
 static THREAD_SIGMASKS: Mutex<BTreeMap<ThreadId, u64>> = Mutex::new(BTreeMap::new());
 static THREAD_ALTSTACKS: Mutex<BTreeMap<ThreadId, StackT>> = Mutex::new(BTreeMap::new());
 
+static FOREGROUND_TGID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn foreground_tgid() -> u64 {
+    FOREGROUND_TGID.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_foreground_tgid(tgid: u64) {
+    FOREGROUND_TGID.store(tgid, core::sync::atomic::Ordering::SeqCst);
+}
+
 static SIGINT_PENDING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Вызывается при нажатии комбинации Ctrl+C с клавиатуры или поступлении ASCII 3 из COM1
 pub fn raise_sigint() {
+    if !crate::task::syscall::fs::is_isig_enabled() {
+        return;
+    }
     SIGINT_PENDING.store(true, core::sync::atomic::Ordering::SeqCst);
+    let fg = foreground_tgid();
+    crate::task::scheduler::unblock_foreground(fg);
 }
 
 pub fn is_sigint_pending() -> bool {
@@ -54,6 +69,21 @@ pub fn is_sigint_pending() -> bool {
 
 pub fn clear_sigint() {
     SIGINT_PENDING.store(false, core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Проверяет наличие ожидающего сигнала SIGINT строго для текущего выполняющегося потока.
+/// Фоновые службы (sshd, timesyncd) изолированы от терминала и не перехватывают сигнал.
+pub fn is_sigint_pending_for_current() -> bool {
+    if !is_sigint_pending() {
+        return false;
+    }
+    if !crate::task::is_current_thread_foreground() {
+        return false;
+    }
+    if crate::task::syscall::proc::is_current_interactive_shell() {
+        return false;
+    }
+    true
 }
 
 pub fn sys_rt_sigaction(signum: u64, act_ptr: u64, oldact_ptr: u64, _sigsetsize: u64) -> u64 {

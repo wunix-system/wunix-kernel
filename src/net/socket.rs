@@ -9,7 +9,7 @@ use smoltcp::socket::tcp::{self, Socket as TcpSocket, SocketBuffer as TcpSocketB
 use smoltcp::socket::udp::{PacketBuffer as UdpPacketBuffer, PacketMetadata as UdpPacketMetadata, Socket as UdpSocket};
 use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
 
-use crate::fs::{FileHandle, EPOLLHUP, EPOLLIN, EPOLLOUT, EPOLLRDHUP, O_NONBLOCK};
+use crate::fs::{FileHandle, EPOLLERR, EPOLLHUP, EPOLLIN, EPOLLOUT, EPOLLRDHUP, O_NONBLOCK};
 use crate::task::scheduler;
 
 pub const AF_UNIX: u16 = 1;
@@ -143,7 +143,7 @@ impl FileHandle for SocketFileHandle {
             SmolSocketKind::Tcp(handle) => {
                 let start_tick = crate::arch::x86_64::timer::ticks();
                 loop {
-                    if crate::task::signal::is_sigint_pending() {
+                    if crate::task::signal::is_sigint_pending_for_current() {
                         return Err(-4); // -EINTR
                     }
 
@@ -152,6 +152,9 @@ impl FileHandle for SocketFileHandle {
                     {
                         let mut guard = crate::net::NET_STACK.lock();
                         if let Some(stack) = guard.as_mut() {
+                            if !stack.sockets.iter().any(|(h, _)| h == handle) {
+                                return Ok(0);
+                            }
                             let sock = stack.sockets.get_mut::<TcpSocket>(handle);
                             if sock.can_recv() {
                                 match sock.recv_slice(buf) {
@@ -187,7 +190,7 @@ impl FileHandle for SocketFileHandle {
             SmolSocketKind::Udp(handle) => {
                 let start_tick = crate::arch::x86_64::timer::ticks();
                 loop {
-                    if crate::task::signal::is_sigint_pending() {
+                    if crate::task::signal::is_sigint_pending_for_current() {
                         return Err(-4); // -EINTR
                     }
 
@@ -225,7 +228,7 @@ impl FileHandle for SocketFileHandle {
             SmolSocketKind::Icmp(handle) => {
                 let start_tick = crate::arch::x86_64::timer::ticks();
                 loop {
-                    if crate::task::signal::is_sigint_pending() {
+                    if crate::task::signal::is_sigint_pending_for_current() {
                         return Err(-4); // -EINTR
                     }
 
@@ -278,7 +281,7 @@ impl FileHandle for SocketFileHandle {
             SmolSocketKind::Tcp(handle) => {
                 let start_tick = crate::arch::x86_64::timer::ticks();
                 loop {
-                    if crate::task::signal::is_sigint_pending() {
+                    if crate::task::signal::is_sigint_pending_for_current() {
                         return Err(-4); // -EINTR
                     }
 
@@ -287,6 +290,9 @@ impl FileHandle for SocketFileHandle {
                     {
                         let mut guard = crate::net::NET_STACK.lock();
                         if let Some(stack) = guard.as_mut() {
+                            if !stack.sockets.iter().any(|(h, _)| h == handle) {
+                                return Err(-32); // -EPIPE
+                            }
                             let sock = stack.sockets.get_mut::<TcpSocket>(handle);
                             if sock.can_send() {
                                 match sock.send_slice(buf) {
@@ -395,13 +401,23 @@ impl FileHandle for SocketFileHandle {
                 crate::net::poll();
                 let mut guard = crate::net::NET_STACK.lock();
                 if let Some(stack) = guard.as_mut() {
+                    if !stack.sockets.iter().any(|(h, _)| h == handle) {
+                        return EPOLLHUP | EPOLLERR;
+                    }
                     let sock = stack.sockets.get_mut::<TcpSocket>(handle);
                     let mut ev = 0;
-                    if sock.can_recv() {
-                        ev |= EPOLLIN;
-                    }
-                    if sock.can_send() {
-                        ev |= EPOLLOUT;
+                    let is_listening = self.is_listening.load(Ordering::Relaxed);
+                    if is_listening {
+                        if sock.state() == TcpState::Established {
+                            ev |= EPOLLIN;
+                        }
+                    } else {
+                        if sock.can_recv() {
+                            ev |= EPOLLIN;
+                        }
+                        if sock.can_send() {
+                            ev |= EPOLLOUT;
+                        }
                     }
                     if sock.state() == TcpState::CloseWait || sock.state() == TcpState::Closed {
                         ev |= EPOLLHUP | EPOLLRDHUP;
@@ -457,20 +473,28 @@ impl FileHandle for SocketFileHandle {
     }
 
     fn close(&self) {
-        let kind = *self.smol_kind.lock();
+        let mut kind_guard = self.smol_kind.lock();
+        let kind = *kind_guard;
+        *kind_guard = SmolSocketKind::Unix;
         let mut guard = crate::net::NET_STACK.lock();
         if let Some(stack) = guard.as_mut() {
             match kind {
                 SmolSocketKind::Tcp(handle) => {
-                    let sock = stack.sockets.get_mut::<TcpSocket>(handle);
-                    sock.abort();
-                    stack.sockets.remove(handle);
+                    if stack.sockets.iter().any(|(h, _)| h == handle) {
+                        let sock = stack.sockets.get_mut::<TcpSocket>(handle);
+                        sock.abort();
+                        stack.sockets.remove(handle);
+                    }
                 }
                 SmolSocketKind::Udp(handle) => {
-                    stack.sockets.remove(handle);
+                    if stack.sockets.iter().any(|(h, _)| h == handle) {
+                        stack.sockets.remove(handle);
+                    }
                 }
                 SmolSocketKind::Icmp(handle) => {
-                    stack.sockets.remove(handle);
+                    if stack.sockets.iter().any(|(h, _)| h == handle) {
+                        stack.sockets.remove(handle);
+                    }
                 }
                 SmolSocketKind::Unix => {}
             }
@@ -509,7 +533,7 @@ impl FileHandle for SocketFileHandle {
                 // Блокирующее ожидание завершения 3-way handshake (SYN -> SYN/ACK -> ACK)
                 let start_tick = crate::arch::x86_64::timer::ticks();
                 loop {
-                    if crate::task::signal::is_sigint_pending() {
+                    if crate::task::signal::is_sigint_pending_for_current() {
                         return Err(-4); // -EINTR
                     }
 
@@ -518,6 +542,9 @@ impl FileHandle for SocketFileHandle {
                     {
                         let mut guard = crate::net::NET_STACK.lock();
                         if let Some(stack) = guard.as_mut() {
+                            if !stack.sockets.iter().any(|(h, _)| h == handle) {
+                                return Err(-107); // -ENOTCONN
+                            }
                             let sock = stack.sockets.get_mut::<TcpSocket>(handle);
                             match sock.state() {
                                 TcpState::Established => return Ok(()),
@@ -616,7 +643,7 @@ impl FileHandle for SocketFileHandle {
 
                 let start_tick = crate::arch::x86_64::timer::ticks();
                 loop {
-                    if crate::task::signal::is_sigint_pending() {
+                    if crate::task::signal::is_sigint_pending_for_current() {
                         return Err(-4); // -EINTR
                     }
 
@@ -625,6 +652,9 @@ impl FileHandle for SocketFileHandle {
                     {
                         let mut guard = crate::net::NET_STACK.lock();
                         if let Some(stack) = guard.as_mut() {
+                            if !stack.sockets.iter().any(|(h, _)| h == handle) {
+                                return Err(-22); // -EINVAL
+                            }
                             let sock = stack.sockets.get_mut::<TcpSocket>(handle);
                             if sock.state() == TcpState::Established {
                                 let remote_ep = sock.remote_endpoint().unwrap_or(IpEndpoint::new(IpAddress::v4(0, 0, 0, 0), 0));
@@ -712,9 +742,23 @@ impl FileHandle for SocketFileHandle {
         Ok(())
     }
 
-    fn socket_getsockopt(&self, _level: i32, _optname: i32) -> Result<alloc::vec::Vec<u8>, i64> {
-        // Для SO_ERROR и опций буфера возвращаем чистый нулевой статус
+    fn socket_getsockopt(&self, level: i32, optname: i32) -> Result<alloc::vec::Vec<u8>, i64> {
+        // level 0 = IPPROTO_IP:
+        // optname 4 = IP_OPTIONS: опции маршрутизации отсутствуют. Возвращаем пустой срез (длина 0),
+        // чтобы OpenSSH check_ip_options не считал, что в пакете переданы source routing options (что вызывает fatal drop)
+        if level == 0 && optname == 4 {
+            return Ok(alloc::vec![]);
+        }
+        // Для SOL_SOCKET (1) с SO_ERROR (4) или опций буфера возвращаем нулевой статус (0 ошибок)
         Ok(alloc::vec![0u8; 4])
+    }
+}
+
+impl Drop for SocketFileHandle {
+    fn drop(&mut self) {
+        // Очищаем низкоуровневый сокет smoltcp только когда уничтожается
+        // последняя сильная ссылка Arc на данный дескриптор в системе (RAII).
+        self.close();
     }
 }
 

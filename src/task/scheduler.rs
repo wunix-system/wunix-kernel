@@ -351,6 +351,31 @@ pub fn unblock_thread(id: ThreadId) {
     });
 }
 
+pub fn unblock_foreground(fg_tgid: u64) {
+    interrupts::without_interrupts(|| {
+        if let Some(sched) = SCHEDULER.lock().as_mut() {
+            let mut expired = [ThreadId(0); 16];
+            let mut count = 0;
+            for (id, thread) in &sched.blocked_threads {
+                if thread.is_sync_child || (fg_tgid != 0 && thread.tgid == fg_tgid) {
+                    if count < expired.len() {
+                        expired[count] = *id;
+                        count += 1;
+                    }
+                }
+            }
+            for i in 0..count {
+                let id = expired[i];
+                if let Some(mut thread) = sched.blocked_threads.remove(&id) {
+                    thread.state = ThreadState::Ready;
+                    thread.wait_deadline = None;
+                    sched.ready_queue.push_back(thread);
+                }
+            }
+        }
+    });
+}
+
 fn prepare_thread_hardware_context(next: &Thread) {
     if next.kernel_stack_top != 0 {
         crate::arch::x86_64::syscall::set_kernel_stack(next.kernel_stack_top);
@@ -378,9 +403,7 @@ pub fn block_current(deadline: Option<u64>) {
                 break;
             }
         }
-        if crate::task::signal::is_sigint_pending()
-            && !crate::task::syscall::proc::is_current_interactive_shell()
-        {
+        if crate::task::signal::is_sigint_pending_for_current() {
             break;
         }
 
@@ -445,9 +468,7 @@ pub fn block_current(deadline: Option<u64>) {
                     break;
                 }
             }
-            if crate::task::signal::is_sigint_pending()
-                && !crate::task::syscall::proc::is_current_interactive_shell()
-            {
+            if crate::task::signal::is_sigint_pending_for_current() {
                 break;
             }
         }
@@ -459,21 +480,27 @@ pub fn check_timeouts() {
         let mut lock = SCHEDULER.lock();
         if let Some(sched) = lock.as_mut() {
             let now = crate::arch::x86_64::timer::ticks();
-            let sigint = crate::task::signal::is_sigint_pending()
-                && !crate::task::syscall::proc::is_current_interactive_shell();
-            let mut expired = alloc::vec::Vec::new();
+            let sigint = crate::task::signal::is_sigint_pending();
+            let fg_tgid = crate::task::signal::foreground_tgid();
+            // Локальный буфер на стеке вместо динамического Vec:
+            // обработчик таймера не должен дергать аллокатор кучи ядра на каждом тике.
+            let mut expired = [ThreadId(0); 32];
+            let mut count = 0;
             for (id, thread) in &sched.blocked_threads {
-                if sigint {
-                    // При получении сигнала SIGINT немедленно будим заблокированный дочерний процесс,
-                    // не дожидаясь истечения таймаутов (nanosleep, poll, futex)
-                    expired.push(*id);
+                if sigint && (thread.is_sync_child || (fg_tgid != 0 && thread.tgid == fg_tgid)) {
+                    if count < expired.len() {
+                        expired[count] = *id;
+                        count += 1;
+                    }
                 } else if let Some(deadline) = thread.wait_deadline {
-                    if now >= deadline {
-                        expired.push(*id);
+                    if now >= deadline && count < expired.len() {
+                        expired[count] = *id;
+                        count += 1;
                     }
                 }
             }
-            for id in expired {
+            for i in 0..count {
+                let id = expired[i];
                 if let Some(mut thread) = sched.blocked_threads.remove(&id) {
                     thread.state = ThreadState::Ready;
                     thread.wait_deadline = None;

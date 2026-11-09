@@ -194,7 +194,9 @@ pub extern "C" fn _start() -> ! {
 
         for token in cmdline.split_whitespace() {
             if let Some(root_dev) = token.strip_prefix("root=") {
-                let _ = wunix_kernel::fs::mount(root_dev, "/", "", 0);
+                if let Err(e) = wunix_kernel::fs::mount(root_dev, "/", "", 0) {
+                    klog!("  {}: {} (ошибка: {:?})", t("Монтирование корня", "Mounting root"), root_dev, e);
+                }
             }
         }
     }

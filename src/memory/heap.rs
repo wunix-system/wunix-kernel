@@ -1,4 +1,6 @@
+use core::alloc::{GlobalAlloc, Layout};
 use linked_list_allocator::LockedHeap;
+use x86_64::instructions::interrupts;
 use x86_64::structures::paging::mapper::MapToError;
 use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB};
 use x86_64::VirtAddr;
@@ -10,8 +12,57 @@ use x86_64::VirtAddr;
 pub const HEAP_START: usize = 0xFFFF_9000_0000_0000;
 pub const HEAP_SIZE: usize = 128 * 1024 * 1024; // 128 MiB
 
+/// Обертка над аллокатором кучи, отключающая прерывания на время операций выделения и освобождения.
+/// Без этого прерывание системного таймера (IRQ0) может возникнуть в момент удержания блокировки кучи,
+/// попытаться выделить память в обработчике таймера и вызвать глухой дедлок того же ядра процессора.
+pub struct InterruptSafeLockedHeap(LockedHeap);
+
+impl InterruptSafeLockedHeap {
+    pub const fn empty() -> Self {
+        Self(LockedHeap::empty())
+    }
+
+    /// Инициализирует внутренний аллокатор кучи с защитой от прерываний.
+    ///
+    /// # Safety
+    /// Вызывающий должен гарантировать, что диапазон памяти валиден и отображен.
+    pub unsafe fn init(&self, start: *mut u8, size: usize) {
+        interrupts::without_interrupts(|| {
+            unsafe {
+                self.0.lock().init(start, size);
+            }
+        });
+    }
+}
+
+unsafe impl GlobalAlloc for InterruptSafeLockedHeap {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        interrupts::without_interrupts(|| unsafe {
+            GlobalAlloc::alloc(&self.0, layout)
+        })
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        interrupts::without_interrupts(|| unsafe {
+            GlobalAlloc::dealloc(&self.0, ptr, layout)
+        })
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        interrupts::without_interrupts(|| unsafe {
+            GlobalAlloc::alloc_zeroed(&self.0, layout)
+        })
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        interrupts::without_interrupts(|| unsafe {
+            GlobalAlloc::realloc(&self.0, ptr, layout, new_size)
+        })
+    }
+}
+
 #[global_allocator]
-static ALLOCATOR: LockedHeap = LockedHeap::empty();
+static ALLOCATOR: InterruptSafeLockedHeap = InterruptSafeLockedHeap::empty();
 
 /// Отображает виртуальные страницы диапазона кучи на свободные физические фреймы
 /// и инициализирует аллокатор кучи ядра.
@@ -38,7 +89,7 @@ pub fn init_heap(
     }
 
     unsafe {
-        ALLOCATOR.lock().init(HEAP_START as *mut u8, HEAP_SIZE);
+        ALLOCATOR.init(HEAP_START as *mut u8, HEAP_SIZE);
     }
 
     Ok(())

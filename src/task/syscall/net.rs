@@ -235,6 +235,10 @@ pub fn sys_getsockopt(
                     core::ptr::copy_nonoverlapping(bytes.as_ptr(), optval_ptr as *mut u8, to_copy);
                     *(optlen_ptr as *mut u32) = to_copy as u32;
                 }
+            } else {
+                unsafe {
+                    *(optlen_ptr as *mut u32) = 0;
+                }
             }
             0
         }

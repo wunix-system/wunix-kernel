@@ -49,7 +49,7 @@ pub fn mount(source: &str, target: &str, fstype: &str, _flags: u64) -> Result<()
                 (fat, String::from("fat32"))
             }
             "" | "auto" => {
-                // Автодетект: проверяем современные ФС UFS и Ext4, затем FAT32
+                // Автодетект: проверяем нативные Unix-ФС UFS2 и Ext4, затем FAT32
                 if let Ok(ufs) = UfsFileSystem::open(dev.clone()) {
                     (Arc::new(ufs), String::from("ufs"))
                 } else if let Ok(ext4) = Ext4FileSystem::open(dev.clone()) {

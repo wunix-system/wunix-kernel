@@ -1,7 +1,7 @@
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-pub const STACK_SIZE: usize = 32 * 1024; // 32 КиБ стек ядра для каждого потока
+pub const STACK_SIZE: usize = 128 * 1024; // 128 КиБ стек ядра для каждого потока (защита от переполнения при FS I/O)
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ThreadId(pub u64);

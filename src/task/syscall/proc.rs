@@ -601,16 +601,23 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
 
     let data = match binary_data {
         Some(d) => d,
-        None => return (-(ENOENT as i64)) as u64,
+        None => {
+            crate::serial_println!("[sys_execve] FAILED binary not found: {}", path_str);
+            return (-(ENOENT as i64)) as u64;
+        }
     };
     let node = match resolved_node {
         Some(n) => n,
-        None => return (-(ENOENT as i64)) as u64,
+        None => {
+            crate::serial_println!("[sys_execve] FAILED node not found: {}", path_str);
+            return (-(ENOENT as i64)) as u64;
+        }
     };
     drop(candidates);
 
     // Проверка прав на исполнение бинарного файла (флаг 'x')
     if let Err(_) = crate::fs::check_permission(&node, false, false, true) {
+        crate::serial_println!("[sys_execve] FAILED permission denied: {}", path_str);
         return (-(EACCES as i64)) as u64;
     }
 

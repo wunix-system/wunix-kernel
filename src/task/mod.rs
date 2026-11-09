@@ -37,6 +37,17 @@ pub fn reset_timeslice() {
     CURRENT_TIMESLICE.store(0, Ordering::Relaxed);
 }
 
+pub fn is_current_thread_foreground() -> bool {
+    let cur_tgid = current_thread_tgid();
+    let fg_tgid = signal::foreground_tgid();
+    is_current_thread_sync_child() || (fg_tgid != 0 && cur_tgid == fg_tgid)
+}
+
+pub fn is_foreground_sync_child_active() -> bool {
+    let depth = crate::arch::x86_64::syscall::current_child_stack_depth();
+    depth > 1 && !crate::task::syscall::proc::is_current_interactive_shell()
+}
+
 pub fn on_timer_tick(is_user: bool) {
     if !is_initialized() {
         return;

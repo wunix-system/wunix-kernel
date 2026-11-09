@@ -22,7 +22,7 @@ pub fn sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: i64) -> u64 {
             let ticks = (timeout_ms as u64 + 9) / 10;
             let deadline = crate::arch::x86_64::timer::ticks().saturating_add(ticks);
             crate::task::block_current(Some(deadline));
-            if crate::task::signal::is_sigint_pending() {
+            if crate::task::signal::is_sigint_pending_for_current() {
                 return (-(EINTR as i64)) as u64;
             }
         }
@@ -51,7 +51,7 @@ pub fn sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: i64) -> u64 {
     let deadline = start_ticks.saturating_add(delta);
 
     loop {
-        if crate::task::signal::is_sigint_pending() {
+        if crate::task::signal::is_sigint_pending_for_current() {
             return (-(EINTR as i64)) as u64;
         }
 
@@ -146,7 +146,7 @@ pub fn sys_select(
     let deadline = start_ticks.saturating_add(delta);
 
     loop {
-        if crate::task::signal::is_sigint_pending() {
+        if crate::task::signal::is_sigint_pending_for_current() {
             return (-(EINTR as i64)) as u64;
         }
 

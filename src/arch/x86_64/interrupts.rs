@@ -149,15 +149,16 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFra
     // Ограничиваем порцию до 64 байт за тик, чтобы прерывание не могло зациклиться.
     let mut rx_count = 0;
     while let Some(b) = crate::drivers::serial::try_receive() {
-        if b == 0x03 {
+        if b == 0x03 && crate::task::syscall::fs::is_isig_enabled() {
             crate::task::signal::raise_sigint();
-            if !crate::task::syscall::proc::is_current_interactive_shell() {
-                crate::fs::handle::flush_stdin();
-                crate::drivers::keyboard::clear_key_queue();
-                continue;
-            }
         }
-        crate::fs::handle::push_stdin_byte(b);
+        let icrnl = crate::task::syscall::fs::is_icrnl_enabled();
+        let byte_to_push = if b == b'\r' && icrnl {
+            b'\n'
+        } else {
+            b
+        };
+        crate::fs::handle::push_stdin_byte(byte_to_push);
         rx_count += 1;
         if rx_count >= 64 {
             break;
@@ -172,8 +173,8 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFra
 
     let is_user = (stack_frame.code_segment.0 & 3) == 3;
     if is_user
-        && crate::task::signal::is_sigint_pending()
-        && !crate::task::syscall::proc::is_current_interactive_shell()
+        && crate::task::is_current_thread_sync_child()
+        && crate::task::signal::is_sigint_pending_for_current()
     {
         crate::task::signal::clear_sigint();
         crate::fs::handle::flush_stdin();
