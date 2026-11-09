@@ -119,6 +119,10 @@ pub fn sys_clone(
         crate::fs::clone_fd_table(parent_tgid, child_tgid);
     }
 
+    if !is_same_thread_group {
+        super::clone_process_cwd(parent_tgid, child_tgid);
+    }
+
     let child_cr3: u64;
     unsafe {
         core::arch::asm!("mov {}, cr3", out(reg) child_cr3);
@@ -199,7 +203,7 @@ pub fn sys_nanosleep(req_ptr: u64, _rem_ptr: u64) -> u64 {
     let delta = (req.tv_sec as u64).saturating_mul(100) + (req.tv_nsec as u64 + 9_999_999) / 10_000_000;
     let deadline = crate::arch::x86_64::timer::ticks().saturating_add(delta);
     crate::task::block_current(Some(deadline));
-    if crate::task::signal::is_sigint_pending() {
+    if crate::task::signal::is_sigint_pending_for_current() {
         return (-(EINTR as i64)) as u64;
     }
     0
@@ -657,6 +661,7 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     let child_tgid = NEXT_PID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     crate::fs::clone_fd_table(parent_tgid, child_tgid);
     crate::task::set_current_thread_tgid(child_tgid);
+    super::clone_process_cwd(parent_tgid, child_tgid);
 
     // Выделяем собственный изолированный стек ядра (32 КиБ) для дочернего процесса,
     // чтобы его системные вызовы и аллокации не повреждали сохраненный стек родителя
@@ -685,6 +690,9 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     let prev_sync = crate::task::is_current_thread_sync_child();
     crate::task::set_current_thread_sync_child(true);
 
+    let prev_fg = crate::task::signal::foreground_tgid();
+    crate::task::signal::set_foreground_tgid(child_tgid);
+
     let exit_code = unsafe {
         crate::arch::x86_64::syscall::enter_user_child(
             elf_info.entry_point.as_u64(),
@@ -696,6 +704,7 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
         )
     };
 
+    crate::task::signal::set_foreground_tgid(prev_fg);
     crate::task::set_current_thread_sync_child(prev_sync);
 
     // Восстанавливаем FS_BASE родительского процесса
@@ -710,6 +719,7 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     crate::arch::x86_64::gdt::set_tss_rsp0(old_kstack_top);
     crate::arch::x86_64::syscall::set_kernel_stack(old_kstack_top);
     crate::fs::remove_process_fd_table(child_tgid);
+    super::remove_process_cwd(child_tgid);
     crate::task::set_current_thread_tgid(parent_tgid);
 
     exit_code
@@ -742,6 +752,7 @@ pub fn sys_exit_group(status: u64) -> ! {
     // Удаляем все остальные потоки этого процесса из очередей планировщика
     crate::task::terminate_process_threads(cur_tgid, cur_tid);
     crate::fs::remove_process_fd_table(cur_tgid);
+    super::remove_process_cwd(cur_tgid);
 
     if is_sync && has_parent {
         unsafe {

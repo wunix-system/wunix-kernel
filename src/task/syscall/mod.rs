@@ -9,7 +9,7 @@ pub mod proc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use spin::{Mutex, RwLock};
+use spin::Mutex;
 
 use crate::arch::x86_64::SyscallRegisters;
 use crate::fs::insert_file_handle;
@@ -204,16 +204,43 @@ const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
 static VMA_MANAGER: Mutex<crate::memory::VirtualMemoryManager> =
     Mutex::new(crate::memory::VirtualMemoryManager::new());
 
-// Текущая рабочая директория
-static CURRENT_WORKING_DIR: RwLock<String> = RwLock::new(String::new());
+// Рабочие директории процессов (по TGID), изолирующие фоновые службы от интерактивного шелла
+static PROCESS_CWD: spin::Mutex<alloc::collections::BTreeMap<u64, String>> =
+    spin::Mutex::new(alloc::collections::BTreeMap::new());
 
-fn get_cwd() -> String {
-    let guard = CURRENT_WORKING_DIR.read();
-    if guard.is_empty() {
-        String::from("/root")
+pub fn get_cwd() -> String {
+    let tgid = crate::task::current_thread_tgid();
+    let map = PROCESS_CWD.lock();
+    if let Some(cwd) = map.get(&tgid) {
+        cwd.clone()
     } else {
-        guard.clone()
+        String::from("/root")
     }
+}
+
+pub fn set_cwd(new_path: &str) {
+    let tgid = crate::task::current_thread_tgid();
+    set_cwd_for_tgid(tgid, new_path);
+}
+
+pub fn set_cwd_for_tgid(tgid: u64, new_path: &str) {
+    let mut map = PROCESS_CWD.lock();
+    map.insert(tgid, String::from(new_path));
+}
+
+pub fn clone_process_cwd(source_tgid: u64, target_tgid: u64) {
+    let mut map = PROCESS_CWD.lock();
+    let cwd = if let Some(src) = map.get(&source_tgid) {
+        src.clone()
+    } else {
+        String::from("/root")
+    };
+    map.insert(target_tgid, cwd);
+}
+
+pub fn remove_process_cwd(tgid: u64) {
+    let mut map = PROCESS_CWD.lock();
+    map.remove(&tgid);
 }
 
 fn resolve_relative_path(path: &str) -> String {
@@ -268,11 +295,6 @@ fn read_user_cstr(ptr: u64, max_len: usize) -> Result<String, u64> {
 }
 
 
-pub fn set_cwd(new_path: &str) {
-    let mut guard = CURRENT_WORKING_DIR.write();
-    *guard = String::from(new_path);
-}
-
 /// Главный диспетчер системных вызовов ядра Wunix.
 /// Вызывается напрямую из ассемблерного трамплина `syscall_entry`.
 #[unsafe(no_mangle)]
@@ -285,10 +307,8 @@ pub extern "C" fn syscall_dispatcher(
     arg5: u64,
     regs: *mut SyscallRegisters,
 ) -> u64 {
-    // Если получен сигнал Ctrl+C (SIGINT) и в данный момент выполняется дочерний процесс
-    // (любая запущенная команда, кроме интерактивной оболочки wsh/login/init),
-    // немедленно прерываем его выполнение по стандартному коду Linux 130 (128 + SIGINT)
-    if crate::task::signal::is_sigint_pending() && !crate::task::syscall::proc::is_current_interactive_shell() {
+    // Прерываем выполнение дочернего процесса при получении сигнала SIGINT
+    if crate::task::signal::is_sigint_pending_for_current() {
         crate::task::signal::clear_sigint();
         crate::fs::handle::flush_stdin();
         crate::drivers::keyboard::clear_key_queue();
@@ -454,7 +474,7 @@ pub extern "C" fn syscall_dispatcher(
         }
     };
 
-    if crate::task::signal::is_sigint_pending() && !crate::task::syscall::proc::is_current_interactive_shell() {
+    if crate::task::signal::is_sigint_pending_for_current() {
         crate::task::signal::clear_sigint();
         crate::fs::handle::flush_stdin();
         crate::drivers::keyboard::clear_key_queue();
