@@ -301,3 +301,25 @@ pub fn sys_recvmsg(fd: u64, msg_ptr: u64, flags: u64) -> u64 {
     super::sys_recvfrom(fd, iov.iov_base, iov.iov_len, flags as i32, src_ptr, srclen_ptr)
 }
 
+pub fn sys_socketpair(domain: u64, sock_type: u64, _protocol: u64, sv_ptr: u64) -> u64 {
+    if !validate_user_buffer(sv_ptr, 8) {
+        return (-(EFAULT as i64)) as u64;
+    }
+    // Поддерживаем AF_UNIX (1) / AF_LOCAL (1)
+    if domain != 1 {
+        return (-(super::EAFNOSUPPORT as i64)) as u64;
+    }
+
+    let flags = (sock_type & 0o4000) as u32; // O_NONBLOCK
+    let (sock_a, sock_b) = crate::fs::create_socketpair(flags);
+    let fd_a = crate::fs::insert_file_handle(sock_a);
+    let fd_b = crate::fs::insert_file_handle(sock_b);
+
+    unsafe {
+        let ptr = sv_ptr as *mut i32;
+        ptr.add(0).write(fd_a as i32);
+        ptr.add(1).write(fd_b as i32);
+    }
+    0
+}
+

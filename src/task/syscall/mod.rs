@@ -74,6 +74,7 @@ pub const SYS_BIND: u64 = 49;
 pub const SYS_LISTEN: u64 = 50;
 pub const SYS_GETSOCKNAME: u64 = 51;
 pub const SYS_GETPEERNAME: u64 = 52;
+pub const SYS_SOCKETPAIR: u64 = 53;
 pub const SYS_SETSOCKOPT: u64 = 54;
 pub const SYS_GETSOCKOPT: u64 = 55;
 pub const SYS_CLONE: u64 = 56;
@@ -137,6 +138,7 @@ pub const SYS_STATFS: u64 = 137;
 pub const SYS_PRCTL: u64 = 157;
 pub const SYS_ARCH_PRCTL: u64 = 158;
 pub const SYS_SETRLIMIT: u64 = 160;
+pub const SYS_CHROOT: u64 = 161;
 pub const SYS_SYNC: u64 = 162;
 pub const SYS_SETTIMEOFDAY: u64 = 164;
 pub const SYS_MOUNT: u64 = 165;
@@ -195,6 +197,7 @@ pub const ESPIPE: u64 = 29;
 pub const EPIPE: u64 = 32;
 pub const ENOSYS: u64 = 38;
 pub const ENOTEMPTY: u64 = 39;
+pub const EAFNOSUPPORT: u64 = 97;
 pub const ETIMEDOUT: u64 = 110;
 
 // Граница канонического пространства пользователя x86_64
@@ -367,6 +370,7 @@ pub extern "C" fn syscall_dispatcher(
         SYS_SHUTDOWN => sys_shutdown(arg1, arg2),
         SYS_GETSOCKNAME => sys_getsockname(arg1, arg2, arg3),
         SYS_GETPEERNAME => sys_getpeername(arg1, arg2, arg3),
+        SYS_SOCKETPAIR => sys_socketpair(arg1, arg2, arg3, arg4),
         SYS_SETSOCKOPT => sys_setsockopt(arg1, arg2, arg3, arg4, arg5),
         SYS_GETSOCKOPT => sys_getsockopt(arg1, arg2, arg3, arg4, arg5),
         SYS_MOUNT => sys_mount(arg1, arg2, arg3, arg4, arg5),
@@ -434,6 +438,7 @@ pub extern "C" fn syscall_dispatcher(
         SYS_PRCTL => sys_prctl(arg1, arg2, arg3, arg4, arg5),
         SYS_ARCH_PRCTL => sys_arch_prctl(arg1, arg2),
         SYS_SETRLIMIT => sys_prlimit64(0, arg1, arg2, 0),
+        SYS_CHROOT => sys_chroot(arg1),
         SYS_GETTID => crate::task::current_thread_id().0,
         SYS_FUTEX => crate::task::futex::sys_futex(arg1, arg2, arg3, arg4, arg5, r.r9),
         SYS_SCHED_GETAFFINITY => sys_sched_getaffinity(arg1, arg2, arg3),

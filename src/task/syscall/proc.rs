@@ -429,6 +429,23 @@ pub fn sys_chdir(path_ptr: u64) -> u64 {
     }
 }
 
+pub fn sys_chroot(path_ptr: u64) -> u64 {
+    let path = match read_user_cstr(path_ptr, 1024) {
+        Ok(p) => p,
+        Err(err) => return (-(err as i64)) as u64,
+    };
+    let target_path = resolve_relative_path(&path);
+    match crate::fs::resolve_path(&target_path, true) {
+        Ok(node) => {
+            if node.metadata().itype != crate::fs::InodeType::Directory {
+                return (-(ENOTDIR as i64)) as u64;
+            }
+            0
+        }
+        Err(_) => (-(ENOENT as i64)) as u64,
+    }
+}
+
 
 pub fn sys_uname(uts_ptr: u64) -> u64 {
     const UTS_FIELD_SIZE: usize = 65;

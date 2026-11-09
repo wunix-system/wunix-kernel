@@ -230,3 +230,170 @@ impl FileHandle for PipeWriteHandle {
         }
     }
 }
+
+pub struct SocketPairHandle {
+    rx: Arc<Mutex<PipeBuffer>>,
+    tx: Arc<Mutex<PipeBuffer>>,
+    flags: AtomicU32,
+}
+
+impl SocketPairHandle {
+    pub fn new(rx: Arc<Mutex<PipeBuffer>>, tx: Arc<Mutex<PipeBuffer>>, flags: u32) -> Self {
+        Self {
+            rx,
+            tx,
+            flags: AtomicU32::new(flags),
+        }
+    }
+}
+
+impl FileHandle for SocketPairHandle {
+    fn read(&self, buf: &mut [u8]) -> Result<usize, i64> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        loop {
+            let mut pipe = self.rx.lock();
+            if pipe.len > 0 {
+                let to_read = buf.len().min(pipe.len);
+                for i in 0..to_read {
+                    let head = pipe.head;
+                    buf[i] = pipe.data[head];
+                    pipe.head = (head + 1) % PIPE_CAPACITY;
+                }
+                pipe.len -= to_read;
+
+                let writers = core::mem::take(&mut pipe.waiting_writers);
+                drop(pipe);
+                for tid in writers {
+                    scheduler::unblock_thread(tid);
+                }
+
+                return Ok(to_read);
+            }
+
+            if pipe.writers_open == 0 {
+                return Ok(0);
+            }
+
+            if (self.flags.load(Ordering::Relaxed) & O_NONBLOCK) != 0 {
+                return Err(-11); // -EAGAIN
+            }
+
+            let cur_id = scheduler::current_thread_id();
+            pipe.waiting_readers.push(cur_id);
+            drop(pipe);
+
+            scheduler::block_current(None);
+        }
+    }
+
+    fn write(&self, buf: &[u8]) -> Result<usize, i64> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        loop {
+            let mut pipe = self.tx.lock();
+            if pipe.readers_open == 0 {
+                return Err(-32); // -EPIPE
+            }
+
+            let available = PIPE_CAPACITY - pipe.len;
+            if available > 0 {
+                let to_write = buf.len().min(available);
+                for i in 0..to_write {
+                    let tail = pipe.tail;
+                    pipe.data[tail] = buf[i];
+                    pipe.tail = (tail + 1) % PIPE_CAPACITY;
+                }
+                pipe.len += to_write;
+
+                let readers = core::mem::take(&mut pipe.waiting_readers);
+                drop(pipe);
+                for tid in readers {
+                    scheduler::unblock_thread(tid);
+                }
+
+                return Ok(to_write);
+            }
+
+            if (self.flags.load(Ordering::Relaxed) & O_NONBLOCK) != 0 {
+                return Err(-11); // -EAGAIN
+            }
+
+            let cur_id = scheduler::current_thread_id();
+            pipe.waiting_writers.push(cur_id);
+            drop(pipe);
+
+            scheduler::block_current(None);
+        }
+    }
+
+    fn poll_events(&self) -> u32 {
+        let mut ev = 0;
+        {
+            let rx = self.rx.lock();
+            if rx.len > 0 {
+                ev |= EPOLLIN;
+            }
+            if rx.writers_open == 0 {
+                ev |= EPOLLHUP;
+            }
+        }
+        {
+            let tx = self.tx.lock();
+            if tx.len < PIPE_CAPACITY {
+                ev |= EPOLLOUT;
+            }
+            if tx.readers_open == 0 {
+                ev |= EPOLLERR;
+            }
+        }
+        ev
+    }
+
+    fn get_flags(&self) -> u32 {
+        self.flags.load(Ordering::Relaxed)
+    }
+
+    fn set_flags(&self, flags: u32) {
+        self.flags.store(flags, Ordering::Relaxed);
+    }
+
+    fn close(&self) {
+        {
+            let mut rx = self.rx.lock();
+            if rx.readers_open > 0 {
+                rx.readers_open -= 1;
+            }
+            let writers = core::mem::take(&mut rx.waiting_writers);
+            drop(rx);
+            for tid in writers {
+                scheduler::unblock_thread(tid);
+            }
+        }
+        {
+            let mut tx = self.tx.lock();
+            if tx.writers_open > 0 {
+                tx.writers_open -= 1;
+            }
+            let readers = core::mem::take(&mut tx.waiting_readers);
+            drop(tx);
+            for tid in readers {
+                scheduler::unblock_thread(tid);
+            }
+        }
+    }
+}
+
+pub fn create_socketpair(flags: u32) -> (Arc<dyn FileHandle>, Arc<dyn FileHandle>) {
+    let a_to_b = Arc::new(Mutex::new(PipeBuffer::new()));
+    let b_to_a = Arc::new(Mutex::new(PipeBuffer::new()));
+
+    let sock_a = Arc::new(SocketPairHandle::new(b_to_a.clone(), a_to_b.clone(), flags));
+    let sock_b = Arc::new(SocketPairHandle::new(a_to_b, b_to_a, flags));
+
+    (sock_a, sock_b)
+}

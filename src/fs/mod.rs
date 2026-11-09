@@ -36,7 +36,7 @@ pub use ops::{
     write_file,
 };
 pub use path::{is_windows_subsystem, normalize_path, translate_path};
-pub use pipe::{PipeBuffer, PipeReadHandle, PipeWriteHandle};
+pub use pipe::{create_socketpair, PipeBuffer, PipeReadHandle, PipeWriteHandle, SocketPairHandle};
 pub use procfs::{pci_device_name, pci_driver_name, pci_vendor_name, refresh_proc_files};
 pub use ramfs::{RamFs, RamInode};
 pub use registry::{
