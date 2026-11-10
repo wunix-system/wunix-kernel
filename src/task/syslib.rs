@@ -217,10 +217,10 @@ pub fn init_syslib() {
     builder.add_nt_trampoline("NtDuplicateObject", 0x003C);
 
     // 4. Win32 Kernel32 wrappers
-    // ExitProcess: mov rdi, rcx; mov eax, 60; syscall; ret
+    // ExitProcess: mov r10, rcx; mov eax, 0x72 (NT_TERMINATE_PROCESS); syscall; ret
     let exit_process_code: [u8; 11] = [
-        0x48, 0x89, 0xcf, // mov rdi, rcx
-        0xb8, 0x3c, 0x00, 0x00, 0x00, // mov eax, 60
+        0x49, 0x89, 0xca, // mov r10, rcx
+        0xb8, 0x72, 0x00, 0x00, 0x00, // mov eax, 0x72
         0x0f, 0x05, // syscall
         0xc3, // ret
     ];

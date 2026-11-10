@@ -43,6 +43,7 @@ pub struct Thread {
     pub suid: u32,
     pub sgid: u32,
     pub umask: u32,
+    pub abi: crate::task::abi::AbiPersonality,
 }
 
 // Поток эксклюзивно владеет своим стеком и перемещается между контекстами планировщика
@@ -95,6 +96,7 @@ impl Thread {
             suid: 0,
             sgid: 0,
             umask: 0o022,
+            abi: crate::task::abi::AbiPersonality::Linux,
         }
     }
 
@@ -116,6 +118,7 @@ impl Thread {
         suid: u32,
         sgid: u32,
         umask: u32,
+        abi: crate::task::abi::AbiPersonality,
     ) -> Self {
         Self {
             id,
@@ -139,6 +142,7 @@ impl Thread {
             suid,
             sgid,
             umask,
+            abi,
         }
     }
 
@@ -165,6 +169,7 @@ impl Thread {
             suid: 0,
             sgid: 0,
             umask: 0o022,
+            abi: crate::task::abi::AbiPersonality::Linux,
         }
     }
 }

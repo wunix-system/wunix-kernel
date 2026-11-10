@@ -258,6 +258,27 @@ pub fn set_current_thread_kernel_stack_top(top: u64) {
     });
 }
 
+pub fn current_thread_abi() -> crate::task::abi::AbiPersonality {
+    interrupts::without_interrupts(|| {
+        SCHEDULER
+            .lock()
+            .as_ref()
+            .and_then(|s| s.current.as_ref())
+            .map(|t| t.abi)
+            .unwrap_or(crate::task::abi::AbiPersonality::Linux)
+    })
+}
+
+pub fn set_current_thread_abi(abi: crate::task::abi::AbiPersonality) {
+    interrupts::without_interrupts(|| {
+        if let Some(sched) = SCHEDULER.lock().as_mut() {
+            if let Some(t) = sched.current.as_mut() {
+                t.abi = abi;
+            }
+        }
+    });
+}
+
 /// Удаляет из очередей планировщика все потоки группы процесса `tgid`, кроме `keep_tid`.
 pub fn terminate_process_threads(tgid: u64, keep_tid: ThreadId) {
     interrupts::without_interrupts(|| {

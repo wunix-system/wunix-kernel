@@ -298,31 +298,17 @@ fn read_user_cstr(ptr: u64, max_len: usize) -> Result<String, u64> {
 }
 
 
-/// Главный диспетчер системных вызовов ядра Wunix.
-/// Вызывается напрямую из ассемблерного трамплина `syscall_entry`.
-#[unsafe(no_mangle)]
-pub extern "C" fn syscall_dispatcher(
+/// Диспетчер системных вызовов нативного мира Linux x86_64.
+pub fn linux_syscall_dispatcher(
     nr: u64,
     arg1: u64,
     arg2: u64,
     arg3: u64,
     arg4: u64,
     arg5: u64,
-    regs: *mut SyscallRegisters,
+    r: &SyscallRegisters,
 ) -> u64 {
-    // Прерываем выполнение дочернего процесса при получении сигнала SIGINT
-    if crate::task::signal::is_sigint_pending_for_current() {
-        crate::task::signal::clear_sigint();
-        crate::fs::handle::flush_stdin();
-        crate::drivers::keyboard::clear_key_queue();
-        crate::serial_println!("^C");
-        crate::println!("^C");
-        sys_exit(130);
-    }
-
-    let r = unsafe { &*regs };
-
-    let res = match nr {
+    match nr {
         SYS_READ => sys_read(arg1, arg2, arg3),
         SYS_WRITE => sys_write(arg1, arg2, arg3),
         SYS_OPEN => sys_open(arg1, arg2, arg3),
@@ -469,13 +455,47 @@ pub extern "C" fn syscall_dispatcher(
         SYS_GETRANDOM => sys_getrandom(arg1, arg2, arg3),
         SYS_RSEQ => (-(ENOSYS as i64)) as u64, // Fallback to standard TLS
         _ => {
-            let nt_res = crate::task::win_syscall::win_syscall_dispatcher(nr, arg1, arg2, arg3, arg4, arg5, r);
-            if nt_res != crate::task::win_syscall::STATUS_UNSUCCESSFUL {
-                nt_res
-            } else {
-                serial_println!("[syscall] unhandled syscall nr={}", nr);
-                (-(ENOSYS as i64)) as u64
-            }
+            serial_println!("[syscall-linux] unhandled syscall nr={}", nr);
+            (-(ENOSYS as i64)) as u64
+        }
+    }
+}
+
+/// Главный межсистемный роутер системных вызовов ядра Wunix.
+/// Вызывается напрямую из ассемблерного трамплина `syscall_entry` и маршрутизирует
+/// вызов в изолированный мир (ABI Personality) текущего процесса.
+#[unsafe(no_mangle)]
+pub extern "C" fn syscall_dispatcher(
+    nr: u64,
+    arg1: u64,
+    arg2: u64,
+    arg3: u64,
+    arg4: u64,
+    arg5: u64,
+    regs: *mut SyscallRegisters,
+) -> u64 {
+    // Прерываем выполнение дочернего процесса при получении сигнала SIGINT
+    if crate::task::signal::is_sigint_pending_for_current() {
+        crate::task::signal::clear_sigint();
+        crate::fs::handle::flush_stdin();
+        crate::drivers::keyboard::clear_key_queue();
+        crate::serial_println!("^C");
+        crate::println!("^C");
+        sys_exit(130);
+    }
+
+    let r = unsafe { &*regs };
+    let personality = crate::task::current_thread_abi();
+
+    let res = match personality {
+        crate::task::abi::AbiPersonality::Linux => {
+            linux_syscall_dispatcher(nr, arg1, arg2, arg3, arg4, arg5, r)
+        }
+        crate::task::abi::AbiPersonality::WindowsNt => {
+            crate::task::win_syscall::win_syscall_dispatcher(nr, arg1, arg2, arg3, arg4, arg5, r)
+        }
+        crate::task::abi::AbiPersonality::Darwin => {
+            crate::task::darwin::darwin_syscall_dispatcher(nr, arg1, arg2, arg3, arg4, arg5, r)
         }
     };
 

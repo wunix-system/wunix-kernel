@@ -146,6 +146,7 @@ pub fn sys_clone(
         crate::task::current_thread_suid(),
         crate::task::current_thread_sgid(),
         crate::task::current_thread_umask(),
+        crate::task::current_thread_abi(),
     ));
     child_thread.is_main = !is_same_thread_group;
 
@@ -646,17 +647,25 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
         child_sgid = meta.gid;
     }
 
-    let (mut user_space, elf_info) = if crate::task::pe::is_pe(&data) {
+    let (mut user_space, elf_info, child_abi) = if crate::task::pe::is_pe(&data) {
         match crate::task::pe::load_pe(&data) {
-            Ok(res) => res,
+            Ok((us, info)) => (us, info, crate::task::abi::AbiPersonality::WindowsNt),
             Err(e) => {
                 serial_println!("[execve] PE load error for '{}': {:?}", path_str, e);
                 return (-(ENOEXEC as i64)) as u64;
             }
         }
+    } else if crate::task::darwin::is_macho(&data) {
+        match crate::task::darwin::load_macho(&data) {
+            Ok((us, info)) => (us, info, crate::task::abi::AbiPersonality::Darwin),
+            Err(e) => {
+                serial_println!("[execve] Mach-O load error for '{}': {:?}", path_str, e);
+                return (-(ENOEXEC as i64)) as u64;
+            }
+        }
     } else {
         match crate::task::elf::load_elf(&data) {
-            Ok(res) => res,
+            Ok((us, info)) => (us, info, crate::task::abi::AbiPersonality::Linux),
             Err(e) => {
                 serial_println!("[execve] ELF load error for '{}': {:?}", path_str, e);
                 return (-(ENOEXEC as i64)) as u64;
@@ -717,6 +726,9 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     let prev_fg = crate::task::signal::foreground_tgid();
     crate::task::signal::set_foreground_tgid(child_tgid);
 
+    let old_abi = crate::task::current_thread_abi();
+    crate::task::set_current_thread_abi(child_abi);
+
     let exit_code = unsafe {
         crate::arch::x86_64::syscall::enter_user_child(
             elf_info.entry_point.as_u64(),
@@ -728,6 +740,7 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
         )
     };
 
+    crate::task::set_current_thread_abi(old_abi);
     crate::task::signal::set_foreground_tgid(prev_fg);
     crate::task::set_current_thread_sync_child(prev_sync);
 

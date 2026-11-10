@@ -217,7 +217,8 @@ pub fn win_syscall_dispatcher(
             nt_delete_value_key(arg1, arg2)
         }
         NT_TERMINATE_PROCESS => {
-            crate::task::syscall::sys_exit_group(arg2);
+            let code = if arg2 != 0 { arg2 } else { arg1 };
+            crate::task::syscall::sys_exit_group(code);
         }
         NT_CREATE_EVENT => {
             let fd = crate::task::syscall::sys_eventfd2(arg5 as u32, 0);
