@@ -14,14 +14,15 @@ pub mod win_syscall;
 
 pub use abi::AbiPersonality;
 pub use scheduler::{
-    add_thread, block_current, check_timeouts, current_thread_abi, current_thread_egid, current_thread_euid,
-    current_thread_gid, current_thread_id, current_thread_kernel_stack_top,
+    active_process_count, add_thread, block_current, check_timeouts, current_thread_abi, current_thread_egid, current_thread_euid,
+    current_thread_gid, current_thread_id, current_thread_kernel_stack_top, current_thread_name,
     current_thread_parent_tgid, current_thread_pgid, current_thread_sgid, current_thread_suid,
     current_thread_tgid, current_thread_uid, current_thread_umask, exit, get_current_fs_base,
-    has_ready_threads, init, is_current_main_thread, is_current_thread_sync_child, is_initialized, set_current_clear_child_tid,
-    set_current_fs_base, set_current_thread_abi, set_current_thread_gid, set_current_thread_kernel_stack_top,
-    set_current_thread_pgid, set_current_thread_sync_child, set_current_thread_tgid, set_current_thread_uid,
-    set_current_thread_umask, spawn, terminate_process_threads, unblock_thread, yield_now,
+    has_ready_threads, init, is_current_main_thread, is_current_thread_sync_child, is_initialized,
+    kill_process_threads, process_exists, set_current_clear_child_tid, set_current_fs_base,
+    set_current_thread_abi, set_current_thread_gid, set_current_thread_kernel_stack_top,
+    set_current_thread_name, set_current_thread_pgid, set_current_thread_sync_child, set_current_thread_tgid, set_current_thread_uid,
+    set_current_thread_umask, spawn, terminate_process_threads, thread_exists, unblock_thread, yield_now,
 };
 pub use syslib::{
     init_syslib, map_syslib_to_user_space, resolve_symbol_vaddr, AT_SYSINFO_EHDR, SYSLIB_INFO_VADDR,

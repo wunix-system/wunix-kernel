@@ -151,6 +151,7 @@ pub fn nt_create_file(
         inode: node,
         offset: Mutex::new(0),
         flags: core::sync::atomic::AtomicU32::new(flags),
+        path: Some(vfs_path),
     });
 
     let fd = crate::fs::insert_file_handle(handle);

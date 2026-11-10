@@ -30,6 +30,26 @@ impl LimineFrameAllocator {
         self.free_list.push(frame);
     }
 
+    /// Вычисляет объем доступной свободной физической памяти в байтах.
+    pub fn free_bytes(&self) -> u64 {
+        let mut free = (self.free_list.len() as u64) * 4096;
+        for i in self.current_entry_idx..self.entries.len() {
+            let entry = self.entries[i];
+            if entry.type_ == MEMMAP_USABLE {
+                let start = if i == self.current_entry_idx && self.next_frame_addr != 0 {
+                    self.next_frame_addr
+                } else {
+                    (entry.base + 4095) & !4095
+                };
+                let end = entry.base + entry.length;
+                if end > start {
+                    free += end - start;
+                }
+            }
+        }
+        free
+    }
+
     /// Выделяет `count` физически непрерывных 4 КиБ фреймов.
     /// Критично для аппаратных буферов DMA и кольцевых очередей VirtIO.
     pub fn allocate_contiguous_frames(&mut self, count: usize) -> Option<PhysFrame<Size4KiB>> {

@@ -82,12 +82,16 @@ pub trait FileHandle: Send + Sync {
     fn socket_getsockopt(&self, _level: i32, _optname: i32) -> Result<alloc::vec::Vec<u8>, i64> {
         Err(-88)
     }
+    fn path(&self) -> Option<alloc::string::String> {
+        None
+    }
 }
 
 pub struct RegularFileHandle {
     pub inode: Arc<dyn Inode>,
     pub offset: Mutex<usize>,
     pub flags: AtomicU32,
+    pub path: Option<alloc::string::String>,
 }
 
 impl FileHandle for RegularFileHandle {
@@ -130,6 +134,10 @@ impl FileHandle for RegularFileHandle {
 
     fn set_offset(&self, offset: usize) {
         *self.offset.lock() = offset;
+    }
+
+    fn path(&self) -> Option<alloc::string::String> {
+        self.path.clone()
     }
 }
 

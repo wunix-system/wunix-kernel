@@ -184,10 +184,12 @@ pub fn load_macho(bytes: &[u8]) -> Result<(UserAddressSpace, ElfLoadInfo), ElfEr
         user_space,
         ElfLoadInfo {
             entry_point: VirtAddr::new(entry_point),
+            prog_entry: entry_point,
             phdr_addr: 0,
             phent: 0,
             phnum: 0,
             max_vaddr,
+            at_base: 0,
         },
     ))
 }

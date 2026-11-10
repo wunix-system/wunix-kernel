@@ -325,10 +325,12 @@ pub fn load_pe(bytes: &[u8]) -> Result<(UserAddressSpace, ElfLoadInfo), ElfError
         user_space,
         ElfLoadInfo {
             entry_point,
+            prog_entry: entry_point.as_u64(),
             phdr_addr: 0,
             phent: 0,
             phnum: 0,
             max_vaddr,
+            at_base: 0,
         },
     ))
 }

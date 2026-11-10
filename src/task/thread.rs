@@ -23,6 +23,7 @@ pub enum ThreadState {
 
 pub struct Thread {
     pub id: ThreadId,
+    pub name: [u8; 16],
     pub tgid: u64,
     pub parent_tgid: u64,
     pub pgid: u64,
@@ -76,6 +77,7 @@ impl Thread {
 
         Self {
             id,
+            name: *b"wunix_task\0\0\0\0\0\0",
             tgid: 1,
             parent_tgid: 1,
             pgid: 1,
@@ -102,6 +104,7 @@ impl Thread {
 
     pub fn new_clone(
         id: ThreadId,
+        name: [u8; 16],
         tgid: u64,
         parent_tgid: u64,
         pgid: u64,
@@ -122,6 +125,7 @@ impl Thread {
     ) -> Self {
         Self {
             id,
+            name,
             tgid,
             parent_tgid,
             pgid,
@@ -149,6 +153,7 @@ impl Thread {
     pub fn new_main() -> Self {
         Self {
             id: ThreadId::new(),
+            name: *b"init\0\0\0\0\0\0\0\0\0\0\0\0",
             tgid: 1,
             parent_tgid: 1,
             pgid: 1,

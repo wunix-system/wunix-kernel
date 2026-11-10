@@ -194,12 +194,24 @@ impl VirtualMemoryManager {
 
         for page in Page::range_inclusive(start_page, end_page) {
             let mut mapper = unsafe { OffsetPageTable::new(pml4_table, VirtAddr::new(hhdm)) };
-            if let Some(_existing_phys) = mapper.translate_addr(page.start_address()) {
-                // Если страница уже отображена, обновляем флаги
+            if let Some(existing_phys) = mapper.translate_addr(page.start_address()) {
+                // Если страница уже отображена, обновляем флаги PTE через Mapper
+                unsafe {
+                    let _ = mapper.update_flags(page, pt_flags).map(|flush| flush.flush());
+                }
                 let pml4_idx = page.start_address().p4_index();
                 let cur = pml4_table[pml4_idx].flags();
-                pml4_table[pml4_idx].set_flags(cur | pt_flags);
+                pml4_table[pml4_idx].set_flags(
+                    cur | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE,
+                );
                 x86_64::instructions::tlb::flush(page.start_address());
+
+                if (flags & MAP_ANON) != 0 {
+                    let frame_virt = hhdm + existing_phys.as_u64();
+                    unsafe {
+                        core::ptr::write_bytes(frame_virt as *mut u8, 0, 4096);
+                    }
+                }
             } else {
                 let frame = super::allocate_frame().ok_or(-12)?; // -ENOMEM
                 let frame_virt = hhdm + frame.start_address().as_u64();

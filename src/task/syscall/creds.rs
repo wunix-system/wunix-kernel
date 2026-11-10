@@ -177,13 +177,33 @@ pub fn sys_setregid(rgid: u64, egid: u64) -> u64 {
     0
 }
 
-pub fn sys_setresuid(ruid: u64, euid: u64, _suid: u64) -> u64 {
-    sys_setreuid(ruid, euid)
+pub fn sys_setresuid(ruid: u64, euid: u64, suid: u64) -> u64 {
+    let cur_uid = crate::task::current_thread_uid();
+    let cur_euid = crate::task::current_thread_euid();
+    let cur_suid = crate::task::current_thread_suid();
+
+    let new_uid = if ruid != u64::MAX && ruid != 0xFFFF_FFFF { ruid as u32 } else { cur_uid };
+    let new_euid = if euid != u64::MAX && euid != 0xFFFF_FFFF { euid as u32 } else { cur_euid };
+    let new_suid = if suid != u64::MAX && suid != 0xFFFF_FFFF { suid as u32 } else { cur_suid };
+
+    if cur_euid == 0 {
+        crate::task::set_current_thread_uid(new_uid, new_euid, new_suid);
+        0
+    } else {
+        let allowed = |val: u32| val == cur_uid || val == cur_euid || val == cur_suid;
+        if allowed(new_uid) && allowed(new_euid) && allowed(new_suid) {
+            crate::task::set_current_thread_uid(new_uid, new_euid, new_suid);
+            0
+        } else {
+            (-(EPERM as i64)) as u64
+        }
+    }
 }
 
 pub fn sys_getresuid(ruid_ptr: u64, euid_ptr: u64, suid_ptr: u64) -> u64 {
     let uid = sys_getuid() as u32;
     let euid = sys_geteuid() as u32;
+    let suid = crate::task::current_thread_suid();
     if ruid_ptr != 0 {
         if !validate_user_buffer(ruid_ptr, 4) {
             return (-(EFAULT as i64)) as u64;
@@ -200,18 +220,38 @@ pub fn sys_getresuid(ruid_ptr: u64, euid_ptr: u64, suid_ptr: u64) -> u64 {
         if !validate_user_buffer(suid_ptr, 4) {
             return (-(EFAULT as i64)) as u64;
         }
-        unsafe { core::ptr::write_unaligned(suid_ptr as *mut u32, euid); }
+        unsafe { core::ptr::write_unaligned(suid_ptr as *mut u32, suid); }
     }
     0
 }
 
-pub fn sys_setresgid(rgid: u64, egid: u64, _sgid: u64) -> u64 {
-    sys_setregid(rgid, egid)
+pub fn sys_setresgid(rgid: u64, egid: u64, sgid: u64) -> u64 {
+    let cur_gid = crate::task::current_thread_gid();
+    let cur_egid = crate::task::current_thread_egid();
+    let cur_sgid = crate::task::current_thread_sgid();
+
+    let new_gid = if rgid != u64::MAX && rgid != 0xFFFF_FFFF { rgid as u32 } else { cur_gid };
+    let new_egid = if egid != u64::MAX && egid != 0xFFFF_FFFF { egid as u32 } else { cur_egid };
+    let new_sgid = if sgid != u64::MAX && sgid != 0xFFFF_FFFF { sgid as u32 } else { cur_sgid };
+
+    if crate::task::current_thread_euid() == 0 {
+        crate::task::set_current_thread_gid(new_gid, new_egid, new_sgid);
+        0
+    } else {
+        let allowed = |val: u32| val == cur_gid || val == cur_egid || val == cur_sgid;
+        if allowed(new_gid) && allowed(new_egid) && allowed(new_sgid) {
+            crate::task::set_current_thread_gid(new_gid, new_egid, new_sgid);
+            0
+        } else {
+            (-(EPERM as i64)) as u64
+        }
+    }
 }
 
 pub fn sys_getresgid(rgid_ptr: u64, egid_ptr: u64, sgid_ptr: u64) -> u64 {
     let gid = sys_getgid() as u32;
     let egid = sys_getegid() as u32;
+    let sgid = crate::task::current_thread_sgid();
     if rgid_ptr != 0 {
         if !validate_user_buffer(rgid_ptr, 4) {
             return (-(EFAULT as i64)) as u64;
@@ -228,7 +268,7 @@ pub fn sys_getresgid(rgid_ptr: u64, egid_ptr: u64, sgid_ptr: u64) -> u64 {
         if !validate_user_buffer(sgid_ptr, 4) {
             return (-(EFAULT as i64)) as u64;
         }
-        unsafe { core::ptr::write_unaligned(sgid_ptr as *mut u32, egid); }
+        unsafe { core::ptr::write_unaligned(sgid_ptr as *mut u32, sgid); }
     }
     0
 }

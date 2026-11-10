@@ -130,6 +130,7 @@ pub fn sys_clone(
 
     let mut child_thread = alloc::boxed::Box::new(crate::task::Thread::new_clone(
         child_tid,
+        crate::task::current_thread_name(),
         child_tgid,
         parent_tgid,
         child_pgid,
@@ -492,16 +493,17 @@ pub fn sys_sysinfo(info_ptr: u64) -> u64 {
         let uptime: i64 = (crate::arch::x86_64::timer::ticks() / 100) as i64;
         core::ptr::write_unaligned(base.add(0) as *mut i64, uptime);
 
-        let totalram: u64 = 512 * 1024 * 1024;
+        let totalram = crate::memory::total_memory_bytes();
         core::ptr::write_unaligned(base.add(32) as *mut u64, totalram);
 
-        let freeram: u64 = 450 * 1024 * 1024;
+        let freeram = crate::memory::free_memory_bytes();
         core::ptr::write_unaligned(base.add(40) as *mut u64, freeram);
 
         let bufferram: u64 = 16 * 1024 * 1024;
         core::ptr::write_unaligned(base.add(56) as *mut u64, bufferram);
 
-        core::ptr::write_unaligned(base.add(80) as *mut u16, 2);
+        let procs = crate::task::active_process_count();
+        core::ptr::write_unaligned(base.add(80) as *mut u16, procs);
         core::ptr::write_unaligned(base.add(100) as *mut u32, 1);
     }
 
@@ -673,6 +675,8 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
         }
     };
     drop(data);
+    let bin_name = path_str.rsplit('/').next().unwrap_or(&path_str);
+    crate::task::set_current_thread_name(bin_name.as_bytes());
     let is_shell = is_shell_binary_path(&path_str);
     drop(path_str);
 
@@ -780,11 +784,22 @@ pub fn sys_exit(status: u64) -> ! {
 }
 
 
+static PROCESS_EXIT_STATUS: spin::Mutex<alloc::collections::BTreeMap<u64, (u64, i32)>> =
+    spin::Mutex::new(alloc::collections::BTreeMap::new());
+
+pub fn record_process_exit(tgid: u64, raw_status: i32) {
+    let parent_tgid = crate::task::current_thread_parent_tgid();
+    PROCESS_EXIT_STATUS.lock().insert(tgid, (parent_tgid, raw_status));
+}
+
 pub fn sys_exit_group(status: u64) -> ! {
     let cur_tgid = crate::task::current_thread_tgid();
     let cur_tid = crate::task::current_thread_id();
     let is_sync = crate::task::is_current_thread_sync_child();
     let has_parent = unsafe { crate::arch::x86_64::syscall::has_parent_process() };
+
+    let exit_status = (status as i32 & 0xff) << 8;
+    record_process_exit(cur_tgid, exit_status);
 
     // Удаляем все остальные потоки этого процесса из очередей планировщика
     crate::task::terminate_process_threads(cur_tgid, cur_tid);
@@ -800,17 +815,164 @@ pub fn sys_exit_group(status: u64) -> ! {
     }
 }
 
-pub fn sys_wait4(pid: i64, status_ptr: u64, _options: u64, _rusage_ptr: u64) -> u64 {
-    if status_ptr != 0 && validate_user_buffer(status_ptr, 4) {
+pub const WNOHANG: u64 = 1;
+pub const WUNTRACED: u64 = 2;
+pub const WCONTINUED: u64 = 8;
+
+pub fn sys_wait4(pid: i64, status_ptr: u64, options: u64, _rusage_ptr: u64) -> u64 {
+    let cur_tgid = crate::task::current_thread_tgid();
+
+    loop {
+        let found = {
+            let mut map = PROCESS_EXIT_STATUS.lock();
+            let mut matched_key = None;
+            for (&child_tgid, &(parent_tgid, status)) in map.iter() {
+                if parent_tgid == cur_tgid || cur_tgid == 1 {
+                    if pid > 0 && child_tgid == pid as u64 {
+                        matched_key = Some((child_tgid, status));
+                        break;
+                    } else if pid <= 0 {
+                        matched_key = Some((child_tgid, status));
+                        break;
+                    }
+                }
+            }
+            if let Some((child_tgid, status)) = matched_key {
+                map.remove(&child_tgid);
+                Some((child_tgid, status))
+            } else {
+                None
+            }
+        };
+
+        if let Some((child_tgid, status)) = found {
+            if status_ptr != 0 && validate_user_buffer(status_ptr, 4) {
+                unsafe {
+                    *(status_ptr as *mut i32) = status;
+                }
+            }
+            return child_tgid;
+        }
+
+        let has_running_children = if pid > 0 {
+            crate::task::process_exists(pid as u64)
+        } else {
+            false
+        };
+
+        if (options & WNOHANG) != 0 {
+            return 0;
+        }
+
+        if !has_running_children {
+            return (-(super::ECHILD as i64)) as u64;
+        }
+
+        crate::task::yield_now();
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SigInfo {
+    pub si_signo: i32,
+    pub si_errno: i32,
+    pub si_code: i32,
+    pub _pad0: i32,
+    pub si_pid: u32,
+    pub si_uid: u32,
+    pub si_status: i32,
+    pub _pad1: [u64; 12],
+    pub _pad2: u32,
+}
+
+pub fn sys_waitid(idtype: u64, id: u64, infop_ptr: u64, options: u64, _rusage_ptr: u64) -> u64 {
+    if infop_ptr != 0 && !validate_user_buffer(infop_ptr, core::mem::size_of::<SigInfo>() as u64) {
+        return (-(EFAULT as i64)) as u64;
+    }
+
+    let pid = match idtype {
+        0 /* P_ALL */ => -1,
+        1 /* P_PID */ => id as i64,
+        2 /* P_PGID */ => -(id as i64),
+        _ => return (-(EINVAL as i64)) as u64,
+    };
+
+    let mut status: i32 = 0;
+    let res = sys_wait4(pid, (&mut status as *mut i32) as u64, options, 0);
+    if (res as i64) < 0 {
+        return res;
+    }
+
+    if infop_ptr != 0 {
+        let mut info = SigInfo::default();
+        if res > 0 {
+            info.si_signo = 17; // SIGCHLD
+            info.si_code = 1;  // CLD_EXITED
+            info.si_pid = res as u32;
+            info.si_status = (status >> 8) & 0xff;
+        }
         unsafe {
-            *(status_ptr as *mut i32) = 0;
+            core::ptr::write_unaligned(infop_ptr as *mut SigInfo, info);
         }
     }
-    if pid > 0 {
-        pid as u64
-    } else {
-        1
+
+    0
+}
+
+pub fn sys_clock_getres(_clock_id: u64, res_ptr: u64) -> u64 {
+    if res_ptr != 0 {
+        if !validate_user_buffer(res_ptr, 16) {
+            return (-(EFAULT as i64)) as u64;
+        }
+        let res = crate::task::futex::Timespec {
+            tv_sec: 0,
+            tv_nsec: 10_000_000, // 10 мс (1 тик таймера PIT 100 Гц)
+        };
+        unsafe {
+            core::ptr::write_unaligned(res_ptr as *mut crate::task::futex::Timespec, res);
+        }
     }
+    0
+}
+
+pub fn sys_clock_nanosleep(
+    _clock_id: u64,
+    flags: u64,
+    req_ptr: u64,
+    rem_ptr: u64,
+) -> u64 {
+    const TIMER_ABSTIME: u64 = 1;
+    if !validate_user_buffer(req_ptr, 16) {
+        return (-(EFAULT as i64)) as u64;
+    }
+    let req = unsafe { core::ptr::read_unaligned(req_ptr as *const crate::task::futex::Timespec) };
+    if req.tv_sec < 0 || req.tv_nsec < 0 || req.tv_nsec >= 1_000_000_000 {
+        return (-(EINVAL as i64)) as u64;
+    }
+
+    if (flags & TIMER_ABSTIME) != 0 {
+        let (cur_sec, cur_nsec) = get_realtime_epoch();
+        if req.tv_sec < cur_sec || (req.tv_sec == cur_sec && req.tv_nsec <= cur_nsec) {
+            return 0;
+        }
+        let delta_sec = (req.tv_sec - cur_sec) as u64;
+        let delta_nsec = if req.tv_nsec >= cur_nsec {
+            (req.tv_nsec - cur_nsec) as u64
+        } else {
+            1_000_000_000 - (cur_nsec - req.tv_nsec) as u64
+        };
+        let delta = delta_sec.saturating_mul(100) + (delta_nsec + 9_999_999) / 10_000_000;
+        let deadline = crate::arch::x86_64::timer::ticks().saturating_add(delta);
+        crate::task::block_current(Some(deadline));
+    } else {
+        return sys_nanosleep(req_ptr, rem_ptr);
+    }
+
+    if crate::task::signal::is_sigint_pending_for_current() {
+        return (-(EINTR as i64)) as u64;
+    }
+    0
 }
 
 #[repr(C)]
@@ -899,6 +1061,9 @@ pub fn sys_prctl(option: u64, arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64) -> 
     match option {
         PR_SET_NAME => {
             if arg2 != 0 && validate_user_buffer(arg2, 16) {
+                let name_bytes = unsafe { core::slice::from_raw_parts(arg2 as *const u8, 16) };
+                let len = name_bytes.iter().position(|&b| b == 0).unwrap_or(16);
+                crate::task::set_current_thread_name(&name_bytes[..len]);
                 0
             } else {
                 (-(EFAULT as i64)) as u64
@@ -906,7 +1071,7 @@ pub fn sys_prctl(option: u64, arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64) -> 
         }
         PR_GET_NAME => {
             if arg2 != 0 && validate_user_buffer(arg2, 16) {
-                let name = b"wunix_task\0\0\0\0\0\0";
+                let name = crate::task::current_thread_name();
                 unsafe {
                     core::ptr::copy_nonoverlapping(name.as_ptr(), arg2 as *mut u8, 16);
                 }

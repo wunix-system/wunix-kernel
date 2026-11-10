@@ -290,6 +290,70 @@ pub fn terminate_process_threads(tgid: u64, keep_tid: ThreadId) {
     });
 }
 
+pub fn process_exists(tgid: u64) -> bool {
+    interrupts::without_interrupts(|| {
+        if let Some(sched) = SCHEDULER.lock().as_ref() {
+            if sched.current.as_ref().map_or(false, |t| t.tgid == tgid) {
+                return true;
+            }
+            if sched.ready_queue.iter().any(|t| t.tgid == tgid) {
+                return true;
+            }
+            if sched.blocked_threads.values().any(|t| t.tgid == tgid) {
+                return true;
+            }
+        }
+        false
+    })
+}
+
+pub fn thread_exists(tid: ThreadId) -> bool {
+    interrupts::without_interrupts(|| {
+        if let Some(sched) = SCHEDULER.lock().as_ref() {
+            if sched.current.as_ref().map_or(false, |t| t.id == tid) {
+                return true;
+            }
+            if sched.ready_queue.iter().any(|t| t.id == tid) {
+                return true;
+            }
+            if sched.blocked_threads.contains_key(&tid) {
+                return true;
+            }
+        }
+        false
+    })
+}
+
+pub fn kill_process_threads(tgid: u64) -> bool {
+    interrupts::without_interrupts(|| {
+        let mut lock = SCHEDULER.lock();
+        if let Some(sched) = lock.as_mut() {
+            let mut found = false;
+            let prev_rq_len = sched.ready_queue.len();
+            sched.ready_queue.retain(|t| {
+                if t.tgid == tgid {
+                    found = true;
+                    false
+                } else {
+                    true
+                }
+            });
+            let prev_bt_len = sched.blocked_threads.len();
+            sched.blocked_threads.retain(|_, t| {
+                if t.tgid == tgid {
+                    found = true;
+                    false
+                } else {
+                    true
+                }
+            });
+            found || (sched.ready_queue.len() != prev_rq_len) || (sched.blocked_threads.len() != prev_bt_len)
+        } else {
+            false
+        }
+    })
+}
+
 pub fn set_current_fs_base(base: u64) {
     interrupts::without_interrupts(|| {
         if let Some(sched) = SCHEDULER.lock().as_mut() {
@@ -319,6 +383,49 @@ pub fn set_current_clear_child_tid(tid_ptr: u64) {
             }
         }
     });
+}
+
+pub fn current_thread_name() -> [u8; 16] {
+    interrupts::without_interrupts(|| {
+        SCHEDULER
+            .lock()
+            .as_ref()
+            .and_then(|s| s.current.as_ref())
+            .map(|t| t.name)
+            .unwrap_or([0u8; 16])
+    })
+}
+
+pub fn set_current_thread_name(name: &[u8]) {
+    interrupts::without_interrupts(|| {
+        if let Some(sched) = SCHEDULER.lock().as_mut() {
+            if let Some(t) = sched.current.as_mut() {
+                t.name = [0u8; 16];
+                let len = name.len().min(15);
+                t.name[..len].copy_from_slice(&name[..len]);
+            }
+        }
+    });
+}
+
+pub fn active_process_count() -> u16 {
+    interrupts::without_interrupts(|| {
+        if let Some(sched) = SCHEDULER.lock().as_ref() {
+            let mut tgids = alloc::collections::BTreeSet::new();
+            if let Some(cur) = sched.current.as_ref() {
+                tgids.insert(cur.tgid);
+            }
+            for t in &sched.ready_queue {
+                tgids.insert(t.tgid);
+            }
+            for t in sched.blocked_threads.values() {
+                tgids.insert(t.tgid);
+            }
+            tgids.len() as u16
+        } else {
+            1
+        }
+    })
 }
 
 pub fn init() {

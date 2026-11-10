@@ -94,6 +94,17 @@ pub fn collect_memory_stats(entries: &[&limine::memmap::Entry]) -> MemoryStats {
 
 static HHDM_OFFSET: AtomicU64 = AtomicU64::new(0);
 static FRAME_ALLOCATOR: Mutex<Option<LimineFrameAllocator>> = Mutex::new(None);
+static GLOBAL_MEMORY_STATS: Mutex<Option<MemoryStats>> = Mutex::new(None);
+
+pub fn total_memory_bytes() -> u64 {
+    GLOBAL_MEMORY_STATS.lock().map_or(512 * 1024 * 1024, |s| s.ram_bytes)
+}
+
+pub fn free_memory_bytes() -> u64 {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        FRAME_ALLOCATOR.lock().as_ref().map_or(450 * 1024 * 1024, |a| a.free_bytes())
+    })
+}
 
 pub fn hhdm_offset() -> u64 {
     HHDM_OFFSET.load(Ordering::Relaxed)
@@ -195,6 +206,7 @@ pub fn map_kernel_mmio(phys_addr: u64, size: usize) -> Result<VirtAddr, &'static
 /// - Выделяет и маппит страницы под кучу ядра (1 MiB) и активирует аллокатор.
 pub fn init(memory_map: &'static [&'static limine::memmap::Entry], hhdm_offset: u64) {
     HHDM_OFFSET.store(hhdm_offset, Ordering::Relaxed);
+    *GLOBAL_MEMORY_STATS.lock() = Some(collect_memory_stats(memory_map));
 
     let mut mapper = unsafe { paging::init_offset_page_table(hhdm_offset) };
     let frame_allocator = unsafe { frame::LimineFrameAllocator::new(memory_map) };

@@ -1,11 +1,15 @@
+pub mod at;
 pub mod creds;
 pub mod dir;
+pub mod extended;
 pub mod fs;
 pub mod ipc;
 pub mod mem;
 pub mod net;
 pub mod poll;
 pub mod proc;
+pub mod sched;
+pub mod signal;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -15,14 +19,18 @@ use crate::arch::x86_64::SyscallRegisters;
 use crate::fs::insert_file_handle;
 use crate::serial_println;
 
+pub use at::*;
 pub use creds::*;
 pub use dir::*;
+pub use extended::*;
 pub use fs::*;
 pub use ipc::*;
 pub use mem::*;
 pub use net::*;
 pub use poll::*;
 pub use proc::*;
+pub use sched::*;
+pub use signal::*;
 
 pub const E2BIG: u64 = 7;
 pub const ENOTSOCK: u64 = 88;
@@ -60,7 +68,9 @@ pub const SYS_MINCORE: u64 = 27;
 pub const SYS_MADVISE: u64 = 28;
 pub const SYS_DUP: u64 = 32;
 pub const SYS_DUP2: u64 = 33;
+pub const SYS_PAUSE: u64 = 34;
 pub const SYS_NANOSLEEP: u64 = 35;
+pub const SYS_ALARM: u64 = 37;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_SOCKET: u64 = 41;
 pub const SYS_CONNECT: u64 = 42;
@@ -130,11 +140,20 @@ pub const SYS_GETRESUID: u64 = 118;
 pub const SYS_SETRESGID: u64 = 119;
 pub const SYS_GETRESGID: u64 = 120;
 pub const SYS_GETPGID: u64 = 121;
+pub const SYS_GETSID: u64 = 124;
 pub const SYS_CAPGET: u64 = 125;
 pub const SYS_CAPSET: u64 = 126;
 pub const SYS_SIGALTSTACK: u64 = 131;
 pub const SYS_UTIME: u64 = 132;
 pub const SYS_STATFS: u64 = 137;
+pub const SYS_GETPRIORITY: u64 = 140;
+pub const SYS_SETPRIORITY: u64 = 141;
+pub const SYS_SCHED_SETPARAM: u64 = 142;
+pub const SYS_SCHED_GETPARAM: u64 = 143;
+pub const SYS_SCHED_SETSCHEDULER: u64 = 144;
+pub const SYS_SCHED_GETSCHEDULER: u64 = 145;
+pub const SYS_SCHED_GET_PRIORITY_MAX: u64 = 146;
+pub const SYS_SCHED_GET_PRIORITY_MIN: u64 = 147;
 pub const SYS_PRCTL: u64 = 157;
 pub const SYS_ARCH_PRCTL: u64 = 158;
 pub const SYS_SETRLIMIT: u64 = 160;
@@ -145,6 +164,7 @@ pub const SYS_MOUNT: u64 = 165;
 pub const SYS_UMOUNT2: u64 = 166;
 pub const SYS_REBOOT: u64 = 169;
 pub const SYS_GETTID: u64 = 186;
+pub const SYS_TKILL: u64 = 200;
 pub const SYS_FUTEX: u64 = 202;
 pub const SYS_SCHED_GETAFFINITY: u64 = 204;
 pub const SYS_EPOLL_CREATE: u64 = 213;
@@ -152,26 +172,46 @@ pub const SYS_GETDENTS64: u64 = 217;
 pub const SYS_SET_TID_ADDRESS: u64 = 218;
 pub const SYS_CLOCK_SETTIME: u64 = 227;
 pub const SYS_CLOCK_GETTIME: u64 = 228;
+pub const SYS_CLOCK_GETRES: u64 = 229;
+pub const SYS_CLOCK_NANOSLEEP: u64 = 230;
 pub const SYS_EXIT_GROUP: u64 = 231;
 pub const SYS_EPOLL_WAIT: u64 = 232;
 pub const SYS_EPOLL_CTL: u64 = 233;
 pub const SYS_TGKILL: u64 = 234;
 pub const SYS_UTIMES: u64 = 235;
+pub const SYS_WAITID: u64 = 247;
 pub const SYS_OPENAT: u64 = 257;
+pub const SYS_MKDIRAT: u64 = 258;
+pub const SYS_FCHOWNAT: u64 = 260;
 pub const SYS_NEWFSTATAT: u64 = 262;
+pub const SYS_UNLINKAT: u64 = 263;
+pub const SYS_RENAMEAT: u64 = 264;
+pub const SYS_SYMLINKAT: u64 = 266;
+pub const SYS_READLINKAT: u64 = 267;
+pub const SYS_FCHMODAT: u64 = 268;
+pub const SYS_FACCESSAT: u64 = 269;
 pub const SYS_PSELECT6: u64 = 270;
 pub const SYS_PPOLL: u64 = 271;
 pub const SYS_UTIMENSAT: u64 = 280;
 pub const SYS_EPOLL_PWAIT: u64 = 281;
 pub const SYS_EVENTFD: u64 = 284;
+pub const SYS_FALLOCATE: u64 = 285;
 pub const SYS_ACCEPT4: u64 = 288;
 pub const SYS_EVENTFD2: u64 = 290;
 pub const SYS_EPOLL_CREATE1: u64 = 291;
 pub const SYS_DUP3: u64 = 292;
 pub const SYS_PIPE2: u64 = 293;
 pub const SYS_PRLIMIT64: u64 = 302;
+pub const SYS_SET_ROBUST_LIST: u64 = 273;
+pub const SYS_GET_ROBUST_LIST: u64 = 274;
+pub const SYS_RENAMEAT2: u64 = 316;
 pub const SYS_GETRANDOM: u64 = 318;
+pub const SYS_MEMFD_CREATE: u64 = 319;
+pub const SYS_COPY_FILE_RANGE: u64 = 326;
+pub const SYS_STATX: u64 = 332;
 pub const SYS_RSEQ: u64 = 334;
+pub const SYS_CLOSE_RANGE: u64 = 436;
+pub const SYS_FACCESSAT2: u64 = 439;
 
 // Стандартные коды ошибок POSIX
 pub const EPERM: u64 = 1;
@@ -181,6 +221,7 @@ pub const EINTR: u64 = 4;
 pub const EIO: u64 = 5;
 pub const ENOEXEC: u64 = 8;
 pub const EBADF: u64 = 9;
+pub const ECHILD: u64 = 10;
 pub const EAGAIN: u64 = 11;
 pub const ENOMEM: u64 = 12;
 pub const EACCES: u64 = 13;
@@ -197,6 +238,7 @@ pub const ESPIPE: u64 = 29;
 pub const EPIPE: u64 = 32;
 pub const ENOSYS: u64 = 38;
 pub const ENOTEMPTY: u64 = 39;
+pub const EOPNOTSUPP: u64 = 95;
 pub const EAFNOSUPPORT: u64 = 97;
 pub const ETIMEDOUT: u64 = 110;
 
@@ -334,11 +376,13 @@ pub fn linux_syscall_dispatcher(
         SYS_PIPE => sys_pipe2(arg1, 0),
         SYS_SELECT => sys_select(arg1, arg2, arg3, arg4, arg5),
         SYS_YIELD => sys_yield(),
-        SYS_MINCORE => 0,
-        SYS_MADVISE => 0,
+        SYS_MINCORE => sys_mincore(arg1, arg2, arg3),
+        SYS_MADVISE => sys_madvise(arg1, arg2, arg3),
         SYS_DUP => sys_dup(arg1),
         SYS_DUP2 => sys_dup3(arg1, arg2, 0),
+        SYS_PAUSE => sys_pause(),
         SYS_NANOSLEEP => sys_nanosleep(arg1, arg2),
+        SYS_ALARM => sys_alarm(arg1),
         SYS_GETPID => crate::task::current_thread_tgid(),
         SYS_SOCKET => match crate::fs::socket::create_socket(arg1 as u16, arg2 as u32, arg3 as i32) {
             Ok(sock) => insert_file_handle(sock),
@@ -370,7 +414,9 @@ pub fn linux_syscall_dispatcher(
         SYS_EXECVE => sys_execve(arg1, arg2, arg3),
         SYS_EXIT => sys_exit(arg1),
         SYS_WAIT4 => sys_wait4(arg1 as i64, arg2, arg3, arg4),
-        SYS_KILL | SYS_TGKILL => 0,
+        SYS_KILL => sys_kill(arg1 as i64, arg2),
+        SYS_TGKILL => sys_tgkill(arg1 as i64, arg2 as i64, arg3),
+        SYS_TKILL => sys_tkill(arg1 as i64, arg2),
         SYS_UNAME => sys_uname(arg1),
         SYS_FCNTL => sys_fcntl(arg1, arg2, arg3),
         SYS_FLOCK => sys_flock(arg1, arg2),
@@ -415,12 +461,21 @@ pub fn linux_syscall_dispatcher(
         SYS_SETRESGID => sys_setresgid(arg1, arg2, arg3),
         SYS_GETRESGID => sys_getresgid(arg1, arg2, arg3),
         SYS_GETPGID => sys_getpgid(arg1),
+        SYS_GETSID => sys_getsid(arg1),
         SYS_CAPGET => sys_capget(arg1, arg2),
         SYS_CAPSET => sys_capset(arg1, arg2),
         SYS_SETSID => sys_setsid(),
         SYS_SIGALTSTACK => crate::task::signal::sys_sigaltstack(arg1, arg2),
         SYS_UTIME => sys_utimensat(-100, arg1, arg2, 0),
         SYS_STATFS => sys_statfs(arg1, arg2),
+        SYS_GETPRIORITY => sys_getpriority(arg1, arg2),
+        SYS_SETPRIORITY => sys_setpriority(arg1, arg2, arg3),
+        SYS_SCHED_SETPARAM => sys_sched_setparam(arg1, arg2),
+        SYS_SCHED_GETPARAM => sys_sched_getparam(arg1, arg2),
+        SYS_SCHED_SETSCHEDULER => sys_sched_setscheduler(arg1, arg2, arg3),
+        SYS_SCHED_GETSCHEDULER => sys_sched_getscheduler(arg1),
+        SYS_SCHED_GET_PRIORITY_MAX => sys_sched_get_priority_max(arg1),
+        SYS_SCHED_GET_PRIORITY_MIN => sys_sched_get_priority_min(arg1),
         SYS_PRCTL => sys_prctl(arg1, arg2, arg3, arg4, arg5),
         SYS_ARCH_PRCTL => sys_arch_prctl(arg1, arg2),
         SYS_SETRLIMIT => sys_prlimit64(0, arg1, arg2, 0),
@@ -436,24 +491,44 @@ pub fn linux_syscall_dispatcher(
         }
         SYS_CLOCK_SETTIME => sys_clock_settime(arg1, arg2),
         SYS_CLOCK_GETTIME => sys_clock_gettime(arg1, arg2),
+        SYS_CLOCK_GETRES => sys_clock_getres(arg1, arg2),
+        SYS_CLOCK_NANOSLEEP => sys_clock_nanosleep(arg1, arg2, arg3, arg4),
         SYS_EXIT_GROUP => sys_exit_group(arg1),
         SYS_EPOLL_WAIT => sys_epoll_wait(arg1, arg2, arg3, arg4 as i64),
         SYS_EPOLL_CTL => sys_epoll_ctl(arg1, arg2, arg3, arg4),
         SYS_UTIMES => sys_utimes(arg1, arg2),
+        SYS_WAITID => sys_waitid(arg1, arg2, arg3, arg4, arg5),
         SYS_OPENAT => sys_openat(arg1 as i64, arg2, arg3, arg4),
+        SYS_MKDIRAT => sys_mkdirat(arg1 as i64, arg2, arg3),
+        SYS_FCHOWNAT => sys_fchownat(arg1 as i64, arg2, arg3, arg4, arg5),
         SYS_NEWFSTATAT => sys_newfstatat(arg1 as i64, arg2, arg3, arg4),
+        SYS_UNLINKAT => sys_unlinkat(arg1 as i64, arg2, arg3),
+        SYS_RENAMEAT => sys_renameat(arg1 as i64, arg2, arg3 as i64, arg4),
+        SYS_SYMLINKAT => sys_symlinkat(arg1, arg2 as i64, arg3),
+        SYS_READLINKAT => sys_readlinkat(arg1 as i64, arg2, arg3, arg4),
+        SYS_FCHMODAT => sys_fchmodat(arg1 as i64, arg2, arg3, arg4),
+        SYS_FACCESSAT => sys_faccessat(arg1 as i64, arg2, arg3, 0),
         SYS_PSELECT6 => sys_pselect6(arg1, arg2, arg3, arg4, arg5, r.r9),
         SYS_PPOLL => sys_ppoll(arg1, arg2, arg3, arg4, arg5),
         SYS_UTIMENSAT => sys_utimensat(arg1 as i64, arg2, arg3, arg4),
         SYS_EPOLL_PWAIT => sys_epoll_wait(arg1, arg2, arg3, arg4 as i64),
         SYS_EVENTFD => sys_eventfd2(arg1 as u32, 0),
+        SYS_FALLOCATE => sys_fallocate(arg1, arg2, arg3, arg4),
         SYS_EVENTFD2 => sys_eventfd2(arg1 as u32, arg2 as u32),
         SYS_EPOLL_CREATE1 => sys_epoll_create1(arg1),
         SYS_DUP3 => sys_dup3(arg1, arg2, arg3),
         SYS_PIPE2 => sys_pipe2(arg1, arg2),
         SYS_PRLIMIT64 => sys_prlimit64(arg1, arg2, arg3, arg4),
+        SYS_RENAMEAT2 => sys_renameat2(arg1 as i64, arg2, arg3 as i64, arg4, arg5),
         SYS_GETRANDOM => sys_getrandom(arg1, arg2, arg3),
+        SYS_MEMFD_CREATE => sys_memfd_create(arg1, arg2),
+        SYS_COPY_FILE_RANGE => sys_copy_file_range(arg1, arg2, arg3, arg4, arg5, r.r9),
+        SYS_STATX => sys_statx(arg1 as i64, arg2, arg3, arg4, arg5),
+        SYS_SET_ROBUST_LIST => (-(ENOSYS as i64)) as u64,
+        SYS_GET_ROBUST_LIST => (-(ENOSYS as i64)) as u64,
         SYS_RSEQ => (-(ENOSYS as i64)) as u64, // Fallback to standard TLS
+        SYS_CLOSE_RANGE => sys_close_range(arg1, arg2, arg3),
+        SYS_FACCESSAT2 => sys_faccessat2(arg1 as i64, arg2, arg3, arg4),
         _ => {
             serial_println!("[syscall-linux] unhandled syscall nr={}", nr);
             (-(ENOSYS as i64)) as u64

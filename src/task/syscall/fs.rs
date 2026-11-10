@@ -160,18 +160,10 @@ pub fn sys_open(path_ptr: u64, flags: u64, mode: u64) -> u64 {
         inode: node,
         offset: Mutex::new(initial_offset),
         flags: core::sync::atomic::AtomicU32::new(flags as u32),
+        path: Some(target_path),
     });
 
     insert_file_handle(handle)
-}
-
-
-pub fn sys_openat(dirfd: i64, path_ptr: u64, flags: u64, mode: u64) -> u64 {
-    if dirfd == -100 {
-        sys_open(path_ptr, flags, mode)
-    } else {
-        sys_open(path_ptr, flags, mode)
-    }
 }
 
 
@@ -241,74 +233,6 @@ pub fn sys_fstat(fd: u64, statbuf_ptr: u64) -> u64 {
     } else {
         stat.st_mode = 0o010600; // S_IFIFO
     }
-
-    unsafe {
-        core::ptr::write_unaligned(statbuf_ptr as *mut Stat, stat);
-    }
-    0
-}
-
-
-pub fn sys_newfstatat(dirfd: i64, path_ptr: u64, statbuf_ptr: u64, flags: u64) -> u64 {
-    if !validate_user_buffer(statbuf_ptr, core::mem::size_of::<Stat>() as u64) {
-        return (-(EFAULT as i64)) as u64;
-    }
-    let path = match read_user_cstr(path_ptr, 1024) {
-        Ok(p) => p,
-        Err(err) => return (-(err as i64)) as u64,
-    };
-
-    let target_path = if dirfd == -100 || path.starts_with('/') {
-        resolve_relative_path(&path)
-    } else {
-        resolve_relative_path(&path)
-    };
-
-    // Псевдоустройства символьных интерфейсов Linux
-    let (is_special_dev, dev_mode, dev_rdev) = match target_path.as_str() {
-        "/dev/tty" | "/dev/tty0" | "/dev/console" => (true, 0o020666, 0x0500),
-        "/dev/null" => (true, 0o020666, 0x0103),
-        "/dev/zero" => (true, 0o020666, 0x0105),
-        "/dev/urandom" => (true, 0o020666, 0x0109),
-        "/dev/random" => (true, 0o020666, 0x0108),
-        _ => (false, 0, 0),
-    };
-
-    if is_special_dev {
-        let mut stat = Stat::default();
-        stat.st_mode = dev_mode;
-        stat.st_rdev = dev_rdev;
-        stat.st_nlink = 1;
-        stat.st_blksize = 4096;
-        unsafe {
-            core::ptr::write_unaligned(statbuf_ptr as *mut Stat, stat);
-        }
-        return 0;
-    }
-
-    // Флаг AT_SYMLINK_NOFOLLOW (0x100) указывает не следовать по символическим ссылкам
-    let follow_symlinks = (flags & 0x100) == 0;
-    let node = match crate::fs::resolve_path(&target_path, follow_symlinks) {
-        Ok(n) => n,
-        Err(_) => return (-(ENOENT as i64)) as u64,
-    };
-
-    let meta = node.metadata();
-    let mut stat = Stat::default();
-    stat.st_size = meta.size as i64;
-    stat.st_ino = meta.inode_id;
-    stat.st_nlink = 1;
-    stat.st_blksize = 4096;
-    let type_bits = match meta.itype {
-        crate::fs::InodeType::Directory => 0o040000,
-        crate::fs::InodeType::File => 0o100000,
-        crate::fs::InodeType::Symlink => 0o120000,
-        crate::fs::InodeType::BlockDevice => 0o060000,
-        crate::fs::InodeType::CharDevice => 0o020000,
-    };
-    stat.st_mode = type_bits | (meta.permissions as u32 & 0o7777);
-    stat.st_uid = meta.uid;
-    stat.st_gid = meta.gid;
 
     unsafe {
         core::ptr::write_unaligned(statbuf_ptr as *mut Stat, stat);
@@ -908,13 +832,16 @@ pub fn sys_flock(fd: u64, _operation: u64) -> u64 {
 pub fn sys_fchdir(fd: u64) -> u64 {
     if let Some(handle) = get_file_handle(fd) {
         if let Some(inode) = handle.as_inode() {
-            if inode.metadata().itype == crate::fs::InodeType::Directory {
-                return 0;
-            } else {
+            if inode.metadata().itype != crate::fs::InodeType::Directory {
                 return (-(ENOTDIR as i64)) as u64;
             }
+            if let Some(path) = handle.path() {
+                super::set_cwd(&path);
+            }
+            0
+        } else {
+            (-(ENOTDIR as i64)) as u64
         }
-        0
     } else {
         (-(EBADF as i64)) as u64
     }

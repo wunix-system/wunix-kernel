@@ -61,17 +61,12 @@ pub fn sys_mkdir(path_ptr: u64, _mode: u64) -> u64 {
     }
 }
 
-pub fn sys_rmdir(path_ptr: u64) -> u64 {
-    let raw = match read_user_cstr(path_ptr, 1024) {
-        Ok(s) => s,
-        Err(e) => return (-(e as i64)) as u64,
-    };
-    let norm = resolve_relative_path(&raw);
+pub fn sys_rmdir_path(norm: &str) -> u64 {
     if norm == "/" {
         return (-(EACCES as i64)) as u64;
     }
 
-    let node = match crate::fs::resolve_path(&norm, false) {
+    let node = match crate::fs::resolve_path(norm, false) {
         Ok(n) => n,
         Err(_) => return (-(ENOENT as i64)) as u64,
     };
@@ -92,7 +87,7 @@ pub fn sys_rmdir(path_ptr: u64) -> u64 {
     let (parent_path, leaf) = match norm.rfind('/') {
         Some(0) => ("/", &norm[1..]),
         Some(idx) => (&norm[..idx], &norm[idx + 1..]),
-        None => ("/", norm.as_str()),
+        None => ("/", norm),
     };
 
     let parent = match crate::fs::resolve_path(parent_path, true) {
@@ -108,6 +103,15 @@ pub fn sys_rmdir(path_ptr: u64) -> u64 {
         Ok(()) => 0,
         Err(_) => (-(ENOENT as i64)) as u64,
     }
+}
+
+pub fn sys_rmdir(path_ptr: u64) -> u64 {
+    let raw = match read_user_cstr(path_ptr, 1024) {
+        Ok(s) => s,
+        Err(e) => return (-(e as i64)) as u64,
+    };
+    let norm = resolve_relative_path(&raw);
+    sys_rmdir_path(&norm)
 }
 
 pub fn sys_rename(oldpath_ptr: u64, newpath_ptr: u64) -> u64 {
@@ -240,17 +244,18 @@ pub fn sys_access(path_ptr: u64, mode: u64) -> u64 {
         Err(_) => return (-(ENOENT as i64)) as u64,
     };
 
-    // F_OK = 0 (проверка существования)
     if mode == 0 {
-        return 0;
+        return 0; // F_OK
     }
 
-    // Для суперпользователя Wunix чтение/запись/исполнение разрешены по умолчанию
-    let meta = node.metadata();
-    if (mode & 1) != 0 && meta.itype == InodeType::Directory {
-        return 0;
+    let want_read = (mode & 4) != 0;
+    let want_write = (mode & 2) != 0;
+    let want_exec = (mode & 1) != 0;
+
+    match crate::fs::check_permission(&node, want_read, want_write, want_exec) {
+        Ok(()) => 0,
+        Err(_) => (-(EACCES as i64)) as u64,
     }
-    0
 }
 
 pub fn sys_statfs(_path_ptr: u64, buf_ptr: u64) -> u64 {
@@ -258,13 +263,17 @@ pub fn sys_statfs(_path_ptr: u64, buf_ptr: u64) -> u64 {
         return (-(EFAULT as i64)) as u64;
     }
 
-    // RAMFS_MAGIC = 0x858458f6
+    let total_bytes = crate::memory::total_memory_bytes();
+    let free_bytes = crate::memory::free_memory_bytes();
+    let total_blocks = total_bytes / 4096;
+    let free_blocks = free_bytes / 4096;
+
     let stat = Statfs {
-        f_type: 0x858458f6,
+        f_type: 0x858458f6, // RAMFS_MAGIC
         f_bsize: 4096,
-        f_blocks: 131072, // 512 MiB / 4096
-        f_bfree: 115200,  // ~450 MiB
-        f_bavail: 115200,
+        f_blocks: total_blocks,
+        f_bfree: free_blocks,
+        f_bavail: free_blocks,
         f_files: 65536,
         f_ffree: 64000,
         f_fsid: [0, 0],

@@ -14,7 +14,12 @@ pub const ET_DYN: u16 = 3;
 pub const EM_X86_64: u16 = 62;
 
 pub const PT_LOAD: u32 = 1;
+pub const PT_DYNAMIC: u32 = 2;
+pub const PT_INTERP: u32 = 3;
+pub const PT_NOTE: u32 = 4;
+pub const PT_SHLIB: u32 = 5;
 pub const PT_PHDR: u32 = 6;
+pub const PT_TLS: u32 = 7;
 
 pub const PF_X: u32 = 1 << 0;
 pub const PF_W: u32 = 1 << 1;
@@ -37,6 +42,7 @@ pub const AT_EUID: u64 = 12;
 pub const AT_GID: u64 = 13;
 pub const AT_EGID: u64 = 14;
 pub const AT_CLKTCK: u64 = 17;
+pub const AT_SECURE: u64 = 23;
 pub const AT_RANDOM: u64 = 25;
 
 // Вершина пользовательского стека (на границе канонического 48-битного диапазона виртуальной памяти)
@@ -47,10 +53,12 @@ pub const USER_STACK_SIZE: usize = 0x200000;
 #[derive(Debug, Clone, Copy)]
 pub struct ElfLoadInfo {
     pub entry_point: VirtAddr,
+    pub prog_entry: u64,
     pub phdr_addr: u64,
     pub phent: u16,
     pub phnum: u16,
     pub max_vaddr: u64,
+    pub at_base: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +72,8 @@ pub enum ElfError {
     InvalidProgramHeaders,
     OutOfMemory,
     MappingFailed,
+    InterpreterNotFound,
+    InterpreterInvalid,
 }
 
 #[repr(C)]
@@ -253,16 +263,128 @@ pub fn load_elf(elf_bytes: &[u8]) -> Result<(UserAddressSpace, ElfLoadInfo), Elf
     crate::task::syslib::map_syslib_to_user_space(&mut user_space)
         .map_err(|_| ElfError::MappingFailed)?;
 
-    let entry_point = VirtAddr::new(load_base + header.e_entry);
+    // Ищем сегмент PT_INTERP: если исполняемый файл динамический,
+    // необходимо загрузить в адресное пространство ELF-интерпретатор (ld.so)
+    let mut interp_path: Option<alloc::string::String> = None;
+    for i in 0..ph_num {
+        let entry_offset = ph_offset + i * ph_entry_size;
+        let ph = unsafe {
+            core::ptr::read_unaligned(
+                elf_bytes.as_ptr().add(entry_offset) as *const Elf64ProgramHeader,
+            )
+        };
+        if ph.p_type == PT_INTERP {
+            let start = ph.p_offset as usize;
+            let end = (ph.p_offset + ph.p_filesz) as usize;
+            if end <= elf_bytes.len() {
+                let slice = &elf_bytes[start..end];
+                let clean = if let Some(&0) = slice.last() {
+                    &slice[..slice.len() - 1]
+                } else {
+                    slice
+                };
+                if let Ok(s) = core::str::from_utf8(clean) {
+                    interp_path = Some(alloc::string::String::from(s));
+                }
+            }
+            break;
+        }
+    }
+
+    let prog_entry = load_base + header.e_entry;
+    let mut entry_point = VirtAddr::new(prog_entry);
+    let mut at_base = 0u64;
+
+    if let Some(path) = interp_path {
+        let interp_bytes = crate::fs::read_file(&path)
+            .or_else(|_| {
+                if let Some(rest) = path.strip_prefix("/lib64/") {
+                    crate::fs::read_file(&alloc::format!("/lib/{}", rest))
+                } else if let Some(rest) = path.strip_prefix("/lib/") {
+                    crate::fs::read_file(&alloc::format!("/lib64/{}", rest))
+                } else {
+                    Err(crate::fs::VfsError::NotFound)
+                }
+            })
+            .or_else(|_| {
+                let base = path.rsplit('/').next().unwrap_or(&path);
+                crate::fs::read_file(&alloc::format!("/lib/{}", base))
+                    .or_else(|_| crate::fs::read_file(&alloc::format!("/lib64/{}", base)))
+            })
+            .map_err(|_| ElfError::InterpreterNotFound)?;
+
+        let interp_hdr = validate_header(&interp_bytes).map_err(|_| ElfError::InterpreterInvalid)?;
+
+        // Загружаем динамический компоновщик в изолированный высокий диапазон 0x7000_0000_0000
+        let interp_base = if interp_hdr.e_type == ET_DYN {
+            0x0000_7000_0000_0000u64
+        } else {
+            0u64
+        };
+
+        let interp_ph_off = interp_hdr.e_phoff as usize;
+        let interp_ph_num = interp_hdr.e_phnum as usize;
+        let interp_phent = interp_hdr.e_phentsize as usize;
+        let interp_ph_total = interp_ph_num
+            .checked_mul(interp_phent)
+            .ok_or(ElfError::InterpreterInvalid)?;
+
+        if interp_ph_off + interp_ph_total > interp_bytes.len() {
+            return Err(ElfError::InterpreterInvalid);
+        }
+
+        for i in 0..interp_ph_num {
+            let entry_off = interp_ph_off + i * interp_phent;
+            let ph = unsafe {
+                core::ptr::read_unaligned(
+                    interp_bytes.as_ptr().add(entry_off) as *const Elf64ProgramHeader,
+                )
+            };
+
+            if ph.p_type != PT_LOAD || ph.p_memsz == 0 {
+                continue;
+            }
+
+            let f_start = ph.p_offset as usize;
+            let f_len = ph.p_filesz as usize;
+            let f_end = f_start
+                .checked_add(f_len)
+                .ok_or(ElfError::InterpreterInvalid)?;
+
+            if f_end > interp_bytes.len() || ph.p_filesz > ph.p_memsz {
+                return Err(ElfError::InterpreterInvalid);
+            }
+
+            let vaddr = interp_base + ph.p_vaddr;
+            if vaddr >= 0x0000_8000_0000_0000 || (vaddr + ph.p_memsz) > 0x0000_8000_0000_0000 {
+                return Err(ElfError::MappingFailed);
+            }
+
+            let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+            if (ph.p_flags & PF_W) != 0 {
+                flags |= PageTableFlags::WRITABLE;
+            }
+
+            let file_slice = &interp_bytes[f_start..f_end];
+            user_space
+                .load_segment(vaddr, ph.p_memsz, file_slice, flags)
+                .map_err(|_| ElfError::MappingFailed)?;
+        }
+
+        entry_point = VirtAddr::new(interp_base + interp_hdr.e_entry);
+        at_base = interp_base;
+    }
 
     Ok((
         user_space,
         ElfLoadInfo {
             entry_point,
+            prog_entry,
             phdr_addr,
             phent: header.e_phentsize,
             phnum: header.e_phnum,
             max_vaddr,
+            at_base,
         },
     ))
 }
@@ -278,10 +400,10 @@ pub fn load_elf(elf_bytes: &[u8]) -> Result<(UserAddressSpace, ElfLoadInfo), Elf
 ///                                   auxv[1]: (AT_PHENT = 4, sizeof(Elf64_Phdr))
 ///                                   auxv[2]: (AT_PHNUM = 5, phnum)
 ///                                   auxv[3]: (AT_PAGESZ = 6, 4096)
-///                                   auxv[4]: (AT_ENTRY = 9, entry_point)
-///                                   auxv[5]: (AT_CLKTCK = 17, 100)
-///                                   auxv[6]: (AT_RANDOM = 25, random_buf_ptr) -> 16 байт энтропии
-///                                   auxv[7]: (AT_NULL = 0, 0)
+///                                   auxv[4]: (AT_BASE = 7, interp_base)
+///                                   auxv[5]: (AT_FLAGS = 8, 0)
+///                                   auxv[6]: (AT_ENTRY = 9, prog_entry)
+///                                   ...
 ///   [Ниже на стеке]               = Байты строк argv, envp и 16 байт для AT_RANDOM.
 ///
 /// Выравнивание конечного адреса RSP строго кратно 16 байтам перед входом в точку запуска.
@@ -325,13 +447,20 @@ pub fn setup_user_stack(
     }
     arg_ptrs.reverse();
 
-    // 4. Векторы Auxiliary Vectors (auxv)
-    let auxv: [(u64, u64); 9] = [
+    // 4. Векторы Auxiliary Vectors (auxv) согласно System V AMD64 ABI
+    let auxv: [(u64, u64); 16] = [
         (AT_PHDR, info.phdr_addr),
         (AT_PHENT, info.phent as u64),
         (AT_PHNUM, info.phnum as u64),
         (AT_PAGESZ, 4096),
-        (AT_ENTRY, info.entry_point.as_u64()),
+        (AT_BASE, info.at_base),
+        (AT_FLAGS, 0),
+        (AT_ENTRY, info.prog_entry),
+        (AT_UID, 0),
+        (AT_EUID, 0),
+        (AT_GID, 0),
+        (AT_EGID, 0),
+        (AT_SECURE, 0),
         (AT_CLKTCK, 100),
         (AT_RANDOM, random_buf_ptr),
         (crate::task::syslib::AT_SYSINFO_EHDR, crate::task::syslib::SYSLIB_INFO_VADDR),
