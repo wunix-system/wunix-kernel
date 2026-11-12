@@ -78,12 +78,23 @@ extern "x86-interrupt" fn page_fault_handler(
             }
         }
         if is_user {
+            let rsp = stack_frame.stack_pointer.as_u64();
             serial_println!(
-                "[kernel] #PF in Ring 3 at {:?}, error: {:?}, RIP {:#x} - terminating user task",
+                "[kernel] #PF in Ring 3 tgid={} exe={} at {:?}, error: {:?}, RIP {:#x}, RSP {:#x} - terminating user task",
+                crate::task::current_thread_tgid(),
+                crate::task::current_thread_exe_path(),
                 accessed_addr,
                 error_code,
-                stack_frame.instruction_pointer.as_u64()
+                stack_frame.instruction_pointer.as_u64(),
+                rsp
             );
+            for i in 0..8u64 {
+                let addr = rsp + i * 8;
+                if crate::task::syscall::validate_user_buffer(addr, 8) {
+                    let val = unsafe { core::ptr::read_volatile(addr as *const u64) };
+                    serial_println!("  [rsp+{:#x}] = {:#x}", i * 8, val);
+                }
+            }
             crate::task::syscall::sys_exit(128 + 14);
         }
     }

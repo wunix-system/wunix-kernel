@@ -178,21 +178,27 @@ global_asm!(r#"
 
     .global ret_from_fork
     ret_from_fork:
-        // Точка входа для нового потока, созданного через SYS_CLONE.
+        // Точка входа для нового потока, созданного через SYS_CLONE / SYS_CLONE3.
         // context_switch снял r15..rbp и передал управление сюда через ret.
-        // На стеке лежат: r9 (gp), rsi (child_user_rsp), rdi (0), user RIP, user RSP.
+        // Восстанавливаем все caller-saved регистры: clone3 передаёт fn в rdx и arg в r8,
+        // а рантайм Go читает gp из r9 и стек из rsi.
         mov ax, 0x18 | 3
         mov ds, ax
         mov es, ax
 
-        pop r9              // Восстанавливаем r9 (указатель gp в рантайме Go)
-        pop rsi             // Восстанавливаем rsi = child_user_rsp (рантайм Go загружает RSP из RSI)
-        pop rdi             // Очищаем rdi
+        pop r10
+        pop r8
+        pop r9
+        pop rdx
+        pop rsi
+        pop rdi
+        // Отключаем прерывания перед переключением на пользовательский RSP: sysretq
+        // атомарно вернёт IF=1 из r11 при выходе в Ring 3.
+        cli
         pop rcx             // user RIP
         pop rsp             // user RSP
-        xor edx, edx
         mov r11, 0x202      // user RFLAGS (IF=1)
-        xor eax, eax        // Возвращаемое значение clone в дочернем потоке = 0
+        xor eax, eax        // Возвращаемое значение clone/clone3 в дочернем потоке = 0
         sysretq
 
     .global enter_user_child
@@ -308,6 +314,37 @@ global_asm!(r#"
         cli
         hlt
         jmp 1b
+
+    .global jump_to_user_exec
+    jump_to_user_exec:
+        // RDI = entry_point, RSI = user_stack_top, RDX = pml4_phys, RCX = argc, R8 = argv, R9 = kernel_stack_top
+        // Полноценная POSIX-замена образа fork-потомка (не трогает глобальный стек синхронного spawn).
+        cli
+        mov rsp, r9
+        mov [rip + kernel_rsp_scratch], r9
+        mov cr3, rdx
+
+        mov ax, 0x18 | 3
+        mov ds, ax
+        mov es, ax
+        push rax
+        push rsi
+        push 0x202
+        push 0x20 | 3
+        push rdi
+
+        mov rdi, rcx
+        mov rsi, r8
+
+        xor rax, rax
+        xor rdx, rdx
+        xor rcx, rcx
+        xor r8, r8
+        xor r9, r9
+        xor r10, r10
+        xor r11, r11
+
+        iretq
 "#);
 
 #[unsafe(no_mangle)]
@@ -333,6 +370,14 @@ unsafe extern "C" {
         argv: u64,
         child_kernel_stack_top: u64,
     ) -> u64;
+    pub fn jump_to_user_exec(
+        entry_point: u64,
+        stack_top: u64,
+        pml4_phys: u64,
+        argc: u64,
+        argv: u64,
+        kernel_stack_top: u64,
+    ) -> !;
     pub fn resume_parent_process(exit_status: u64) -> !;
     pub fn ret_from_fork();
 }

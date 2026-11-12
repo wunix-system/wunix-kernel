@@ -78,6 +78,52 @@ pub fn enable_sse() {
     }
 }
 
+/// Буфер аппаратного состояния x87 FPU и SSE/XMM (формат инструкции `fxsave64`).
+/// Выравнивание на 16 байт требуется самой инструкцией x86_64 во избежание `#GP`.
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+pub struct FpuState(pub [u8; 512]);
+
+impl FpuState {
+    pub fn initial() -> Self {
+        let mut s = Self([0u8; 512]);
+        // Маскируем все исключения x87 (FCW = 0x037F) и SSE (MXCSR = 0x1F80) по ABI System V.
+        s.0[0] = 0x7f;
+        s.0[1] = 0x03;
+        s.0[24] = 0x80;
+        s.0[25] = 0x1f;
+        s
+    }
+
+    pub fn save_current() -> Self {
+        let mut s = Self([0u8; 512]);
+        s.save();
+        s
+    }
+
+    #[inline]
+    pub fn save(&mut self) {
+        unsafe {
+            core::arch::asm!(
+                "fxsave64 [{}]",
+                in(reg) self.0.as_mut_ptr(),
+                options(nostack)
+            );
+        }
+    }
+
+    #[inline]
+    pub fn restore(&self) {
+        unsafe {
+            core::arch::asm!(
+                "fxrstor64 [{}]",
+                in(reg) self.0.as_ptr(),
+                options(nostack)
+            );
+        }
+    }
+}
+
 /// Выключает питание виртуальной машины или компьютера.
 /// Использует порты управления питанием ACPI (QEMU 0x604, Bochs 0xb004, VBox 0x4004)
 /// и порт отладочного выхода QEMU 0xf4.
