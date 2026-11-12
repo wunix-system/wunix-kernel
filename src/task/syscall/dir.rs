@@ -115,53 +115,13 @@ pub fn sys_rmdir(path_ptr: u64) -> u64 {
 }
 
 pub fn sys_rename(oldpath_ptr: u64, newpath_ptr: u64) -> u64 {
-    let old_raw = match read_user_cstr(oldpath_ptr, 1024) {
-        Ok(s) => s,
-        Err(e) => return (-(e as i64)) as u64,
-    };
-    let new_raw = match read_user_cstr(newpath_ptr, 1024) {
-        Ok(s) => s,
-        Err(e) => return (-(e as i64)) as u64,
-    };
-
-    let old_norm = resolve_relative_path(&old_raw);
-    let new_norm = resolve_relative_path(&new_raw);
-    if old_norm == new_norm {
-        return 0;
-    }
-
-    let old_node = match crate::fs::resolve_path(&old_norm, false) {
-        Ok(n) => n,
-        Err(_) => return (-(ENOENT as i64)) as u64,
-    };
-
-    let (old_parent_path, old_leaf) = match old_norm.rfind('/') {
-        Some(0) => ("/", &old_norm[1..]),
-        Some(idx) => (&old_norm[..idx], &old_norm[idx + 1..]),
-        None => ("/", old_norm.as_str()),
-    };
-    let (new_parent_path, new_leaf) = match new_norm.rfind('/') {
-        Some(0) => ("/", &new_norm[1..]),
-        Some(idx) => (&new_norm[..idx], &new_norm[idx + 1..]),
-        None => ("/", new_norm.as_str()),
-    };
-
-    let old_parent = match crate::fs::resolve_path(old_parent_path, true) {
-        Ok(p) => p,
-        Err(_) => return (-(ENOENT as i64)) as u64,
-    };
-    let new_parent = match crate::fs::resolve_path(new_parent_path, true) {
-        Ok(p) => p,
-        Err(_) => return (-(ENOENT as i64)) as u64,
-    };
-
-    let _ = new_parent.unlink(new_leaf);
-    if new_parent.insert_child(new_leaf, old_node).is_err() {
-        return (-(EINVAL as i64)) as u64;
-    }
-    let _ = old_parent.unlink(old_leaf);
-
-    0
+    super::at::sys_renameat2(
+        super::at::AT_FDCWD,
+        oldpath_ptr,
+        super::at::AT_FDCWD,
+        newpath_ptr,
+        0,
+    )
 }
 
 pub fn sys_symlink(target_ptr: u64, linkpath_ptr: u64) -> u64 {
@@ -192,6 +152,17 @@ pub fn sys_readlink(path_ptr: u64, buf_ptr: u64, bufsiz: u64) -> u64 {
         Err(e) => return (-(e as i64)) as u64,
     };
     let norm = resolve_relative_path(&path);
+    if norm == "/proc/self/exe" || norm == "/proc/thread-self/exe" || (norm.starts_with("/proc/") && norm.ends_with("/exe")) {
+        let exe = crate::task::current_thread_exe_path();
+        let bytes = exe.as_bytes();
+        let to_copy = bytes.len().min(bufsiz as usize);
+        unsafe {
+            let dst = buf_ptr as *mut u8;
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, to_copy);
+        }
+        return to_copy as u64;
+    }
+
     let node = match crate::fs::resolve_path(&norm, false) {
         Ok(n) => n,
         Err(_) => return (-(ENOENT as i64)) as u64,

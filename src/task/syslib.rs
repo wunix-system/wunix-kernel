@@ -311,6 +311,11 @@ pub fn map_syslib_to_user_space(user_space: &mut UserAddressSpace) -> Result<(),
     Ok(())
 }
 
+pub fn is_syslib_frame(frame: PhysFrame<Size4KiB>) -> bool {
+    SYSLIB_INFO_FRAME.get().is_some_and(|f| *f == frame)
+        || SYSLIB_CODE_FRAME.get().is_some_and(|f| *f == frame)
+}
+
 pub fn resolve_symbol_vaddr(name: &str) -> Option<u64> {
     let count = SYSLIB_SYMBOLS_COUNT.load(Ordering::Relaxed) as usize;
     unsafe {

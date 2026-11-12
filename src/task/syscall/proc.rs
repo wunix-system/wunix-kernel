@@ -31,18 +31,43 @@ pub fn is_current_interactive_shell() -> bool {
 
 pub fn is_shell_binary_path(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
-    name == "wsh" || name == "sh" || name == "login" || name == "init"
+    name == "wsh" || name == "sh" || name == "bash" || name == "login" || name == "init"
 }
 
 static NEXT_PID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(10);
 
-pub fn sys_clone(
+const CLONE_VM: u64 = 0x0000_0100;
+const CLONE_FILES: u64 = 0x0000_0400;
+const CLONE_THREAD: u64 = 0x0001_0000;
+const CLONE_SETTLS: u64 = 0x0008_0000;
+const CLONE_PARENT_SETTID: u64 = 0x0010_0000;
+const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
+const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CloneArgs {
+    pub flags: u64,
+    pub pidfd: u64,
+    pub child_tid: u64,
+    pub parent_tid: u64,
+    pub exit_signal: u64,
+    pub stack: u64,
+    pub stack_size: u64,
+    pub tls: u64,
+    pub set_tid: u64,
+    pub set_tid_size: u64,
+    pub cgroup: u64,
+}
+
+fn do_clone(
     flags: u64,
     newsp: u64,
     parent_tidptr: u64,
     child_tidptr: u64,
     tls: u64,
     regs: &SyscallRegisters,
+    is_clone3: bool,
 ) -> u64 {
     let child_tid = crate::task::ThreadId::new();
     let (stack, kernel_stack_top) = crate::task::syscall::alloc_kernel_stack();
@@ -50,27 +75,19 @@ pub fn sys_clone(
     let child_user_rsp = if newsp != 0 { newsp } else { regs.user_rsp };
     let child_user_rip = regs.user_rip;
 
-    let child_fs_base = if (flags & 0x00080000) != 0 || tls != 0 {
+    let child_fs_base = if (flags & CLONE_SETTLS) != 0 || tls != 0 {
         tls
     } else {
         crate::task::get_current_fs_base()
     };
 
-    // Формируем начальный стек-фрейм (96 байт) для context_switch и ret_from_fork:
-    // [0]: r15
-    // [1]: r14
-    // [2]: r13 (mp в рантайме Go)
-    // [3]: r12 (fn в рантайме Go)
-    // [4]: rbx
-    // [5]: rbp
-    // [6]: ret_from_fork
-    // [7]: r9  (gp в рантайме Go)
-    // [8]: rsi (child_user_rsp: Go в дочернем потоке восстанавливает RSP из RSI)
-    // [9]: rdi (0)
-    // [10]: user_rip (rcx для sysretq)
-    // [11]: user_rsp (rsp для sysretq)
+    // Для legacy SYS_CLONE рантайм Go ожидает child_user_rsp в RSI; для clone3
+    // сохраняем все пользовательские caller-saved регистры (включая rdx/r8).
+    let child_rsi = if is_clone3 { regs.rsi } else { child_user_rsp };
+
+    // Начальный стек-фрейм (120 байт = 15 * 8) для context_switch и ret_from_fork
     let child_rsp = unsafe {
-        let ptr = (kernel_stack_top - 96) as *mut u64;
+        let ptr = (kernel_stack_top - 120) as *mut u64;
         ptr.add(0).write(regs.r15);
         ptr.add(1).write(regs.r14);
         ptr.add(2).write(regs.r13);
@@ -78,54 +95,91 @@ pub fn sys_clone(
         ptr.add(4).write(regs.rbx);
         ptr.add(5).write(regs.rbp);
         ptr.add(6).write(crate::arch::x86_64::syscall::ret_from_fork as *const () as usize as u64);
-        ptr.add(7).write(regs.r9);
-        ptr.add(8).write(child_user_rsp);
-        ptr.add(9).write(0);
-        ptr.add(10).write(child_user_rip);
-        ptr.add(11).write(child_user_rsp);
+        ptr.add(7).write(regs.r10);
+        ptr.add(8).write(regs.r8);
+        ptr.add(9).write(regs.r9);
+        ptr.add(10).write(regs.rdx);
+        ptr.add(11).write(child_rsi);
+        ptr.add(12).write(regs.rdi);
+        ptr.add(13).write(child_user_rip);
+        ptr.add(14).write(child_user_rsp);
         ptr as *mut u8
     };
 
-    if parent_tidptr != 0 && parent_tidptr < super::USER_SPACE_END {
+    let is_same_thread_group = (flags & CLONE_THREAD) != 0;
+    let (child_tgid, parent_tgid) = if is_same_thread_group {
+        // CLONE_THREAD: поток того же процесса, таблица дескрипторов уже общая
+        (crate::task::current_thread_tgid(), crate::task::current_thread_parent_tgid())
+    } else {
+        (NEXT_PID.fetch_add(1, Ordering::Relaxed), crate::task::current_thread_tgid())
+    };
+    let child_pgid = crate::task::current_thread_pgid();
+    let reported_child_id = if is_same_thread_group {
+        1_000_000 + child_tid.0
+    } else {
+        child_tgid
+    };
+
+    let parent_cr3: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr3", out(reg) parent_cr3);
+    }
+
+    let shares_vm = (flags & CLONE_VM) != 0;
+    let mut cloned_space = if shares_vm {
+        None
+    } else {
+        match crate::memory::UserAddressSpace::clone_from_cr3(parent_cr3) {
+            Ok(space) => Some(space),
+            Err(_) => return (-(ENOMEM as i64)) as u64,
+        }
+    };
+    let child_cr3 = match &cloned_space {
+        Some(space) => space.pml4_frame.start_address().as_u64(),
+        None => parent_cr3,
+    };
+
+    if (flags & CLONE_PARENT_SETTID) != 0
+        && parent_tidptr != 0
+        && validate_user_buffer(parent_tidptr, 4)
+    {
         unsafe {
-            core::ptr::write_volatile(parent_tidptr as *mut u32, child_tid.0 as u32);
+            core::ptr::write_volatile(parent_tidptr as *mut u32, reported_child_id as u32);
         }
     }
 
-    let clear_tid = if (flags & 0x00200000) != 0 || child_tidptr != 0 {
-        if child_tidptr != 0 && child_tidptr < super::USER_SPACE_END {
+    if (flags & CLONE_CHILD_SETTID) != 0
+        && child_tidptr != 0
+        && validate_user_buffer(child_tidptr, 4)
+    {
+        if let Some(ref mut space) = cloned_space {
+            let _ = space.write_user_bytes(child_tidptr, &(reported_child_id as u32).to_ne_bytes());
+        } else {
             unsafe {
-                core::ptr::write_volatile(child_tidptr as *mut u32, child_tid.0 as u32);
+                core::ptr::write_volatile(child_tidptr as *mut u32, reported_child_id as u32);
             }
         }
+    }
+
+    let clear_tid = if (flags & CLONE_CHILD_CLEARTID) != 0
+        && child_tidptr != 0
+        && validate_user_buffer(child_tidptr, 4)
+    {
         child_tidptr
     } else {
         0
     };
 
-    let is_same_thread_group = (flags & 0x00010000) != 0;
-    let (child_tgid, parent_tgid) = if is_same_thread_group {
-        // CLONE_THREAD: тот же процесс
-        (crate::task::current_thread_tgid(), crate::task::current_thread_parent_tgid())
-    } else {
-        // Новый процесс: уникальный TGID из глобального счетчика (не коллидирует с PID 1 init)
-        (NEXT_PID.fetch_add(1, Ordering::Relaxed), crate::task::current_thread_tgid())
-    };
-    let child_pgid = crate::task::current_thread_pgid();
-
-    if (flags & 0x00000400) != 0 {
-        crate::fs::share_fd_table(parent_tgid, child_tgid);
-    } else {
-        crate::fs::clone_fd_table(parent_tgid, child_tgid);
-    }
-
     if !is_same_thread_group {
+        if (flags & CLONE_FILES) != 0 {
+            crate::fs::share_fd_table(parent_tgid, child_tgid);
+        } else {
+            crate::fs::clone_fd_table(parent_tgid, child_tgid);
+        }
         super::clone_process_cwd(parent_tgid, child_tgid);
-    }
-
-    let child_cr3: u64;
-    unsafe {
-        core::arch::asm!("mov {}, cr3", out(reg) child_cr3);
+        if !shares_vm {
+            super::mem::clone_process_vma(parent_tgid, child_tgid);
+        }
     }
 
     let mut child_thread = alloc::boxed::Box::new(crate::task::Thread::new_clone(
@@ -148,12 +202,68 @@ pub fn sys_clone(
         crate::task::current_thread_sgid(),
         crate::task::current_thread_umask(),
         crate::task::current_thread_abi(),
+        crate::task::current_thread_exe_path(),
     ));
     child_thread.is_main = !is_same_thread_group;
+    child_thread.is_fork_child = !is_same_thread_group;
+    child_thread.cr3 = match cloned_space {
+        Some(space) => space.into_raw_cr3(),
+        None => parent_cr3,
+    };
+    child_thread.owns_cr3 = !shares_vm;
+    child_thread.fpu = crate::arch::x86_64::cpu::FpuState::save_current();
 
     crate::task::add_thread(child_thread);
 
-    child_tid.0 as u64
+    reported_child_id
+}
+
+pub fn sys_clone(
+    flags: u64,
+    newsp: u64,
+    parent_tidptr: u64,
+    child_tidptr: u64,
+    tls: u64,
+    regs: &SyscallRegisters,
+) -> u64 {
+    do_clone(flags, newsp, parent_tidptr, child_tidptr, tls, regs, false)
+}
+
+pub fn sys_clone3(uargs_ptr: u64, size: u64, regs: &SyscallRegisters) -> u64 {
+    const CLONE_ARGS_SIZE_VER0: u64 = 64;
+    if size < CLONE_ARGS_SIZE_VER0 || size > 4096 {
+        return (-(EINVAL as i64)) as u64;
+    }
+    if !validate_user_buffer(uargs_ptr, size) {
+        return (-(EFAULT as i64)) as u64;
+    }
+
+    let mut args = CloneArgs::default();
+    let copy_len = (size as usize).min(core::mem::size_of::<CloneArgs>());
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            uargs_ptr as *const u8,
+            (&mut args as *mut CloneArgs) as *mut u8,
+            copy_len,
+        );
+    }
+
+    // В clone3 передаются нижняя граница стека и его размер; на x86_64 стек растёт вниз
+    let newsp = if args.stack != 0 {
+        args.stack.saturating_add(args.stack_size)
+    } else {
+        0
+    };
+
+    do_clone(
+        args.flags,
+        newsp,
+        args.parent_tid,
+        args.child_tid,
+        args.tls,
+        regs,
+        true,
+    )
 }
 
 pub fn sys_fork(regs: &SyscallRegisters) -> u64 {
@@ -162,8 +272,9 @@ pub fn sys_fork(regs: &SyscallRegisters) -> u64 {
 }
 
 pub fn sys_vfork(regs: &SyscallRegisters) -> u64 {
-    // CLONE_VFORK (0x4000) | CLONE_VM (0x100) | SIGCHLD (17)
-    sys_clone(0x00004000 | 0x00000100 | 17, 0, 0, 0, 0, regs)
+    // Без приостановки родителя до execve разделение стека с CLONE_VM портит кадр вызова.
+    // Полное клонирование адресного пространства (fork) сохраняет совместимость с семантикой vfork.
+    sys_fork(regs)
 }
 
 pub fn sys_getppid() -> u64 {
@@ -215,7 +326,7 @@ pub fn sys_nanosleep(req_ptr: u64, _rem_ptr: u64) -> u64 {
 static REALTIME_BOOT_OFFSET: AtomicI64 = AtomicI64::new(0);
 static RTC_SYNCED: AtomicBool = AtomicBool::new(false);
 
-fn get_realtime_epoch() -> (i64, i64) {
+pub(crate) fn get_realtime_epoch() -> (i64, i64) {
     let ticks = crate::arch::x86_64::timer::ticks();
     if !RTC_SYNCED.load(Ordering::Relaxed) {
         let dt = crate::drivers::rtc::read_datetime();
@@ -252,6 +363,19 @@ pub fn sys_clock_gettime(clock_id: u64, tp_ptr: u64) -> u64 {
         core::ptr::write_unaligned(tp_ptr as *mut crate::task::futex::Timespec, ts);
     }
     0
+}
+
+pub fn sys_time(tloc_ptr: u64) -> u64 {
+    let (sec, _) = get_realtime_epoch();
+    if tloc_ptr != 0 {
+        if !validate_user_buffer(tloc_ptr, 8) {
+            return (-(EFAULT as i64)) as u64;
+        }
+        unsafe {
+            core::ptr::write_unaligned(tloc_ptr as *mut i64, sec);
+        }
+    }
+    sec as u64
 }
 
 pub fn sys_clock_settime(clock_id: u64, tp_ptr: u64) -> u64 {
@@ -511,6 +635,69 @@ pub fn sys_sysinfo(info_ptr: u64) -> u64 {
 }
 
 
+fn resolve_executable_file(
+    path_str: &str,
+    envp: &[String],
+) -> Option<(String, alloc::vec::Vec<u8>, alloc::sync::Arc<dyn crate::fs::Inode>)> {
+    let mut candidates: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+    if path_str.contains('/') {
+        candidates.push(resolve_relative_path(path_str));
+    } else {
+        let path_env = envp
+            .iter()
+            .find(|e| e.starts_with("PATH="))
+            .map(|e| &e[5..])
+            .unwrap_or("/bin:/usr/bin");
+
+        for dir in path_env.split(':') {
+            let trimmed = dir.trim().trim_end_matches('/');
+            if !trimmed.is_empty() {
+                candidates.push(alloc::format!("{}/{}", trimmed, path_str));
+            }
+        }
+
+        candidates.push(alloc::format!("/win/drives/c/Windows/System32/{}", path_str));
+    }
+
+    for cand in candidates {
+        if cand.is_empty() {
+            continue;
+        }
+        if let Ok(node) = crate::fs::resolve_path(&cand, true) {
+            if node.metadata().itype == crate::fs::InodeType::Directory {
+                continue;
+            }
+            if let Ok(data) = crate::fs::read_file(&cand) {
+                return Some((cand, data, node));
+            }
+        }
+    }
+    None
+}
+
+fn parse_shebang_line(data: &[u8]) -> Option<(String, Option<String>)> {
+    let rest = data.strip_prefix(b"#!")?;
+    let max_len = rest.len().min(256);
+    let line_bytes = match rest[..max_len].iter().position(|&b| b == b'\n') {
+        Some(idx) => &rest[..idx],
+        None => &rest[..max_len],
+    };
+    let line_str = core::str::from_utf8(line_bytes).ok()?;
+    let trimmed = line_str.trim_end_matches('\r').trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.find(|c: char| c == ' ' || c == '\t') {
+        Some(pos) => {
+            let interp = &trimmed[..pos];
+            let opt = trimmed[pos..].trim();
+            let opt_arg = if opt.is_empty() { None } else { Some(String::from(opt)) };
+            Some((String::from(interp), opt_arg))
+        }
+        None => Some((String::from(trimmed), None)),
+    }
+}
+
 pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     let path_str = match read_user_cstr(path_ptr, 512) {
         Ok(p) => p,
@@ -568,61 +755,53 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
         envp.push(String::from("TERM=xterm-256color"));
     }
 
-    let candidates = [
-        resolve_relative_path(&path_str),
-        if !path_str.starts_with('/') {
-            alloc::format!("/bin/{}", path_str)
-        } else {
-            String::new()
-        },
-        if !path_str.starts_with('/') {
-            alloc::format!("/usr/bin/{}", path_str)
-        } else {
-            String::new()
-        },
-        if !path_str.starts_with('/') {
-            alloc::format!("/win/drives/c/Windows/System32/{}", path_str)
-        } else {
-            String::new()
-        },
-    ];
+    let mut cur_path = path_str;
+    let mut final_data = None;
+    let mut final_node = None;
+    const MAX_SHEBANG_DEPTH: usize = 4;
 
-    let mut binary_data = None;
-    let mut resolved_node = None;
-    for cand in &candidates {
-        if cand.is_empty() {
+    for depth in 0..=MAX_SHEBANG_DEPTH {
+        let Some((resolved_path, data, node)) = resolve_executable_file(&cur_path, &envp) else {
+            crate::serial_println!("[sys_execve] FAILED binary not found: {}", cur_path);
+            return (-(ENOENT as i64)) as u64;
+        };
+
+        // Проверка прав на исполнение (флаг 'x') для скрипта или бинарника на каждом шаге
+        if crate::fs::check_permission(&node, false, false, true).is_err() {
+            crate::serial_println!("[sys_execve] FAILED permission denied: {}", resolved_path);
+            return (-(EACCES as i64)) as u64;
+        }
+
+        if data.starts_with(b"#!") {
+            if depth == MAX_SHEBANG_DEPTH {
+                return (-(40i64)) as u64; // -ELOOP
+            }
+            let Some((interp, opt_arg)) = parse_shebang_line(&data) else {
+                return (-(ENOEXEC as i64)) as u64;
+            };
+            let mut new_args = alloc::vec::Vec::with_capacity(args.len() + 2);
+            new_args.push(interp.clone());
+            if let Some(a) = opt_arg {
+                new_args.push(a);
+            }
+            new_args.push(resolved_path);
+            if args.len() > 1 {
+                new_args.extend(args.into_iter().skip(1));
+            }
+            args = new_args;
+            cur_path = interp;
             continue;
         }
-        if let Ok(node) = crate::fs::resolve_path(cand, true) {
-            if let Ok(data) = crate::fs::read_file(cand) {
-                binary_data = Some(data);
-                resolved_node = Some(node);
-                break;
-            }
-        }
+
+        cur_path = resolved_path;
+        final_data = Some(data);
+        final_node = Some(node);
+        break;
     }
 
-    let data = match binary_data {
-        Some(d) => d,
-        None => {
-            crate::serial_println!("[sys_execve] FAILED binary not found: {}", path_str);
-            return (-(ENOENT as i64)) as u64;
-        }
-    };
-    let node = match resolved_node {
-        Some(n) => n,
-        None => {
-            crate::serial_println!("[sys_execve] FAILED node not found: {}", path_str);
-            return (-(ENOENT as i64)) as u64;
-        }
-    };
-    drop(candidates);
-
-    // Проверка прав на исполнение бинарного файла (флаг 'x')
-    if let Err(_) = crate::fs::check_permission(&node, false, false, true) {
-        crate::serial_println!("[sys_execve] FAILED permission denied: {}", path_str);
-        return (-(EACCES as i64)) as u64;
-    }
+    let path_str = cur_path;
+    let data = final_data.unwrap();
+    let node = final_node.unwrap();
 
     let meta = node.metadata();
     let old_uid = crate::task::current_thread_uid();
@@ -675,8 +854,11 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
         }
     };
     drop(data);
+    let old_name = crate::task::current_thread_name();
+    let old_exe_path = crate::task::current_thread_exe_path();
     let bin_name = path_str.rsplit('/').next().unwrap_or(&path_str);
     crate::task::set_current_thread_name(bin_name.as_bytes());
+    crate::task::set_current_thread_exe_path(&path_str);
     let is_shell = is_shell_binary_path(&path_str);
     drop(path_str);
 
@@ -688,14 +870,60 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     drop(args);
     drop(envp);
 
-    let pml4_phys = user_space.pml4_frame.start_address().as_u64();
-    drop(user_space);
+    let pml4_phys = user_space.into_raw_cr3();
 
     let brk_start = (elf_info.max_vaddr + 4095) & !4095;
-    super::mem::reset_process_vma(brk_start);
+
+    // Для потомка после fork или POSIX-программы (например bash, делающей tail-call execve без fork)
+    // заменяем образ текущего процесса на месте, не возвращаясь в вызывающий код.
+    let in_place_exec = crate::task::is_current_thread_fork_child() || !uses_sync_execve_spawn(&old_exe_path);
+    if in_place_exec {
+        let cur_tgid = crate::task::current_thread_tgid();
+        let old_cr3: u64;
+        unsafe {
+            core::arch::asm!("mov {}, cr3", out(reg) old_cr3);
+        }
+        let old_owns = crate::task::current_thread_owns_cr3();
+        super::mem::reset_process_vma_for(cur_tgid, brk_start);
+        crate::task::set_current_thread_uid(child_uid, child_euid, child_suid);
+        crate::task::set_current_thread_gid(child_gid, child_egid, child_sgid);
+        crate::task::set_current_thread_abi(child_abi);
+        crate::task::set_current_thread_cr3(pml4_phys);
+        crate::task::set_current_thread_owns_cr3(true);
+        // Переключаемся на новый CR3 перед освобождением старого адресного пространства fork-потомка
+        x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+            core::arch::asm!("mov cr3, {}", in(reg) pml4_phys);
+            if old_owns && old_cr3 != 0 && (old_cr3 & !0xFFF) != (pml4_phys & !0xFFF) {
+                crate::memory::process::free_user_address_space(old_cr3);
+            }
+        });
+        unsafe { crate::arch::x86_64::syscall::write_fs_base(0); }
+        crate::task::set_current_fs_base(0);
+        if crate::task::is_current_thread_fork_child() {
+            crate::task::set_current_thread_fork_child(false);
+            crate::task::set_current_thread_sync_child(false);
+        }
+
+        let kstack_top = crate::task::current_thread_kernel_stack_top();
+        crate::arch::x86_64::gdt::set_tss_rsp0(kstack_top);
+        crate::arch::x86_64::syscall::set_kernel_stack(kstack_top);
+        crate::arch::x86_64::cpu::FpuState::initial().restore();
+
+        unsafe {
+            crate::arch::x86_64::syscall::jump_to_user_exec(
+                elf_info.entry_point.as_u64(),
+                stack_top,
+                pml4_phys,
+                argc,
+                argv_addr,
+                kstack_top,
+            );
+        }
+    }
 
     let parent_tgid = crate::task::current_thread_tgid();
     let child_tgid = NEXT_PID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    super::mem::reset_process_vma_for(child_tgid, brk_start);
     crate::fs::clone_fd_table(parent_tgid, child_tgid);
     crate::task::set_current_thread_tgid(child_tgid);
     super::clone_process_cwd(parent_tgid, child_tgid);
@@ -730,8 +958,12 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     let prev_fg = crate::task::signal::foreground_tgid();
     crate::task::signal::set_foreground_tgid(child_tgid);
 
+    let prev_termios = *crate::task::syscall::fs::CURRENT_TERMIOS.lock();
+
     let old_abi = crate::task::current_thread_abi();
     crate::task::set_current_thread_abi(child_abi);
+    let old_fpu = crate::arch::x86_64::cpu::FpuState::save_current();
+    crate::arch::x86_64::cpu::FpuState::initial().restore();
 
     let exit_code = unsafe {
         crate::arch::x86_64::syscall::enter_user_child(
@@ -743,6 +975,17 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
             child_kstack_top,
         )
     };
+
+    old_fpu.restore();
+
+    // Дочерний процесс завершился и CR3 восстановлен на родителя — возвращаем физические фреймы
+    unsafe {
+        crate::memory::process::free_user_address_space(pml4_phys);
+    }
+
+    if exit_code >= 128 {
+        *crate::task::syscall::fs::CURRENT_TERMIOS.lock() = prev_termios;
+    }
 
     crate::task::set_current_thread_abi(old_abi);
     crate::task::signal::set_foreground_tgid(prev_fg);
@@ -762,6 +1005,8 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     crate::fs::remove_process_fd_table(child_tgid);
     super::remove_process_cwd(child_tgid);
     crate::task::set_current_thread_tgid(parent_tgid);
+    crate::task::set_current_thread_name(&old_name);
+    crate::task::set_current_thread_exe_path(&old_exe_path);
 
     exit_code
 }
@@ -784,12 +1029,13 @@ pub fn sys_exit(status: u64) -> ! {
 }
 
 
-static PROCESS_EXIT_STATUS: spin::Mutex<alloc::collections::BTreeMap<u64, (u64, i32)>> =
+static PROCESS_EXIT_STATUS: spin::Mutex<alloc::collections::BTreeMap<u64, (u64, u64, i32)>> =
     spin::Mutex::new(alloc::collections::BTreeMap::new());
 
 pub fn record_process_exit(tgid: u64, raw_status: i32) {
     let parent_tgid = crate::task::current_thread_parent_tgid();
-    PROCESS_EXIT_STATUS.lock().insert(tgid, (parent_tgid, raw_status));
+    let pgid = crate::task::current_thread_pgid();
+    PROCESS_EXIT_STATUS.lock().insert(tgid, (parent_tgid, pgid, raw_status));
 }
 
 pub fn sys_exit_group(status: u64) -> ! {
@@ -798,13 +1044,16 @@ pub fn sys_exit_group(status: u64) -> ! {
     let is_sync = crate::task::is_current_thread_sync_child();
     let has_parent = unsafe { crate::arch::x86_64::syscall::has_parent_process() };
 
-    let exit_status = (status as i32 & 0xff) << 8;
-    record_process_exit(cur_tgid, exit_status);
+    if !(is_sync && has_parent) {
+        let exit_status = (status as i32 & 0xff) << 8;
+        record_process_exit(cur_tgid, exit_status);
+    }
 
     // Удаляем все остальные потоки этого процесса из очередей планировщика
     crate::task::terminate_process_threads(cur_tgid, cur_tid);
     crate::fs::remove_process_fd_table(cur_tgid);
     super::remove_process_cwd(cur_tgid);
+    super::mem::remove_process_vma(cur_tgid);
 
     if is_sync && has_parent {
         unsafe {
@@ -819,31 +1068,60 @@ pub const WNOHANG: u64 = 1;
 pub const WUNTRACED: u64 = 2;
 pub const WCONTINUED: u64 = 8;
 
+fn uses_sync_execve_spawn(exe_path: &str) -> bool {
+    let bin = exe_path.rsplit('/').next().unwrap_or(exe_path);
+    matches!(
+        bin,
+        "init" | "wsh" | "sh" | "env" | "login" | "sudo" | "su" | "system" | "winstall" | "time" | "[" | "test" | "unalias"
+    )
+}
+
+fn pop_matching_exit_status(cur_tgid: u64, pid: i64, cur_pgid: u64) -> Option<(u64, i32)> {
+    let mut map = PROCESS_EXIT_STATUS.lock();
+    let mut matched_key = None;
+    for (&child_tgid, &(parent_tgid, child_pgid, status)) in map.iter() {
+        if parent_tgid == cur_tgid || cur_tgid == 1 {
+            let pid_match = if pid > 0 {
+                child_tgid == pid as u64
+            } else if pid == -1 {
+                true
+            } else if pid == 0 {
+                child_pgid == cur_pgid
+            } else {
+                child_pgid == (-pid) as u64
+            };
+            if pid_match {
+                matched_key = Some((child_tgid, status));
+                break;
+            }
+        }
+    }
+    if let Some((child_tgid, status)) = matched_key {
+        map.remove(&child_tgid);
+        Some((child_tgid, status))
+    } else {
+        None
+    }
+}
+
 pub fn sys_wait4(pid: i64, status_ptr: u64, options: u64, _rusage_ptr: u64) -> u64 {
     let cur_tgid = crate::task::current_thread_tgid();
+    let cur_pgid = crate::task::current_thread_pgid();
 
     loop {
-        let found = {
-            let mut map = PROCESS_EXIT_STATUS.lock();
-            let mut matched_key = None;
-            for (&child_tgid, &(parent_tgid, status)) in map.iter() {
-                if parent_tgid == cur_tgid || cur_tgid == 1 {
-                    if pid > 0 && child_tgid == pid as u64 {
-                        matched_key = Some((child_tgid, status));
-                        break;
-                    } else if pid <= 0 {
-                        matched_key = Some((child_tgid, status));
-                        break;
-                    }
+        let mut found = pop_matching_exit_status(cur_tgid, pid, cur_pgid);
+
+        if found.is_none() {
+            let has_running_children = crate::task::has_child_process(cur_tgid, pid, cur_pgid);
+            if !has_running_children {
+                // Повторяем проверку после отпускания локов: потомок мог записать статус
+                // и удалить себя из планировщика в окне между первой проверкой и has_child_process.
+                found = pop_matching_exit_status(cur_tgid, pid, cur_pgid);
+                if found.is_none() {
+                    return (-(super::ECHILD as i64)) as u64;
                 }
             }
-            if let Some((child_tgid, status)) = matched_key {
-                map.remove(&child_tgid);
-                Some((child_tgid, status))
-            } else {
-                None
-            }
-        };
+        }
 
         if let Some((child_tgid, status)) = found {
             if status_ptr != 0 && validate_user_buffer(status_ptr, 4) {
@@ -854,18 +1132,8 @@ pub fn sys_wait4(pid: i64, status_ptr: u64, options: u64, _rusage_ptr: u64) -> u
             return child_tgid;
         }
 
-        let has_running_children = if pid > 0 {
-            crate::task::process_exists(pid as u64)
-        } else {
-            false
-        };
-
         if (options & WNOHANG) != 0 {
             return 0;
-        }
-
-        if !has_running_children {
-            return (-(super::ECHILD as i64)) as u64;
         }
 
         crate::task::yield_now();
@@ -1108,6 +1376,8 @@ mod tests {
         assert!(is_shell_binary_path("init"));
         assert!(is_shell_binary_path("/bin/sh"));
         assert!(is_shell_binary_path("sh"));
+        assert!(is_shell_binary_path("/bin/bash"));
+        assert!(is_shell_binary_path("bash"));
 
         assert!(!is_shell_binary_path("/bin/cat"));
         assert!(!is_shell_binary_path("cat"));

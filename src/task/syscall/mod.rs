@@ -107,6 +107,7 @@ pub const SYS_FCHDIR: u64 = 81;
 pub const SYS_RENAME: u64 = 82;
 pub const SYS_MKDIR: u64 = 83;
 pub const SYS_RMDIR: u64 = 84;
+pub const SYS_LINK: u64 = 86;
 pub const SYS_UNLINK: u64 = 87;
 pub const SYS_SYMLINK: u64 = 88;
 pub const SYS_READLINK: u64 = 89;
@@ -145,6 +146,7 @@ pub const SYS_CAPGET: u64 = 125;
 pub const SYS_CAPSET: u64 = 126;
 pub const SYS_SIGALTSTACK: u64 = 131;
 pub const SYS_UTIME: u64 = 132;
+pub const SYS_MKNOD: u64 = 133;
 pub const SYS_STATFS: u64 = 137;
 pub const SYS_GETPRIORITY: u64 = 140;
 pub const SYS_SETPRIORITY: u64 = 141;
@@ -165,6 +167,7 @@ pub const SYS_UMOUNT2: u64 = 166;
 pub const SYS_REBOOT: u64 = 169;
 pub const SYS_GETTID: u64 = 186;
 pub const SYS_TKILL: u64 = 200;
+pub const SYS_TIME: u64 = 201;
 pub const SYS_FUTEX: u64 = 202;
 pub const SYS_SCHED_GETAFFINITY: u64 = 204;
 pub const SYS_EPOLL_CREATE: u64 = 213;
@@ -182,10 +185,12 @@ pub const SYS_UTIMES: u64 = 235;
 pub const SYS_WAITID: u64 = 247;
 pub const SYS_OPENAT: u64 = 257;
 pub const SYS_MKDIRAT: u64 = 258;
+pub const SYS_MKNODAT: u64 = 259;
 pub const SYS_FCHOWNAT: u64 = 260;
 pub const SYS_NEWFSTATAT: u64 = 262;
 pub const SYS_UNLINKAT: u64 = 263;
 pub const SYS_RENAMEAT: u64 = 264;
+pub const SYS_LINKAT: u64 = 265;
 pub const SYS_SYMLINKAT: u64 = 266;
 pub const SYS_READLINKAT: u64 = 267;
 pub const SYS_FCHMODAT: u64 = 268;
@@ -210,6 +215,7 @@ pub const SYS_MEMFD_CREATE: u64 = 319;
 pub const SYS_COPY_FILE_RANGE: u64 = 326;
 pub const SYS_STATX: u64 = 332;
 pub const SYS_RSEQ: u64 = 334;
+pub const SYS_CLONE3: u64 = 435;
 pub const SYS_CLOSE_RANGE: u64 = 436;
 pub const SYS_FACCESSAT2: u64 = 439;
 
@@ -226,7 +232,9 @@ pub const EAGAIN: u64 = 11;
 pub const ENOMEM: u64 = 12;
 pub const EACCES: u64 = 13;
 pub const EFAULT: u64 = 14;
+pub const EBUSY: u64 = 16;
 pub const EEXIST: u64 = 17;
+pub const EXDEV: u64 = 18;
 pub const ENODEV: u64 = 19;
 pub const ENOTDIR: u64 = 20;
 pub const EISDIR: u64 = 21;
@@ -245,9 +253,9 @@ pub const ETIMEDOUT: u64 = 110;
 // Граница канонического пространства пользователя x86_64
 const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
 
-// Глобальный менеджер виртуальной памяти (VMA)
-static VMA_MANAGER: Mutex<crate::memory::VirtualMemoryManager> =
-    Mutex::new(crate::memory::VirtualMemoryManager::new());
+// Таблица менеджеров виртуальной памяти по TGID процесса (изоляция brk/mmap между процессами)
+static PROCESS_VMAS: Mutex<alloc::collections::BTreeMap<u64, crate::memory::VirtualMemoryManager>> =
+    Mutex::new(alloc::collections::BTreeMap::new());
 
 // Рабочие директории процессов (по TGID), изолирующие фоновые службы от интерактивного шелла
 static PROCESS_CWD: spin::Mutex<alloc::collections::BTreeMap<u64, String>> =
@@ -304,7 +312,7 @@ fn resolve_relative_path(path: &str) -> String {
 }
 
 #[inline]
-fn validate_user_buffer(ptr: u64, len: u64) -> bool {
+pub fn validate_user_buffer(ptr: u64, len: u64) -> bool {
     if len == 0 {
         return true;
     }
@@ -339,6 +347,14 @@ fn read_user_cstr(ptr: u64, max_len: usize) -> Result<String, u64> {
         .map_err(|_| EINVAL)
 }
 
+
+fn current_linux_tid() -> u64 {
+    if crate::task::is_current_main_thread() {
+        crate::task::current_thread_tgid()
+    } else {
+        1_000_000 + crate::task::current_thread_id().0
+    }
+}
 
 /// Диспетчер системных вызовов нативного мира Linux x86_64.
 pub fn linux_syscall_dispatcher(
@@ -430,6 +446,7 @@ pub fn linux_syscall_dispatcher(
         SYS_RENAME => sys_rename(arg1, arg2),
         SYS_MKDIR => sys_mkdir(arg1, arg2),
         SYS_RMDIR => sys_rmdir(arg1),
+        SYS_LINK => sys_linkat(AT_FDCWD, arg1, AT_FDCWD, arg2, 0),
         SYS_UNLINK => sys_unlink(arg1),
         SYS_SYMLINK => sys_symlink(arg1, arg2),
         SYS_READLINK => sys_readlink(arg1, arg2, arg3),
@@ -467,6 +484,7 @@ pub fn linux_syscall_dispatcher(
         SYS_SETSID => sys_setsid(),
         SYS_SIGALTSTACK => crate::task::signal::sys_sigaltstack(arg1, arg2),
         SYS_UTIME => sys_utimensat(-100, arg1, arg2, 0),
+        SYS_MKNOD => sys_mknod(arg1, arg2, arg3),
         SYS_STATFS => sys_statfs(arg1, arg2),
         SYS_GETPRIORITY => sys_getpriority(arg1, arg2),
         SYS_SETPRIORITY => sys_setpriority(arg1, arg2, arg3),
@@ -480,14 +498,15 @@ pub fn linux_syscall_dispatcher(
         SYS_ARCH_PRCTL => sys_arch_prctl(arg1, arg2),
         SYS_SETRLIMIT => sys_prlimit64(0, arg1, arg2, 0),
         SYS_CHROOT => sys_chroot(arg1),
-        SYS_GETTID => crate::task::current_thread_id().0,
+        SYS_GETTID => current_linux_tid(),
+        SYS_TIME => sys_time(arg1),
         SYS_FUTEX => crate::task::futex::sys_futex(arg1, arg2, arg3, arg4, arg5, r.r9),
         SYS_SCHED_GETAFFINITY => sys_sched_getaffinity(arg1, arg2, arg3),
         SYS_EPOLL_CREATE => sys_epoll_create1(0),
         SYS_GETDENTS64 => sys_getdents64(arg1, arg2, arg3),
         SYS_SET_TID_ADDRESS => {
             crate::task::set_current_clear_child_tid(arg1);
-            crate::task::current_thread_id().0
+            current_linux_tid()
         }
         SYS_CLOCK_SETTIME => sys_clock_settime(arg1, arg2),
         SYS_CLOCK_GETTIME => sys_clock_gettime(arg1, arg2),
@@ -500,10 +519,12 @@ pub fn linux_syscall_dispatcher(
         SYS_WAITID => sys_waitid(arg1, arg2, arg3, arg4, arg5),
         SYS_OPENAT => sys_openat(arg1 as i64, arg2, arg3, arg4),
         SYS_MKDIRAT => sys_mkdirat(arg1 as i64, arg2, arg3),
+        SYS_MKNODAT => sys_mknodat(arg1 as i64, arg2, arg3, arg4),
         SYS_FCHOWNAT => sys_fchownat(arg1 as i64, arg2, arg3, arg4, arg5),
         SYS_NEWFSTATAT => sys_newfstatat(arg1 as i64, arg2, arg3, arg4),
         SYS_UNLINKAT => sys_unlinkat(arg1 as i64, arg2, arg3),
         SYS_RENAMEAT => sys_renameat(arg1 as i64, arg2, arg3 as i64, arg4),
+        SYS_LINKAT => sys_linkat(arg1 as i64, arg2, arg3 as i64, arg4, arg5),
         SYS_SYMLINKAT => sys_symlinkat(arg1, arg2 as i64, arg3),
         SYS_READLINKAT => sys_readlinkat(arg1 as i64, arg2, arg3, arg4),
         SYS_FCHMODAT => sys_fchmodat(arg1 as i64, arg2, arg3, arg4),
@@ -527,6 +548,7 @@ pub fn linux_syscall_dispatcher(
         SYS_SET_ROBUST_LIST => (-(ENOSYS as i64)) as u64,
         SYS_GET_ROBUST_LIST => (-(ENOSYS as i64)) as u64,
         SYS_RSEQ => (-(ENOSYS as i64)) as u64, // Fallback to standard TLS
+        SYS_CLONE3 => sys_clone3(arg1, arg2, r),
         SYS_CLOSE_RANGE => sys_close_range(arg1, arg2, arg3),
         SYS_FACCESSAT2 => sys_faccessat2(arg1 as i64, arg2, arg3, arg4),
         _ => {
@@ -588,6 +610,7 @@ pub extern "C" fn syscall_dispatcher(
 
 pub fn alloc_kernel_stack() -> (alloc::boxed::Box<[u8]>, u64) {
     let mut stack = alloc::vec![0u8; crate::task::thread::STACK_SIZE].into_boxed_slice();
-    let stack_end = stack.as_mut_ptr() as usize + crate::task::thread::STACK_SIZE;
+    // Выравниваем вершину стека вниз до 16 байт по требованиям ABI и fxsave64.
+    let stack_end = (stack.as_mut_ptr() as usize + crate::task::thread::STACK_SIZE) & !0xF;
     (stack, stack_end as u64)
 }

@@ -79,24 +79,6 @@ pub fn sys_open(path_ptr: u64, flags: u64, mode: u64) -> u64 {
 
     let target_path = resolve_relative_path(&path);
 
-    // Псевдоустройства терминалов и нулевые устройства Linux
-    if target_path == "/dev/tty" || target_path == "/dev/tty0" || target_path == "/dev/console" {
-        let handle = Arc::new(crate::fs::handle::TtyHandle::new(flags as u32));
-        return insert_file_handle(handle);
-    }
-    if target_path == "/dev/null" {
-        let handle = Arc::new(crate::fs::handle::NullHandle::new(flags as u32));
-        return insert_file_handle(handle);
-    }
-    if target_path == "/dev/zero" {
-        let handle = Arc::new(crate::fs::handle::ZeroHandle::new(flags as u32));
-        return insert_file_handle(handle);
-    }
-    if target_path == "/dev/urandom" || target_path == "/dev/random" {
-        let handle = Arc::new(crate::fs::handle::UrandomHandle::new(flags as u32));
-        return insert_file_handle(handle);
-    }
-
     let want_read = (flags & 3) == 0 || (flags & 3) == 2;
     let want_write = (flags & 3) == 1 || (flags & 3) == 2 || (flags & 0x200) != 0;
 
@@ -150,6 +132,10 @@ pub fn sys_open(path_ptr: u64, flags: u64, mode: u64) -> u64 {
         }
     };
 
+    if let Some(dev_handle) = crate::fs::devfs::open_device_node(&node, flags as u32, Some(target_path.clone())) {
+        return insert_file_handle(dev_handle);
+    }
+
     let initial_offset = if (flags & 0x400) != 0 {
         node.metadata().size
     } else {
@@ -184,15 +170,16 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
 
     match cmd {
         0 | 1030 => {
-            // F_DUPFD (0) / F_DUPFD_CLOEXEC (1030)
-            insert_file_handle(handle)
+            // F_DUPFD (0) / F_DUPFD_CLOEXEC (1030) обязаны вернуть минимальный свободный fd >= arg
+            crate::fs::insert_file_handle_from(handle, arg)
         }
         1 => 0, // F_GETFD (FD_CLOEXEC = 0)
         2 => 0, // F_SETFD
         3 => handle.get_flags() as u64, // F_GETFL
         4 => {
-            // F_SETFL (установка O_NONBLOCK)
-            handle.set_flags(arg as u32);
+            // F_SETFL не имеет права затирать биты режима доступа (O_RDONLY/O_WRONLY/O_RDWR = 0..3)
+            let accmode = handle.get_flags() & 3;
+            handle.set_flags(((arg as u32) & !3) | accmode);
             0
         }
         _ => 0,
@@ -213,10 +200,7 @@ pub fn sys_fstat(fd: u64, statbuf_ptr: u64) -> u64 {
     stat.st_nlink = 1;
     stat.st_blksize = 4096;
 
-    if handle.is_tty() {
-        stat.st_mode = 0o020666; // S_IFCHR | 0666
-        stat.st_rdev = 0x0500;   // major 5, minor 0 (/dev/tty)
-    } else if let Some(inode) = handle.as_inode() {
+    if let Some(inode) = handle.as_inode() {
         let meta = inode.metadata();
         stat.st_size = meta.size as i64;
         stat.st_ino = meta.inode_id;
@@ -228,8 +212,12 @@ pub fn sys_fstat(fd: u64, statbuf_ptr: u64) -> u64 {
             crate::fs::InodeType::CharDevice => 0o020000,
         };
         stat.st_mode = type_bits | (meta.permissions as u32 & 0o7777);
+        stat.st_rdev = meta.rdev;
         stat.st_uid = meta.uid;
         stat.st_gid = meta.gid;
+    } else if handle.is_tty() {
+        stat.st_mode = 0o020666; // S_IFCHR | 0666
+        stat.st_rdev = 0x0500;   // major 5, minor 0 (/dev/tty)
     } else {
         stat.st_mode = 0o010600; // S_IFIFO
     }
@@ -266,6 +254,10 @@ pub const TCGETS: u64 = 0x5401;
 pub const TCSETS: u64 = 0x5402;
 pub const TCSETSW: u64 = 0x5403;
 pub const TCSETSF: u64 = 0x5404;
+pub const TCGETS2: u64 = 0x802c_542a;
+pub const TCSETS2: u64 = 0x402c_542b;
+pub const TCSETSW2: u64 = 0x402c_542c;
+pub const TCSETSF2: u64 = 0x402c_542d;
 pub const TIOCSCTTY: u64 = 0x540E;
 pub const TIOCGPGRP: u64 = 0x540F;
 pub const TIOCSPGRP: u64 = 0x5410;
@@ -274,7 +266,9 @@ pub const TIOCSWINSZ: u64 = 0x5414;
 pub const FIONREAD: u64 = 0x541B;
 pub const FIONBIO: u64 = 0x5421;
 
-/// Структура параметров терминала согласно стандарту Linux x86_64 ABI (размер ровно 60 байт).
+// Linux x86_64 kernel ABI (asm/termbits.h): ровно 36 байт (c_cc[19] без c_ispeed/c_ospeed).
+// glibc в tcgetattr передаёт в TCGETS стековый буфер ровно на 36 байт — запись 60 байт
+// перезаписывает canary на стеке и роняет процесс с __stack_chk_fail.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Termios {
@@ -283,12 +277,27 @@ pub struct Termios {
     pub c_cflag: u32,
     pub c_lflag: u32,
     pub c_line: u8,
-    pub c_cc: [u8; 32],
+    pub c_cc: [u8; 19],
+}
+
+const _: () = assert!(core::mem::size_of::<Termios>() == 36);
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Termios2 {
+    pub c_iflag: u32,
+    pub c_oflag: u32,
+    pub c_cflag: u32,
+    pub c_lflag: u32,
+    pub c_line: u8,
+    pub c_cc: [u8; 19],
     pub c_ispeed: u32,
     pub c_ospeed: u32,
 }
 
-static CURRENT_TERMIOS: Mutex<Termios> = Mutex::new(Termios {
+const _: () = assert!(core::mem::size_of::<Termios2>() == 44);
+
+pub(crate) static CURRENT_TERMIOS: Mutex<Termios> = Mutex::new(Termios {
     c_iflag: 0x0500, // ICRNL | IXON
     c_oflag: 0x0005, // OPOST | ONLCR
     c_cflag: 0x00bf, // CS8 | CREAD | B38400
@@ -296,11 +305,74 @@ static CURRENT_TERMIOS: Mutex<Termios> = Mutex::new(Termios {
     c_line: 0,
     c_cc: [
         3, 28, 127, 21, 4, 0, 1, 0, 17, 19, 26, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0,
     ],
-    c_ispeed: 38400,
-    c_ospeed: 38400,
 });
+
+pub(crate) fn handle_termios_ioctl(cmd: u64, arg: u64) -> Option<Result<u64, i64>> {
+    match cmd {
+        TCGETS => {
+            let sz = core::mem::size_of::<Termios>() as u64;
+            if !validate_user_buffer(arg, sz) {
+                return Some(Err(-(EFAULT as i64)));
+            }
+            let tio = *CURRENT_TERMIOS.lock();
+            unsafe { core::ptr::write_unaligned(arg as *mut Termios, tio); }
+            Some(Ok(0))
+        }
+        TCSETS | TCSETSW | TCSETSF => {
+            let sz = core::mem::size_of::<Termios>() as u64;
+            if !validate_user_buffer(arg, sz) {
+                return Some(Err(-(EFAULT as i64)));
+            }
+            let new_tio = unsafe { core::ptr::read_unaligned(arg as *const Termios) };
+            *CURRENT_TERMIOS.lock() = new_tio;
+            if cmd == TCSETSF {
+                crate::fs::handle::flush_stdin();
+            }
+            Some(Ok(0))
+        }
+        TCGETS2 => {
+            let sz = core::mem::size_of::<Termios2>() as u64;
+            if !validate_user_buffer(arg, sz) {
+                return Some(Err(-(EFAULT as i64)));
+            }
+            let tio = *CURRENT_TERMIOS.lock();
+            let tio2 = Termios2 {
+                c_iflag: tio.c_iflag,
+                c_oflag: tio.c_oflag,
+                c_cflag: tio.c_cflag,
+                c_lflag: tio.c_lflag,
+                c_line: tio.c_line,
+                c_cc: tio.c_cc,
+                c_ispeed: 38400,
+                c_ospeed: 38400,
+            };
+            unsafe { core::ptr::write_unaligned(arg as *mut Termios2, tio2); }
+            Some(Ok(0))
+        }
+        TCSETS2 | TCSETSW2 | TCSETSF2 => {
+            let sz = core::mem::size_of::<Termios2>() as u64;
+            if !validate_user_buffer(arg, sz) {
+                return Some(Err(-(EFAULT as i64)));
+            }
+            let new_tio2 = unsafe { core::ptr::read_unaligned(arg as *const Termios2) };
+            *CURRENT_TERMIOS.lock() = Termios {
+                c_iflag: new_tio2.c_iflag,
+                c_oflag: new_tio2.c_oflag,
+                c_cflag: new_tio2.c_cflag,
+                c_lflag: new_tio2.c_lflag,
+                c_line: new_tio2.c_line,
+                c_cc: new_tio2.c_cc,
+            };
+            if cmd == TCSETSF2 {
+                crate::fs::handle::flush_stdin();
+            }
+            Some(Ok(0))
+        }
+        _ => None,
+    }
+}
 
 /// Проверяет, включена ли генерация сигналов (ISIG = bit 0 в c_lflag).
 /// При переходе полноэкранных редакторов (nano, vi) в небуферизованный raw mode этот флаг сбрасывается,
@@ -319,7 +391,33 @@ pub fn is_icrnl_enabled() -> bool {
     (tio.c_iflag & 0x0100) != 0
 }
 
+pub fn is_icanon_enabled() -> bool {
+    let tio = CURRENT_TERMIOS.lock();
+    (tio.c_lflag & 0x0002) != 0
+}
+
+pub fn is_echo_enabled() -> bool {
+    let tio = CURRENT_TERMIOS.lock();
+    (tio.c_lflag & 0x0008) != 0
+}
+
+pub fn is_echoe_enabled() -> bool {
+    let tio = CURRENT_TERMIOS.lock();
+    (tio.c_lflag & 0x0010) != 0
+}
+
+pub fn is_echonl_enabled() -> bool {
+    let tio = CURRENT_TERMIOS.lock();
+    (tio.c_lflag & 0x0040) != 0
+}
+
 pub fn sys_ioctl(fd: u64, cmd: u64, arg: u64) -> u64 {
+    if let Some(handle) = get_file_handle(fd) {
+        if let Ok(ret) = handle.ioctl(cmd as u32, arg) {
+            return ret;
+        }
+    }
+
     #[repr(C)]
     #[derive(Debug, Clone, Copy, Default)]
     struct WinSize {
@@ -329,8 +427,14 @@ pub fn sys_ioctl(fd: u64, cmd: u64, arg: u64) -> u64 {
         ws_ypixel: u16,
     }
 
-    let is_tty_fd = fd <= 2 || get_file_handle(fd).map_or(false, |h| h.is_tty());
+    let is_tty_fd = get_file_handle(fd).map_or(false, |h| h.is_tty());
     if is_tty_fd {
+        if let Some(res) = handle_termios_ioctl(cmd, arg) {
+            return match res {
+                Ok(v) => v,
+                Err(e) => e as u64,
+            };
+        }
         match cmd {
             TIOCGWINSZ => {
                 if !validate_user_buffer(arg, 8) {
@@ -353,26 +457,6 @@ pub fn sys_ioctl(fd: u64, cmd: u64, arg: u64) -> u64 {
                 return 0;
             }
             TIOCSWINSZ => return 0,
-            TCGETS => {
-                let termios_size = core::mem::size_of::<Termios>() as u64;
-                if !validate_user_buffer(arg, termios_size) {
-                    return (-(EFAULT as i64)) as u64;
-                }
-                let tio = *CURRENT_TERMIOS.lock();
-                unsafe {
-                    core::ptr::write_unaligned(arg as *mut Termios, tio);
-                }
-                return 0;
-            }
-            TCSETS | TCSETSW | TCSETSF => {
-                let termios_size = core::mem::size_of::<Termios>() as u64;
-                if !validate_user_buffer(arg, termios_size) {
-                    return (-(EFAULT as i64)) as u64;
-                }
-                let new_tio = unsafe { core::ptr::read_unaligned(arg as *const Termios) };
-                *CURRENT_TERMIOS.lock() = new_tio;
-                return 0;
-            }
             TIOCGPGRP => {
                 if !validate_user_buffer(arg, 4) {
                     return (-(EFAULT as i64)) as u64;
@@ -530,7 +614,8 @@ pub fn sys_getdents64(fd: u64, buf_ptr: u64, len: u64) -> u64 {
                 crate::fs::InodeType::Directory => 4,
                 crate::fs::InodeType::File => 8,
                 crate::fs::InodeType::Symlink => 10,
-                _ => 0,
+                crate::fs::InodeType::CharDevice => 2,
+                crate::fs::InodeType::BlockDevice => 6,
             };
             *rec_ptr.add(18) = dtype;
 
@@ -868,6 +953,10 @@ pub fn sys_utimensat(dirfd: i64, path_ptr: u64, _times_ptr: u64, _flags: u64) ->
 
 pub fn sys_utimes(path_ptr: u64, times_ptr: u64) -> u64 {
     sys_utimensat(-100, path_ptr, times_ptr, 0)
+}
+
+pub fn sys_mknod(path_ptr: u64, mode: u64, dev: u64) -> u64 {
+    super::at::sys_mknodat(super::at::AT_FDCWD, path_ptr, mode, dev)
 }
 
 

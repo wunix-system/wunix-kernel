@@ -448,7 +448,7 @@ pub fn setup_user_stack(
     arg_ptrs.reverse();
 
     // 4. Векторы Auxiliary Vectors (auxv) согласно System V AMD64 ABI
-    let auxv: [(u64, u64); 16] = [
+    let auxv: [(u64, u64); 15] = [
         (AT_PHDR, info.phdr_addr),
         (AT_PHENT, info.phent as u64),
         (AT_PHNUM, info.phnum as u64),
@@ -463,7 +463,6 @@ pub fn setup_user_stack(
         (AT_SECURE, 0),
         (AT_CLKTCK, 100),
         (AT_RANDOM, random_buf_ptr),
-        (crate::task::syslib::AT_SYSINFO_EHDR, crate::task::syslib::SYSLIB_INFO_VADDR),
         (AT_NULL, 0),
     ];
 

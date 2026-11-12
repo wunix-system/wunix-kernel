@@ -7,8 +7,8 @@ use crate::fs::{
     get_file_handle, insert_file_handle, InodeType, RegularFileHandle, VfsError, O_CREAT,
 };
 use super::{
-    read_user_cstr, resolve_relative_path, validate_user_buffer, EACCES, EBADF, EEXIST, EFAULT,
-    EINVAL, ENOENT, ENOTDIR, EPERM, Stat,
+    read_user_cstr, resolve_relative_path, validate_user_buffer, EACCES, EBADF, EBUSY, EEXIST,
+    EFAULT, EINVAL, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, EPERM, EXDEV, Stat,
 };
 
 pub const AT_FDCWD: i64 = -100;
@@ -71,24 +71,6 @@ pub fn sys_openat(dirfd: i64, path_ptr: u64, flags: u64, mode: u64) -> u64 {
         Err(err) => return (-(err as i64)) as u64,
     };
 
-    // Псевдоустройства терминалов и нулевые устройства Linux
-    if target_path == "/dev/tty" || target_path == "/dev/tty0" || target_path == "/dev/console" {
-        let handle = Arc::new(crate::fs::handle::TtyHandle::new(flags as u32));
-        return insert_file_handle(handle);
-    }
-    if target_path == "/dev/null" {
-        let handle = Arc::new(crate::fs::handle::NullHandle::new(flags as u32));
-        return insert_file_handle(handle);
-    }
-    if target_path == "/dev/zero" {
-        let handle = Arc::new(crate::fs::handle::ZeroHandle::new(flags as u32));
-        return insert_file_handle(handle);
-    }
-    if target_path == "/dev/urandom" || target_path == "/dev/random" {
-        let handle = Arc::new(crate::fs::handle::UrandomHandle::new(flags as u32));
-        return insert_file_handle(handle);
-    }
-
     let want_read = (flags & 3) == 0 || (flags & 3) == 2;
     let want_write = (flags & 3) == 1 || (flags & 3) == 2 || (flags & 0x200) != 0;
 
@@ -139,6 +121,10 @@ pub fn sys_openat(dirfd: i64, path_ptr: u64, flags: u64, mode: u64) -> u64 {
         }
     };
 
+    if let Some(dev_handle) = crate::fs::devfs::open_device_node(&node, flags as u32, Some(target_path.clone())) {
+        return insert_file_handle(dev_handle);
+    }
+
     let initial_offset = if (flags & 0x400) != 0 {
         node.metadata().size
     } else {
@@ -169,27 +155,6 @@ pub fn sys_newfstatat(dirfd: i64, path_ptr: u64, statbuf_ptr: u64, flags: u64) -
         Err(err) => return (-(err as i64)) as u64,
     };
 
-    let (is_special_dev, dev_mode, dev_rdev) = match target_path.as_str() {
-        "/dev/tty" | "/dev/tty0" | "/dev/console" => (true, 0o020666, 0x0500),
-        "/dev/null" => (true, 0o020666, 0x0103),
-        "/dev/zero" => (true, 0o020666, 0x0105),
-        "/dev/urandom" => (true, 0o020666, 0x0109),
-        "/dev/random" => (true, 0o020666, 0x0108),
-        _ => (false, 0, 0),
-    };
-
-    if is_special_dev {
-        let mut stat = Stat::default();
-        stat.st_mode = dev_mode;
-        stat.st_rdev = dev_rdev;
-        stat.st_nlink = 1;
-        stat.st_blksize = 4096;
-        unsafe {
-            core::ptr::write_unaligned(statbuf_ptr as *mut Stat, stat);
-        }
-        return 0;
-    }
-
     let follow_symlinks = (flags & AT_SYMLINK_NOFOLLOW) == 0;
     let node = match crate::fs::resolve_path(&target_path, follow_symlinks) {
         Ok(n) => n,
@@ -210,6 +175,7 @@ pub fn sys_newfstatat(dirfd: i64, path_ptr: u64, statbuf_ptr: u64, flags: u64) -
         InodeType::CharDevice => 0o020000,
     };
     stat.st_mode = type_bits | (meta.permissions as u32 & 0o7777);
+    stat.st_rdev = meta.rdev;
     stat.st_uid = meta.uid;
     stat.st_gid = meta.gid;
 
@@ -320,8 +286,67 @@ pub fn sys_renameat(olddirfd: i64, oldpath_ptr: u64, newdirfd: i64, newpath_ptr:
     sys_renameat2(olddirfd, oldpath_ptr, newdirfd, newpath_ptr, 0)
 }
 
+fn split_parent_leaf(path: &str) -> (&str, &str) {
+    match path.rfind('/') {
+        Some(0) => ("/", &path[1..]),
+        Some(idx) => (&path[..idx], &path[idx + 1..]),
+        None => ("/", path),
+    }
+}
+
+fn is_subpath(parent: &str, candidate: &str) -> bool {
+    if parent == "/" {
+        return candidate != "/";
+    }
+    candidate.len() > parent.len()
+        && candidate.starts_with(parent)
+        && candidate.as_bytes()[parent.len()] == b'/'
+}
+
+fn same_mount(old_path: &str, new_path: &str) -> bool {
+    match (
+        crate::fs::mount::find_mount(old_path),
+        crate::fs::mount::find_mount(new_path),
+    ) {
+        (None, None) => true,
+        (Some((fs1, _)), Some((fs2, _))) => Arc::ptr_eq(&fs1, &fs2),
+        _ => false,
+    }
+}
+
+fn validate_rename_target(
+    old_type: InodeType,
+    new_norm: &str,
+    noreplace: bool,
+) -> Result<(), u64> {
+    let Ok(new_node) = crate::fs::resolve_path(new_norm, false) else {
+        return Ok(());
+    };
+    if noreplace {
+        return Err(EEXIST);
+    }
+    let new_type = new_node.metadata().itype;
+    if old_type == InodeType::Directory && new_type != InodeType::Directory {
+        return Err(ENOTDIR);
+    }
+    if old_type != InodeType::Directory && new_type == InodeType::Directory {
+        return Err(EISDIR);
+    }
+    if new_type == InodeType::Directory {
+        let entries = new_node.readdir().map_err(|_| ENOTEMPTY)?;
+        if entries.iter().any(|e| e.name != "." && e.name != "..") {
+            return Err(ENOTEMPTY);
+        }
+    }
+    Ok(())
+}
+
 pub fn sys_renameat2(olddirfd: i64, oldpath_ptr: u64, newdirfd: i64, newpath_ptr: u64, flags: u64) -> u64 {
     const RENAME_NOREPLACE: u64 = 1;
+
+    if (flags & !RENAME_NOREPLACE) != 0 {
+        return (-(EINVAL as i64)) as u64;
+    }
 
     let old_raw = match read_user_cstr(oldpath_ptr, 1024) {
         Ok(s) => s,
@@ -341,46 +366,57 @@ pub fn sys_renameat2(olddirfd: i64, oldpath_ptr: u64, newdirfd: i64, newpath_ptr
         Err(e) => return (-(e as i64)) as u64,
     };
 
-    if old_norm == new_norm {
-        return 0;
-    }
-
     let old_node = match crate::fs::resolve_path(&old_norm, false) {
         Ok(n) => n,
         Err(_) => return (-(ENOENT as i64)) as u64,
     };
 
-    if (flags & RENAME_NOREPLACE) != 0 && crate::fs::resolve_path(&new_norm, false).is_ok() {
-        return (-(EEXIST as i64)) as u64;
+    if old_norm == new_norm {
+        return 0;
+    }
+    if old_norm == "/" || new_norm == "/" {
+        return (-(EBUSY as i64)) as u64;
+    }
+    if old_node.metadata().itype == InodeType::Directory && is_subpath(&old_norm, &new_norm) {
+        return (-(EINVAL as i64)) as u64;
     }
 
-    let (old_parent_path, old_leaf) = match old_norm.rfind('/') {
-        Some(0) => ("/", &old_norm[1..]),
-        Some(idx) => (&old_norm[..idx], &old_norm[idx + 1..]),
-        None => ("/", old_norm.as_str()),
-    };
-    let (new_parent_path, new_leaf) = match new_norm.rfind('/') {
-        Some(0) => ("/", &new_norm[1..]),
-        Some(idx) => (&new_norm[..idx], &new_norm[idx + 1..]),
-        None => ("/", new_norm.as_str()),
-    };
+    let (old_parent_path, old_leaf) = split_parent_leaf(&old_norm);
+    let (new_parent_path, new_leaf) = split_parent_leaf(&new_norm);
+    if old_leaf.is_empty() || new_leaf.is_empty() || old_leaf == "." || old_leaf == ".." || new_leaf == "." || new_leaf == ".." {
+        return (-(EINVAL as i64)) as u64;
+    }
 
     let old_parent = match crate::fs::resolve_path(old_parent_path, true) {
-        Ok(p) => p,
+        Ok(p) if p.metadata().itype == InodeType::Directory => p,
+        Ok(_) => return (-(ENOTDIR as i64)) as u64,
         Err(_) => return (-(ENOENT as i64)) as u64,
     };
     let new_parent = match crate::fs::resolve_path(new_parent_path, true) {
-        Ok(p) => p,
+        Ok(p) if p.metadata().itype == InodeType::Directory => p,
+        Ok(_) => return (-(ENOTDIR as i64)) as u64,
         Err(_) => return (-(ENOENT as i64)) as u64,
     };
 
-    let _ = new_parent.unlink(new_leaf);
-    if new_parent.insert_child(new_leaf, old_node).is_err() {
-        return (-(EINVAL as i64)) as u64;
+    if let Err(e) = validate_rename_target(old_node.metadata().itype, &new_norm, (flags & RENAME_NOREPLACE) != 0) {
+        return (-(e as i64)) as u64;
     }
-    let _ = old_parent.unlink(old_leaf);
 
-    0
+    if !same_mount(&old_norm, &new_norm) {
+        return (-(EXDEV as i64)) as u64;
+    }
+
+    // Если ФС (например, Ext4/FAT32/UFS) не реализует insert_child на уровне VFS,
+    // возвращаем EXDEV до изменения целевого узла — mv выполнит перенос через copy + unlink.
+    match new_parent.insert_child(new_leaf, old_node) {
+        Ok(()) => {
+            let _ = old_parent.unlink(old_leaf);
+            0
+        }
+        Err(VfsError::NotADirectory) | Err(VfsError::NotSupported) => (-(EXDEV as i64)) as u64,
+        Err(VfsError::PermissionDenied) => (-(EACCES as i64)) as u64,
+        Err(_) => (-(EINVAL as i64)) as u64,
+    }
 }
 
 pub fn sys_fchmodat(dirfd: i64, path_ptr: u64, mode: u64, flags: u64) -> u64 {
@@ -448,6 +484,17 @@ pub fn sys_readlinkat(dirfd: i64, path_ptr: u64, buf_ptr: u64, bufsiz: u64) -> u
         Ok(p) => p,
         Err(e) => return (-(e as i64)) as u64,
     };
+
+    if norm == "/proc/self/exe" || norm == "/proc/thread-self/exe" || (norm.starts_with("/proc/") && norm.ends_with("/exe")) {
+        let exe = crate::task::current_thread_exe_path();
+        let bytes = exe.as_bytes();
+        let to_copy = bytes.len().min(bufsiz as usize);
+        unsafe {
+            let dst = buf_ptr as *mut u8;
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, to_copy);
+        }
+        return to_copy as u64;
+    }
 
     let node = match crate::fs::resolve_path(&norm, false) {
         Ok(n) => n,
@@ -523,5 +570,121 @@ pub fn sys_faccessat2(dirfd: i64, path_ptr: u64, mode: u64, flags: u64) -> u64 {
     match crate::fs::check_permission(&node, want_read, want_write, want_exec) {
         Ok(()) => 0,
         Err(_) => (-(EACCES as i64)) as u64,
+    }
+}
+
+pub fn sys_mknodat(dirfd: i64, path_ptr: u64, mode: u64, dev: u64) -> u64 {
+    let raw_path = match read_user_cstr(path_ptr, 1024) {
+        Ok(p) => p,
+        Err(err) => return (-(err as i64)) as u64,
+    };
+
+    let target_path = match resolve_at_path(dirfd, &raw_path, false) {
+        Ok(p) => p,
+        Err(err) => return (-(err as i64)) as u64,
+    };
+
+    let (parent_path, leaf) = match target_path.rfind('/') {
+        Some(0) => ("/", &target_path[1..]),
+        Some(idx) => (&target_path[..idx], &target_path[idx + 1..]),
+        None => (".", target_path.as_str()),
+    };
+
+    let parent_node = match crate::fs::resolve_path(parent_path, true) {
+        Ok(p) => p,
+        Err(_) => return (-(ENOENT as i64)) as u64,
+    };
+
+    if let Err(_) = crate::fs::check_permission(&parent_node, false, true, true) {
+        return (-(EACCES as i64)) as u64;
+    }
+
+    let file_type = mode & 0o170000;
+    let permissions = (mode as u16 & 0o7777) & !(crate::task::current_thread_umask() as u16);
+
+    let new_node: Arc<dyn crate::fs::Inode> = if file_type == 0o020000 {
+        // S_IFCHR: символьное устройство
+        Arc::new(crate::fs::devfs::DevInode::new_char(
+            dev,
+            permissions,
+            Arc::new(crate::fs::devfs::mem::NullDev),
+        ))
+    } else if file_type == 0o060000 {
+        // S_IFBLK: блочное устройство
+        let loop_dev = crate::fs::devfs::loopdev::create_loop_device(99);
+        Arc::new(crate::fs::devfs::DevInode::new_block(dev, permissions, loop_dev))
+    } else if file_type == 0o010000 {
+        // S_IFIFO: именованный канал
+        Arc::new(crate::fs::RamInode::new_file())
+    } else {
+        // S_IFREG: обычный файл
+        match parent_node.create(leaf, crate::fs::InodeType::File) {
+            Ok(f) => {
+                let _ = f.chmod(permissions);
+                return 0;
+            }
+            Err(_) => return (-(super::EIO as i64)) as u64,
+        }
+    };
+
+    match parent_node.insert_child(leaf, new_node) {
+        Ok(_) => 0,
+        Err(_) => (-(super::EIO as i64)) as u64,
+    }
+}
+
+pub fn sys_linkat(olddirfd: i64, oldpath_ptr: u64, newdirfd: i64, newpath_ptr: u64, flags: u64) -> u64 {
+    let old_raw = match read_user_cstr(oldpath_ptr, 1024) {
+        Ok(s) => s,
+        Err(e) => return (-(e as i64)) as u64,
+    };
+    let new_raw = match read_user_cstr(newpath_ptr, 1024) {
+        Ok(s) => s,
+        Err(e) => return (-(e as i64)) as u64,
+    };
+
+    let old_norm = match resolve_at_path(olddirfd, &old_raw, (flags & AT_EMPTY_PATH) != 0) {
+        Ok(p) => p,
+        Err(e) => return (-(e as i64)) as u64,
+    };
+    let new_norm = match resolve_at_path(newdirfd, &new_raw, false) {
+        Ok(p) => p,
+        Err(e) => return (-(e as i64)) as u64,
+    };
+
+    let follow = (flags & AT_SYMLINK_FOLLOW) != 0;
+    let old_node = match crate::fs::resolve_path(&old_norm, follow) {
+        Ok(n) => n,
+        Err(_) => return (-(ENOENT as i64)) as u64,
+    };
+
+    if old_node.metadata().itype == InodeType::Directory {
+        return (-(EPERM as i64)) as u64;
+    }
+
+    if crate::fs::resolve_path(&new_norm, false).is_ok() {
+        return (-(EEXIST as i64)) as u64;
+    }
+
+    let (new_parent_path, new_leaf) = match new_norm.rfind('/') {
+        Some(0) => ("/", &new_norm[1..]),
+        Some(idx) => (&new_norm[..idx], &new_norm[idx + 1..]),
+        None => ("/", new_norm.as_str()),
+    };
+
+    let new_parent = match crate::fs::resolve_path(new_parent_path, true) {
+        Ok(p) => p,
+        Err(_) => return (-(ENOENT as i64)) as u64,
+    };
+
+    if let Err(_) = crate::fs::check_permission(&new_parent, false, true, true) {
+        return (-(EACCES as i64)) as u64;
+    }
+
+    match new_parent.insert_child(new_leaf, old_node) {
+        Ok(()) => 0,
+        Err(VfsError::AlreadyExists) => (-(EEXIST as i64)) as u64,
+        Err(VfsError::NotADirectory) => (-(ENOTDIR as i64)) as u64,
+        Err(_) => (-(EPERM as i64)) as u64,
     }
 }

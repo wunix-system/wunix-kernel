@@ -307,6 +307,89 @@ pub fn process_exists(tgid: u64) -> bool {
     })
 }
 
+/// Проверяет, есть ли активные дочерние процессы, подходящие под фильтр wait4(pid).
+pub fn has_child_process(parent_tgid: u64, target_pid: i64, caller_pgid: u64) -> bool {
+    let matches = |t: &super::thread::Thread| -> bool {
+        if t.tgid == parent_tgid {
+            return false;
+        }
+        let is_child = t.parent_tgid == parent_tgid || parent_tgid == 1;
+        if target_pid > 0 {
+            t.tgid == target_pid as u64 && is_child
+        } else if target_pid == -1 {
+            is_child
+        } else if target_pid == 0 {
+            is_child && t.pgid == caller_pgid
+        } else {
+            is_child && t.pgid == (-target_pid) as u64
+        }
+    };
+
+    interrupts::without_interrupts(|| {
+        if let Some(sched) = SCHEDULER.lock().as_ref() {
+            if sched.ready_queue.iter().any(|t| matches(t)) {
+                return true;
+            }
+            if sched.blocked_threads.values().any(|t| matches(t)) {
+                return true;
+            }
+        }
+        false
+    })
+}
+
+pub fn is_current_thread_fork_child() -> bool {
+    interrupts::without_interrupts(|| {
+        SCHEDULER
+            .lock()
+            .as_ref()
+            .and_then(|s| s.current.as_ref())
+            .map(|t| t.is_fork_child)
+            .unwrap_or(false)
+    })
+}
+
+pub fn set_current_thread_fork_child(val: bool) {
+    interrupts::without_interrupts(|| {
+        if let Some(sched) = SCHEDULER.lock().as_mut() {
+            if let Some(t) = sched.current.as_mut() {
+                t.is_fork_child = val;
+            }
+        }
+    });
+}
+
+pub fn set_current_thread_cr3(cr3: u64) {
+    interrupts::without_interrupts(|| {
+        if let Some(sched) = SCHEDULER.lock().as_mut() {
+            if let Some(t) = sched.current.as_mut() {
+                t.cr3 = cr3;
+            }
+        }
+    });
+}
+
+pub fn current_thread_owns_cr3() -> bool {
+    interrupts::without_interrupts(|| {
+        SCHEDULER
+            .lock()
+            .as_ref()
+            .and_then(|s| s.current.as_ref())
+            .map(|t| t.owns_cr3)
+            .unwrap_or(false)
+    })
+}
+
+pub fn set_current_thread_owns_cr3(owns: bool) {
+    interrupts::without_interrupts(|| {
+        if let Some(sched) = SCHEDULER.lock().as_mut() {
+            if let Some(t) = sched.current.as_mut() {
+                t.owns_cr3 = owns;
+            }
+        }
+    });
+}
+
 pub fn thread_exists(tid: ThreadId) -> bool {
     interrupts::without_interrupts(|| {
         if let Some(sched) = SCHEDULER.lock().as_ref() {
@@ -403,6 +486,27 @@ pub fn set_current_thread_name(name: &[u8]) {
                 t.name = [0u8; 16];
                 let len = name.len().min(15);
                 t.name[..len].copy_from_slice(&name[..len]);
+            }
+        }
+    });
+}
+
+pub fn current_thread_exe_path() -> alloc::string::String {
+    interrupts::without_interrupts(|| {
+        SCHEDULER
+            .lock()
+            .as_ref()
+            .and_then(|s| s.current.as_ref())
+            .map(|t| t.exe_path.clone())
+            .unwrap_or_else(|| alloc::string::String::from("/bin/wsh"))
+    })
+}
+
+pub fn set_current_thread_exe_path(path: &str) {
+    interrupts::without_interrupts(|| {
+        if let Some(sched) = SCHEDULER.lock().as_mut() {
+            if let Some(t) = sched.current.as_mut() {
+                t.exe_path = alloc::string::String::from(path);
             }
         }
     });
@@ -512,6 +616,7 @@ fn prepare_thread_hardware_context(next: &Thread) {
     unsafe {
         crate::arch::x86_64::syscall::write_fs_base(next.fs_base);
     }
+    next.fpu.restore();
     if next.cr3 != 0 {
         let cur_cr3: u64;
         unsafe {
@@ -552,6 +657,7 @@ pub fn block_current(deadline: Option<u64>) {
             super::reset_timeslice();
 
             let mut prev = sched.current.take().expect("scheduler: no current thread to block");
+            prev.fpu.save();
             let cur_fs = unsafe { crate::arch::x86_64::syscall::read_fs_base() };
             let cur_cr3: u64;
             unsafe { core::arch::asm!("mov {}, cr3", out(reg) cur_cr3); }
@@ -658,6 +764,7 @@ pub fn yield_now() {
         super::reset_timeslice();
 
         let mut prev = sched.current.take().expect("scheduler: no current thread");
+        prev.fpu.save();
         let cur_fs = unsafe { crate::arch::x86_64::syscall::read_fs_base() };
         let cur_cr3: u64;
         unsafe { core::arch::asm!("mov {}, cr3", out(reg) cur_cr3); }

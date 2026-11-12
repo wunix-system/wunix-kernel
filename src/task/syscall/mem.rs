@@ -1,6 +1,36 @@
 use super::{
-    validate_user_buffer, VMA_MANAGER, EFAULT, EINVAL, USER_SPACE_END,
+    validate_user_buffer, PROCESS_VMAS, EFAULT, EINVAL, USER_SPACE_END,
 };
+
+fn with_current_vma_mut<R>(f: impl FnOnce(&mut crate::memory::VirtualMemoryManager) -> R) -> R {
+    let tgid = crate::task::current_thread_tgid();
+    let mut map = PROCESS_VMAS.lock();
+    let vma = map
+        .entry(tgid)
+        .or_insert_with(crate::memory::VirtualMemoryManager::new);
+    f(vma)
+}
+
+pub fn clone_process_vma(parent_tgid: u64, child_tgid: u64) {
+    let mut map = PROCESS_VMAS.lock();
+    let cloned = map
+        .get(&parent_tgid)
+        .cloned()
+        .unwrap_or_else(crate::memory::VirtualMemoryManager::new);
+    map.insert(child_tgid, cloned);
+}
+
+pub fn reset_process_vma_for(tgid: u64, brk_start: u64) {
+    let mut map = PROCESS_VMAS.lock();
+    let vma = map
+        .entry(tgid)
+        .or_insert_with(crate::memory::VirtualMemoryManager::new);
+    vma.reset(brk_start);
+}
+
+pub fn remove_process_vma(tgid: u64) {
+    PROCESS_VMAS.lock().remove(&tgid);
+}
 
 pub fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64) -> u64 {
     const MAP_ANONYMOUS: u64 = 0x20;
@@ -11,12 +41,9 @@ pub fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64
         None
     };
 
-    let target_addr = {
-        let mut vma = VMA_MANAGER.lock();
-        match vma.mmap(addr, len, prot, flags, fd, offset) {
-            Ok(vaddr) => vaddr,
-            Err(err) => return (-(err.abs())) as u64,
-        }
+    let target_addr = match with_current_vma_mut(|vma| vma.mmap(addr, len, prot, flags, fd, offset)) {
+        Ok(vaddr) => vaddr,
+        Err(err) => return (-(err.abs())) as u64,
     };
 
     if let Some(inode) = file_inode {
@@ -54,8 +81,7 @@ pub fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64
 
 
 pub fn sys_munmap(addr: u64, len: u64) -> u64 {
-    let mut vma = VMA_MANAGER.lock();
-    match vma.munmap(addr, len) {
+    match with_current_vma_mut(|vma| vma.munmap(addr, len)) {
         Ok(res) => res,
         Err(err) => (-(err.abs())) as u64,
     }
@@ -63,8 +89,7 @@ pub fn sys_munmap(addr: u64, len: u64) -> u64 {
 
 
 pub fn sys_mprotect(addr: u64, len: u64, prot: u64) -> u64 {
-    let mut vma = VMA_MANAGER.lock();
-    match vma.mprotect(addr, len, prot) {
+    match with_current_vma_mut(|vma| vma.mprotect(addr, len, prot)) {
         Ok(res) => res,
         Err(err) => (-(err.abs())) as u64,
     }
@@ -72,18 +97,18 @@ pub fn sys_mprotect(addr: u64, len: u64, prot: u64) -> u64 {
 
 
 pub fn sys_brk(new_brk: u64) -> u64 {
-    let mut vma = VMA_MANAGER.lock();
-    vma.brk(new_brk)
+    with_current_vma_mut(|vma| vma.brk(new_brk))
 }
 
 pub fn reset_process_vma(brk_start: u64) {
-    let mut vma = VMA_MANAGER.lock();
-    vma.reset(brk_start);
+    let tgid = crate::task::current_thread_tgid();
+    reset_process_vma_for(tgid, brk_start);
 }
 
 pub fn is_valid_user_vma_addr(addr: u64) -> bool {
-    let vma = VMA_MANAGER.lock();
-    vma.is_valid_addr(addr)
+    let tgid = crate::task::current_thread_tgid();
+    let map = PROCESS_VMAS.lock();
+    map.get(&tgid).map_or(false, |vma| vma.is_valid_addr(addr))
 }
 
 

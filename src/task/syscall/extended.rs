@@ -104,6 +104,8 @@ pub fn sys_statx(dirfd: i64, path_ptr: u64, flags: u64, mask: u64, statxbuf_ptr:
     stx.stx_ino = meta.inode_id;
     stx.stx_size = meta.size as u64;
     stx.stx_blocks = ((meta.size as u64) + 511) / 512;
+    stx.stx_rdev_major = crate::fs::devfs::major(meta.rdev);
+    stx.stx_rdev_minor = crate::fs::devfs::minor(meta.rdev);
     stx.stx_atime = StatxTimestamp { tv_sec: now_sec, tv_nsec: now_nsec, __reserved: 0 };
     stx.stx_mtime = StatxTimestamp { tv_sec: now_sec, tv_nsec: now_nsec, __reserved: 0 };
     stx.stx_ctime = StatxTimestamp { tv_sec: now_sec, tv_nsec: now_nsec, __reserved: 0 };

@@ -8,7 +8,9 @@ pub struct ThreadId(pub u64);
 
 impl ThreadId {
     pub fn new() -> Self {
-        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        // Начинаем с 1: TID=0 в Linux зарезервирован за swapper, а glibc использует tid==0
+        // как маркер свободного владельца в pthread_rwlock_t.
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         ThreadId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
     }
 }
@@ -29,11 +31,13 @@ pub struct Thread {
     pub pgid: u64,
     pub is_main: bool,
     pub is_sync_child: bool,
+    pub is_fork_child: bool,
     pub state: ThreadState,
     pub stack: Option<Box<[u8]>>,
     pub kernel_stack_top: u64,
     pub rsp: *mut u8,
     pub cr3: u64,
+    pub owns_cr3: bool,
     pub fs_base: u64,
     pub clear_child_tid: u64,
     pub wait_deadline: Option<u64>,
@@ -45,6 +49,8 @@ pub struct Thread {
     pub sgid: u32,
     pub umask: u32,
     pub abi: crate::task::abi::AbiPersonality,
+    pub exe_path: alloc::string::String,
+    pub fpu: crate::arch::x86_64::cpu::FpuState,
 }
 
 // Поток эксклюзивно владеет своим стеком и перемещается между контекстами планировщика
@@ -83,11 +89,13 @@ impl Thread {
             pgid: 1,
             is_main: true,
             is_sync_child: false,
+            is_fork_child: false,
             state: ThreadState::Ready,
             stack: Some(stack),
             kernel_stack_top: stack_top as u64,
             rsp,
             cr3: 0,
+            owns_cr3: false,
             fs_base: 0,
             clear_child_tid: 0,
             wait_deadline: None,
@@ -99,6 +107,8 @@ impl Thread {
             sgid: 0,
             umask: 0o022,
             abi: crate::task::abi::AbiPersonality::Linux,
+            exe_path: alloc::string::String::from("/boot/wunix-kernel"),
+            fpu: crate::arch::x86_64::cpu::FpuState::initial(),
         }
     }
 
@@ -122,6 +132,7 @@ impl Thread {
         sgid: u32,
         umask: u32,
         abi: crate::task::abi::AbiPersonality,
+        exe_path: alloc::string::String,
     ) -> Self {
         Self {
             id,
@@ -131,11 +142,13 @@ impl Thread {
             pgid,
             is_main: false,
             is_sync_child: false,
+            is_fork_child: false,
             state: ThreadState::Ready,
             stack: Some(stack),
             kernel_stack_top,
             rsp,
             cr3,
+            owns_cr3: false,
             fs_base,
             clear_child_tid,
             wait_deadline: None,
@@ -147,6 +160,8 @@ impl Thread {
             sgid,
             umask,
             abi,
+            exe_path,
+            fpu: crate::arch::x86_64::cpu::FpuState::initial(),
         }
     }
 
@@ -159,11 +174,13 @@ impl Thread {
             pgid: 1,
             is_main: true,
             is_sync_child: false,
+            is_fork_child: false,
             state: ThreadState::Running,
             stack: None,
             kernel_stack_top: crate::arch::x86_64::gdt::get_kernel_syscall_stack_top(),
             rsp: core::ptr::null_mut(),
             cr3: 0,
+            owns_cr3: false,
             fs_base: 0,
             clear_child_tid: 0,
             wait_deadline: None,
@@ -175,6 +192,20 @@ impl Thread {
             sgid: 0,
             umask: 0o022,
             abi: crate::task::abi::AbiPersonality::Linux,
+            exe_path: alloc::string::String::from("/sbin/init"),
+            fpu: crate::arch::x86_64::cpu::FpuState::initial(),
+        }
+    }
+}
+
+impl Drop for Thread {
+    fn drop(&mut self) {
+        if self.owns_cr3 && self.cr3 != 0 {
+            unsafe {
+                crate::memory::process::free_user_address_space(self.cr3);
+            }
+            self.owns_cr3 = false;
+            self.cr3 = 0;
         }
     }
 }
