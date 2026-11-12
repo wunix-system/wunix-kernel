@@ -58,6 +58,7 @@ impl Inode for VBoxSfInode {
             },
             uid: 0,
             gid: 0,
+            rdev: 0,
         }
     }
 

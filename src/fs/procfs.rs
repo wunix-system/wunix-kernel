@@ -349,6 +349,26 @@ pub fn refresh_proc_files(path: &str) {
             cpu.brand()
         );
         let _ = write_file_ramfs("/proc/cpuinfo", text.as_bytes());
+    } else if path == "/proc/meminfo" {
+        let total_kb = crate::memory::total_memory_bytes() / 1024;
+        let free_kb = crate::memory::free_memory_bytes() / 1024;
+        let text = alloc::format!(
+            "MemTotal:       {:8} kB\n\
+             MemFree:        {:8} kB\n\
+             MemAvailable:   {:8} kB\n\
+             Buffers:           16384 kB\n\
+             Cached:            32768 kB\n\
+             SwapTotal:             0 kB\n\
+             SwapFree:              0 kB\n",
+            total_kb, free_kb, free_kb
+        );
+        let _ = write_file_ramfs("/proc/meminfo", text.as_bytes());
+    } else if path == "/proc/stat" {
+        let text = "cpu  100 0 100 1000 0 0 0 0 0 0\nintr 1\nctxt 1\nbtime 0\nprocesses 1\nprocs_running 1\nprocs_blocked 0\n";
+        let _ = write_file_ramfs("/proc/stat", text.as_bytes());
+    } else if path == "/proc/version" {
+        let text = "Linux version 6.6.0-wunix (root@wunix) (gcc 12.2.0) #1 SMP PREEMPT\n";
+        let _ = write_file_ramfs("/proc/version", text.as_bytes());
     } else if path == "/proc/driver/rtc" {
         let dt = crate::drivers::rtc::read_datetime();
         let text = alloc::format!(

@@ -110,6 +110,7 @@ impl Inode for RamInode {
             permissions: self.permissions.load(Ordering::Relaxed),
             uid: self.uid.load(Ordering::Relaxed),
             gid: self.gid.load(Ordering::Relaxed),
+            rdev: 0,
         }
     }
 

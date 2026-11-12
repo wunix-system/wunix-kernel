@@ -76,6 +76,12 @@ pub fn resolve_path(path: &str, follow_last_symlink: bool) -> Result<Arc<dyn Ino
 
         let norm = path::normalize_path(&current_path);
 
+        if norm == "/proc/self/exe" || norm == "/proc/thread-self/exe" {
+            current_path = crate::task::current_thread_exe_path();
+            symlink_depth += 1;
+            continue 'resolve_loop;
+        }
+
         if norm.starts_with("/proc/") || norm.starts_with("/sys/") || norm == "/etc/mtab" || norm == "/etc/resolv.conf" {
             refresh_proc_files(&norm);
         }

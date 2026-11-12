@@ -45,7 +45,7 @@ impl PipeReadHandle {
     pub fn new(pipe: Arc<Mutex<PipeBuffer>>, flags: u32) -> Self {
         Self {
             pipe,
-            flags: AtomicU32::new(flags),
+            flags: AtomicU32::new((flags & !3) | super::handle::O_RDONLY),
             closed: AtomicBool::new(false),
         }
     }
@@ -153,7 +153,7 @@ impl PipeWriteHandle {
     pub fn new(pipe: Arc<Mutex<PipeBuffer>>, flags: u32) -> Self {
         Self {
             pipe,
-            flags: AtomicU32::new(flags),
+            flags: AtomicU32::new((flags & !3) | super::handle::O_WRONLY),
             closed: AtomicBool::new(false),
         }
     }

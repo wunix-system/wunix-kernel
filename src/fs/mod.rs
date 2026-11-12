@@ -1,4 +1,5 @@
 pub mod block;
+pub mod devfs;
 pub mod epoll;
 pub mod eventfd;
 pub mod ext4;
@@ -23,7 +24,7 @@ pub use epoll::EpollInstance;
 pub use eventfd::EventFdHandle;
 pub use fd::{
     clone_fd_table, get_file_handle, init_stdio, insert_file_handle, insert_file_handle_at,
-    remove_file_handle, remove_process_fd_table, share_fd_table,
+    insert_file_handle_from, remove_file_handle, remove_process_fd_table, share_fd_table,
 };
 pub use handle::{
     FileHandle, RegularFileHandle, StdinHandle, StdoutStderrHandle, EPOLLERR, EPOLLET, EPOLLHUP,
@@ -56,14 +57,17 @@ use crate::serial_println;
 pub fn init(initramfs_data: Option<&[u8]>) {
     init_stdio();
     let ramfs = Arc::new(RamFs::new());
-    *ops::ROOT_FS.write() = Some(ramfs);
+    *ops::ROOT_FS.write() = Some(ramfs.clone());
+
+    // Инициализируем файловую систему устройств DevFS и монтируем в корень /dev
+    let devfs_instance = devfs::init();
+    let _ = ramfs.root().insert_child("dev", devfs_instance.root_dir());
 
     // Базовый скелет гибридной операционной системы
     const SKELETON_DIRS: &[&str] = &[
         "/bin",
         "/sbin",
         "/boot",
-        "/dev",
         "/etc",
         "/home",
         "/lib/modules",
@@ -96,15 +100,6 @@ pub fn init(initramfs_data: Option<&[u8]>) {
     if let Err(e) = mkdir_p("/win/drives/c/Users") {
         serial_println!("vfs: failed to create /win/drives/c/Users: {:?}", e);
     }
-
-    // Создаем стандартные псевдоустройства /dev
-    let _ = write_file("/dev/null", &[]);
-    let _ = write_file("/dev/zero", &[]);
-    let _ = write_file("/dev/urandom", &[]);
-    let _ = write_file("/dev/random", &[]);
-    let _ = write_file("/dev/tty", &[]);
-    let _ = write_file("/dev/tty0", &[]);
-    let _ = write_file("/dev/console", &[]);
 
     // Если Limine передал initramfs — распаковываем его поверх корня
     let root_node = root().expect("vfs: root inode must exist");

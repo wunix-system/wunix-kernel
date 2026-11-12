@@ -19,6 +19,7 @@ pub struct Metadata {
     pub permissions: u16,
     pub uid: u32,
     pub gid: u32,
+    pub rdev: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +89,14 @@ pub trait Inode: Send + Sync {
 
     fn chown(&self, _uid: u32, _gid: u32) -> Result<(), VfsError> {
         Err(VfsError::NotSupported)
+    }
+
+    fn ioctl(&self, _cmd: u32, _arg: u64) -> Result<u64, i64> {
+        Err(-25)
+    }
+
+    fn open_handle(&self, _flags: u32, _path: Option<alloc::string::String>) -> Option<Arc<dyn crate::fs::handle::FileHandle>> {
+        None
     }
 }
 

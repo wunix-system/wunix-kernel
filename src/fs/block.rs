@@ -12,11 +12,16 @@ use crate::serial_println;
 pub struct BlockDevInode {
     dev: Arc<Mutex<dyn BlockDevice>>,
     inode_id: u64,
+    rdev: u64,
 }
 
 impl BlockDevInode {
     pub fn new(dev: Arc<Mutex<dyn BlockDevice>>, inode_id: u64) -> Self {
-        Self { dev, inode_id }
+        Self { dev, inode_id, rdev: 0xfe00 }
+    }
+
+    pub fn with_rdev(dev: Arc<Mutex<dyn BlockDevice>>, inode_id: u64, rdev: u64) -> Self {
+        Self { dev, inode_id, rdev }
     }
 }
 
@@ -31,6 +36,7 @@ impl Inode for BlockDevInode {
             permissions: 0o660,
             uid: 0,
             gid: 0,
+            rdev: self.rdev,
         }
     }
 
@@ -106,6 +112,40 @@ impl Inode for BlockDevInode {
         }
 
         Ok(bytes_written)
+    }
+
+    fn ioctl(&self, cmd: u32, arg: u64) -> Result<u64, i64> {
+        let dev = self.dev.lock();
+        match cmd {
+            0x1260 => {
+                // BLKGETSIZE: размер в 512-байтных блоках
+                let sectors = dev.sector_count();
+                if !crate::task::syscall::validate_user_buffer(arg, 8) {
+                    return Err(-14);
+                }
+                unsafe { core::ptr::write_unaligned(arg as *mut u64, sectors); }
+                Ok(0)
+            }
+            0x1268 => {
+                // BLKSSZGET: размер сектора устройства
+                let ssz = dev.sector_size() as u32;
+                if !crate::task::syscall::validate_user_buffer(arg, 4) {
+                    return Err(-14);
+                }
+                unsafe { core::ptr::write_unaligned(arg as *mut u32, ssz); }
+                Ok(0)
+            }
+            0x80081272 => {
+                // BLKGETSIZE64: емкость накопителя в байтах
+                let bytes = dev.sector_count() * dev.sector_size() as u64;
+                if !crate::task::syscall::validate_user_buffer(arg, 8) {
+                    return Err(-14);
+                }
+                unsafe { core::ptr::write_unaligned(arg as *mut u64, bytes); }
+                Ok(0)
+            }
+            _ => Err(-25),
+        }
     }
 }
 
@@ -208,7 +248,8 @@ static REGISTERED_BLOCK_DEVS: RwLock<BTreeMap<String, Arc<Mutex<dyn BlockDevice>
     RwLock::new(BTreeMap::new());
 
 pub fn register_block_device(name: String, dev: Arc<Mutex<dyn BlockDevice>>) {
-    REGISTERED_BLOCK_DEVS.write().insert(name, dev);
+    REGISTERED_BLOCK_DEVS.write().insert(name.clone(), dev.clone());
+    crate::fs::devfs::register_block_device(&name, dev);
 }
 
 pub fn get_block_device(name: &str) -> Option<Arc<Mutex<dyn BlockDevice>>> {

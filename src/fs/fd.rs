@@ -90,9 +90,13 @@ pub fn get_file_handle(fd: u64) -> Option<Arc<dyn FileHandle>> {
 }
 
 pub fn insert_file_handle(handle: Arc<dyn FileHandle>) -> u64 {
+    insert_file_handle_from(handle, 3)
+}
+
+pub fn insert_file_handle_from(handle: Arc<dyn FileHandle>, min_fd: u64) -> u64 {
     let table = get_current_process_fd_table();
     let mut map = table.write();
-    let mut candidate = 3u64;
+    let mut candidate = min_fd;
     while map.contains_key(&candidate) {
         candidate += 1;
     }

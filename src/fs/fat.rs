@@ -531,6 +531,7 @@ impl Inode for Fat32FileInode {
             permissions: self.permissions.load(Ordering::Relaxed),
             uid: self.uid.load(Ordering::Relaxed),
             gid: self.gid.load(Ordering::Relaxed),
+            rdev: 0,
         }
     }
 
@@ -813,6 +814,7 @@ impl Inode for Fat32DirInode {
             permissions: self.permissions.load(Ordering::Relaxed),
             uid: self.uid.load(Ordering::Relaxed),
             gid: self.gid.load(Ordering::Relaxed),
+            rdev: 0,
         }
     }
 

@@ -157,7 +157,11 @@ pub fn unpack_tar(tar_bytes: &[u8], target_dir: &Arc<dyn Inode>) -> Result<usize
                     let file_data = &tar_bytes[data_offset..data_offset + size];
                     let file_node = match parent_dir.lookup(leaf_name) {
                         Ok(node) => {
-                            if node.metadata().itype != InodeType::File {
+                            let itype = node.metadata().itype;
+                            if itype == InodeType::CharDevice || itype == InodeType::BlockDevice {
+                                // Защищаем аппаратные узлы DevFS от перезаписи обычными файлами из архива
+                                node
+                            } else if itype != InodeType::File {
                                 let _ = parent_dir.unlink(leaf_name);
                                 parent_dir.create(leaf_name, InodeType::File)?
                             } else {

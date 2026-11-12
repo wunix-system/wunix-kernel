@@ -124,6 +124,7 @@ impl Ufs2Dinode {
             permissions: self.mode & 0o7777,
             uid: self.uid,
             gid: self.gid,
+            rdev: 0,
         }
     }
 

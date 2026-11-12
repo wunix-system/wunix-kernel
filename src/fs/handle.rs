@@ -1,4 +1,6 @@
+use alloc::collections::VecDeque;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use spin::Mutex;
 
@@ -85,6 +87,13 @@ pub trait FileHandle: Send + Sync {
     fn path(&self) -> Option<alloc::string::String> {
         None
     }
+    fn ioctl(&self, _cmd: u32, _arg: u64) -> Result<u64, i64> {
+        if let Some(inode) = self.as_inode() {
+            inode.ioctl(_cmd, _arg)
+        } else {
+            Err(-25)
+        }
+    }
 }
 
 pub struct RegularFileHandle {
@@ -142,6 +151,8 @@ impl FileHandle for RegularFileHandle {
 }
 
 static STDIN_BUFFER: Mutex<RingBuffer<u8, 512>> = Mutex::new(RingBuffer::new(0));
+static CANON_EDITING: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+static CANON_READY: Mutex<VecDeque<u8>> = Mutex::new(VecDeque::new());
 
 /// Добавляет байт в буфер стандартного ввода stdin ядра.
 /// Защита через without_interrupts предотвращает взаимные блокировки при вызове из обработчиков прерываний.
@@ -156,14 +167,27 @@ pub fn push_stdin_byte(b: u8) {
 pub fn flush_stdin() {
     x86_64::instructions::interrupts::without_interrupts(|| {
         STDIN_BUFFER.lock().clear();
+        CANON_EDITING.lock().clear();
+        CANON_READY.lock().clear();
     });
 }
 
 /// Возвращает текущее количество накопленных байт в буфере stdin (для FIONREAD).
 pub fn stdin_buffer_len() -> usize {
     x86_64::instructions::interrupts::without_interrupts(|| {
-        STDIN_BUFFER.lock().len()
+        STDIN_BUFFER.lock().len() + CANON_READY.lock().len()
     })
+}
+
+fn abort_on_foreground_sigint() {
+    if crate::task::signal::is_sigint_pending_for_current() {
+        crate::task::signal::clear_sigint();
+        flush_stdin();
+        crate::drivers::keyboard::clear_key_queue();
+        crate::serial_println!("^C");
+        crate::println!("^C");
+        crate::task::syscall::proc::sys_exit(130);
+    }
 }
 
 /// Опрашивает аппаратную очередь клавиатуры и COM1 serial, перенося символы в буфер stdin.
@@ -203,16 +227,164 @@ pub fn pump_stdin() -> bool {
         }
     }
 
-    if got && crate::task::signal::is_sigint_pending_for_current() {
-        crate::task::signal::clear_sigint();
-        flush_stdin();
-        crate::drivers::keyboard::clear_key_queue();
-        crate::serial_println!("^C");
-        crate::println!("^C");
-        crate::task::syscall::proc::sys_exit(130);
+    if got {
+        abort_on_foreground_sigint();
     }
 
     got
+}
+
+fn echo_tty_bytes(bytes: &[u8]) {
+    if !bytes.is_empty() {
+        let _ = StdoutStderrHandle.write(bytes);
+    }
+}
+
+fn pop_utf8_char(buf: &mut Vec<u8>) -> bool {
+    if buf.is_empty() {
+        return false;
+    }
+    while let Some(b) = buf.pop() {
+        if (b & 0xC0) != 0x80 {
+            break;
+        }
+    }
+    true
+}
+
+fn trailing_utf8_char(buf: &[u8]) -> Option<&[u8]> {
+    let len = buf.len();
+    for back in 1..=len.min(4) {
+        let slice = &buf[len - back..];
+        if (slice[0] & 0xC0) != 0x80 {
+            return core::str::from_utf8(slice).ok().map(|_| slice);
+        }
+    }
+    None
+}
+
+fn drain_canon_ready(buf: &mut [u8]) -> usize {
+    let mut ready = CANON_READY.lock();
+    let mut count = 0;
+    while count < buf.len() {
+        if let Some(b) = ready.pop_front() {
+            buf[count] = b;
+            count += 1;
+        } else {
+            break;
+        }
+    }
+    count
+}
+
+fn read_raw_stdin(buf: &mut [u8]) -> usize {
+    let mut count = drain_canon_ready(buf);
+    let mut echo_buf = Vec::new();
+    let echo = crate::task::syscall::fs::is_echo_enabled();
+
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut stdin = STDIN_BUFFER.lock();
+        while count < buf.len() {
+            if let Some(b) = stdin.pop() {
+                if b == 0x03 {
+                    crate::task::signal::clear_sigint();
+                }
+                buf[count] = b;
+                count += 1;
+                if echo && (b >= 0x20 || b == b'\n' || b == b'\t') {
+                    echo_buf.push(b);
+                }
+            } else {
+                break;
+            }
+        }
+    });
+
+    echo_tty_bytes(&echo_buf);
+    count
+}
+
+fn process_canon_input() -> bool {
+    let echo = crate::task::syscall::fs::is_echo_enabled();
+    let echoe = crate::task::syscall::fs::is_echoe_enabled();
+    let echonl = crate::task::syscall::fs::is_echonl_enabled();
+    let isig = crate::task::syscall::fs::is_isig_enabled();
+
+    let mut raw_chunk = [0u8; 64];
+    let mut raw_len = 0usize;
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut stdin = STDIN_BUFFER.lock();
+        while raw_len < raw_chunk.len() {
+            if let Some(b) = stdin.pop() {
+                raw_chunk[raw_len] = b;
+                raw_len += 1;
+                if b == b'\n' || b == b'\r' || b == 0x04 {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+    });
+
+    if raw_len == 0 {
+        return false;
+    }
+
+    let mut echo_buf = Vec::new();
+    let mut eof_empty = false;
+
+    {
+        let mut editing = CANON_EDITING.lock();
+        let mut ready = CANON_READY.lock();
+
+        for &b in &raw_chunk[..raw_len] {
+            if b == 0x03 {
+                if isig {
+                    drop(ready);
+                    drop(editing);
+                    crate::task::signal::raise_sigint();
+                    abort_on_foreground_sigint();
+                    return false;
+                }
+                crate::task::signal::clear_sigint();
+            }
+            if b == 0x04 {
+                if editing.is_empty() && ready.is_empty() {
+                    eof_empty = true;
+                } else {
+                    ready.extend(editing.drain(..));
+                }
+                break;
+            }
+            if b == 0x08 || b == 0x7f {
+                if pop_utf8_char(&mut editing) && echo && echoe {
+                    echo_buf.extend_from_slice(b"\x08 \x08");
+                }
+                continue;
+            }
+            if b == b'\n' || b == b'\r' {
+                editing.push(b);
+                ready.extend(editing.drain(..));
+                if echo || echonl {
+                    echo_buf.push(b'\n');
+                }
+                break;
+            }
+
+            editing.push(b);
+            if echo && (b >= 0x20 || b == b'\t') {
+                if b < 0x80 {
+                    echo_buf.push(b);
+                } else if let Some(utf8) = trailing_utf8_char(&editing) {
+                    echo_buf.extend_from_slice(utf8);
+                }
+            }
+        }
+    }
+
+    echo_tty_bytes(&echo_buf);
+    eof_empty
 }
 
 pub struct StdinHandle;
@@ -223,36 +395,28 @@ impl FileHandle for StdinHandle {
             return Ok(0);
         }
         loop {
-            // 1. Опустошаем накопленные байты
-            let mut count = 0usize;
-            x86_64::instructions::interrupts::without_interrupts(|| {
-                let mut stdin = STDIN_BUFFER.lock();
-                while count < buf.len() {
-                    if let Some(b) = stdin.pop() {
-                        if b == 0x03 {
-                            crate::task::signal::clear_sigint();
-                        }
-                        if b == 0x04 && count == 0 {
-                            return; // EOF (Ctrl+D)
-                        }
-                        buf[count] = b;
-                        count += 1;
-                    } else {
-                        break;
-                    }
+            abort_on_foreground_sigint();
+            if crate::task::syscall::fs::is_icanon_enabled() {
+                let count = drain_canon_ready(buf);
+                if count > 0 {
+                    return Ok(count);
                 }
-            });
-
-            if count > 0 {
-                return Ok(count);
+                let eof_empty = process_canon_input();
+                let count = drain_canon_ready(buf);
+                if count > 0 || eof_empty {
+                    return Ok(count);
+                }
+            } else {
+                let count = read_raw_stdin(buf);
+                if count > 0 {
+                    return Ok(count);
+                }
             }
 
-            // 2. Опрашиваем клавиатуру и COM1 через унифицированный насос pump_stdin
             if pump_stdin() {
                 continue;
             }
 
-            // Буфер пуст: ждем прерывания (PIT/IRQ1)
             x86_64::instructions::interrupts::enable();
             x86_64::instructions::hlt();
         }
@@ -265,8 +429,7 @@ impl FileHandle for StdinHandle {
     fn poll_events(&self) -> u32 {
         let _ = pump_stdin();
         x86_64::instructions::interrupts::without_interrupts(|| {
-            let stdin = STDIN_BUFFER.lock();
-            if !stdin.is_empty() {
+            if !CANON_READY.lock().is_empty() || !STDIN_BUFFER.lock().is_empty() {
                 EPOLLIN
             } else {
                 0
@@ -325,6 +488,10 @@ impl FileHandle for StdoutStderrHandle {
 
     fn poll_events(&self) -> u32 {
         EPOLLOUT
+    }
+
+    fn get_flags(&self) -> u32 {
+        O_WRONLY
     }
 
     fn is_tty(&self) -> bool {
