@@ -93,8 +93,13 @@ pub fn collect_memory_stats(entries: &[&limine::memmap::Entry]) -> MemoryStats {
 }
 
 static HHDM_OFFSET: AtomicU64 = AtomicU64::new(0);
+static KERNEL_CR3: AtomicU64 = AtomicU64::new(0);
 static FRAME_ALLOCATOR: Mutex<Option<LimineFrameAllocator>> = Mutex::new(None);
 static GLOBAL_MEMORY_STATS: Mutex<Option<MemoryStats>> = Mutex::new(None);
+
+pub fn kernel_cr3() -> u64 {
+    KERNEL_CR3.load(Ordering::Relaxed)
+}
 
 pub fn total_memory_bytes() -> u64 {
     GLOBAL_MEMORY_STATS.lock().map_or(512 * 1024 * 1024, |s| s.ram_bytes)
@@ -206,6 +211,8 @@ pub fn map_kernel_mmio(phys_addr: u64, size: usize) -> Result<VirtAddr, &'static
 /// - Выделяет и маппит страницы под кучу ядра (1 MiB) и активирует аллокатор.
 pub fn init(memory_map: &'static [&'static limine::memmap::Entry], hhdm_offset: u64) {
     HHDM_OFFSET.store(hhdm_offset, Ordering::Relaxed);
+    let (cr3_frame, _) = Cr3::read();
+    KERNEL_CR3.store(cr3_frame.start_address().as_u64(), Ordering::Relaxed);
     *GLOBAL_MEMORY_STATS.lock() = Some(collect_memory_stats(memory_map));
 
     let mut mapper = unsafe { paging::init_offset_page_table(hhdm_offset) };

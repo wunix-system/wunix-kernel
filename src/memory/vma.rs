@@ -32,6 +32,7 @@ pub struct VirtualArea {
     pub is_committed: bool,
 }
 
+#[derive(Clone)]
 pub struct VirtualMemoryManager {
     areas: Vec<VirtualArea>,
     next_alloc: u64,
@@ -187,23 +188,18 @@ impl VirtualMemoryManager {
         let hhdm = super::hhdm_offset();
         let (current_pml4, _) = Cr3::read();
         let pml4_virt = VirtAddr::new(hhdm + current_pml4.start_address().as_u64());
-        let pml4_table: &mut PageTable = unsafe { &mut *pml4_virt.as_mut_ptr() };
 
         let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(target_addr));
         let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new(target_addr + aligned_len - 1));
 
         for page in Page::range_inclusive(start_page, end_page) {
-            let mut mapper = unsafe { OffsetPageTable::new(pml4_table, VirtAddr::new(hhdm)) };
+            let mut mapper = unsafe { OffsetPageTable::new(&mut *pml4_virt.as_mut_ptr(), VirtAddr::new(hhdm)) };
             if let Some(existing_phys) = mapper.translate_addr(page.start_address()) {
-                // Если страница уже отображена, обновляем флаги PTE через Mapper
+                // Если страница уже отображена, обновляем флаги PTE через Mapper и гарантируем права промежуточных таблиц
                 unsafe {
                     let _ = mapper.update_flags(page, pt_flags).map(|flush| flush.flush());
+                    ensure_parent_tables_writable(pml4_virt, page, hhdm);
                 }
-                let pml4_idx = page.start_address().p4_index();
-                let cur = pml4_table[pml4_idx].flags();
-                pml4_table[pml4_idx].set_flags(
-                    cur | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE,
-                );
                 x86_64::instructions::tlb::flush(page.start_address());
 
                 if (flags & MAP_ANON) != 0 {
@@ -219,18 +215,14 @@ impl VirtualMemoryManager {
                     core::ptr::write_bytes(frame_virt as *mut u8, 0, 4096);
                 }
 
+                let parent_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
                 unsafe {
                     mapper
-                        .map_to(page, frame, pt_flags, &mut super::LockedFrameAllocator)
+                        .map_to_with_table_flags(page, frame, pt_flags, parent_flags, &mut super::LockedFrameAllocator)
                         .map_err(|_| -12)?
                         .flush();
+                    ensure_parent_tables_writable(pml4_virt, page, hhdm);
                 }
-
-                let pml4_idx = page.start_address().p4_index();
-                let cur = pml4_table[pml4_idx].flags();
-                pml4_table[pml4_idx].set_flags(
-                    cur | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE,
-                );
             }
         }
 
@@ -324,18 +316,20 @@ impl VirtualMemoryManager {
         let hhdm = super::hhdm_offset();
         let (current_pml4, _) = Cr3::read();
         let pml4_virt = VirtAddr::new(hhdm + current_pml4.start_address().as_u64());
-        let pml4_table: &mut PageTable = unsafe { &mut *pml4_virt.as_mut_ptr() };
 
         let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(addr));
         let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new(end_addr - 1));
 
-        let mut mapper = unsafe { OffsetPageTable::new(pml4_table, VirtAddr::new(hhdm)) };
-
         for page in Page::range_inclusive(start_page, end_page) {
+            let mut mapper = unsafe { OffsetPageTable::new(&mut *pml4_virt.as_mut_ptr(), VirtAddr::new(hhdm)) };
             if mapper.translate_page(page).is_ok() {
                 unsafe {
                     let _ = mapper.update_flags(page, pt_flags).map(|flush| flush.flush());
+                    if pt_flags.contains(PageTableFlags::WRITABLE) {
+                        ensure_parent_tables_writable(pml4_virt, page, hhdm);
+                    }
                 }
+                x86_64::instructions::tlb::flush(page.start_address());
             }
         }
 
@@ -392,4 +386,35 @@ impl VirtualMemoryManager {
         }
         false
     }
+}
+
+/// Гарантирует, что промежуточные таблицы страниц (PML4, PDPT, PD) имеют флаги USER_ACCESSIBLE и WRITABLE,
+/// исключая аппаратные сбои Ring 3 при обновлении листовых записей PTE на запись.
+pub unsafe fn ensure_parent_tables_writable(
+    pml4_virt: VirtAddr,
+    page: Page<Size4KiB>,
+    hhdm: u64,
+) {
+    let level_4_table: &mut PageTable = unsafe { &mut *pml4_virt.as_mut_ptr() };
+    let p4_entry = &mut level_4_table[page.p4_index()];
+    if p4_entry.is_unused() {
+        return;
+    }
+    p4_entry.set_flags(p4_entry.flags() | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE);
+
+    let p3_virt = VirtAddr::new(hhdm + p4_entry.addr().as_u64());
+    let p3_table: &mut PageTable = unsafe { &mut *p3_virt.as_mut_ptr() };
+    let p3_entry = &mut p3_table[page.p3_index()];
+    if p3_entry.is_unused() {
+        return;
+    }
+    p3_entry.set_flags(p3_entry.flags() | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE);
+
+    let p2_virt = VirtAddr::new(hhdm + p3_entry.addr().as_u64());
+    let p2_table: &mut PageTable = unsafe { &mut *p2_virt.as_mut_ptr() };
+    let p2_entry = &mut p2_table[page.p2_index()];
+    if p2_entry.is_unused() {
+        return;
+    }
+    p2_entry.set_flags(p2_entry.flags() | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE);
 }
