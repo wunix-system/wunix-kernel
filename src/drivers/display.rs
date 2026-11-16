@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use core::fmt;
 use spin::Mutex;
 
@@ -78,6 +79,10 @@ pub struct DisplayConsole {
     pub scroll_bottom: usize,
     pub saved_col: usize,
     pub saved_row: usize,
+    in_alt_screen: bool,
+    alt_saved_fb: Option<Vec<u32>>,
+    alt_saved_col: usize,
+    alt_saved_row: usize,
 }
 
 unsafe impl Send for DisplayConsole {}
@@ -122,7 +127,70 @@ impl DisplayConsole {
             scroll_bottom: rows.saturating_sub(1),
             saved_col: 0,
             saved_row: 0,
+            in_alt_screen: false,
+            alt_saved_fb: None,
+            alt_saved_col: 0,
+            alt_saved_row: 0,
         }
+    }
+
+    fn enter_alt_screen(&mut self) {
+        if self.in_alt_screen {
+            return;
+        }
+        let pixels = self.framebuffer.width * self.framebuffer.height;
+        if pixels > 0 && self.framebuffer.bpp == 32 {
+            let mut backup = alloc::vec![0u32; pixels];
+            let stride = self.framebuffer.pitch / 4;
+            for y in 0..self.framebuffer.height {
+                let row_ptr = unsafe { (self.framebuffer.address as *const u32).add(y * stride) };
+                let dst = &mut backup[y * self.framebuffer.width..(y + 1) * self.framebuffer.width];
+                unsafe {
+                    core::ptr::copy_nonoverlapping(row_ptr, dst.as_mut_ptr(), self.framebuffer.width);
+                }
+            }
+            self.alt_saved_fb = Some(backup);
+        }
+        self.alt_saved_col = self.col;
+        self.alt_saved_row = self.row;
+        self.in_alt_screen = true;
+        self.framebuffer.clear(DEFAULT_BG_COLOR);
+        self.col = 0;
+        self.row = 0;
+    }
+
+    fn leave_alt_screen(&mut self) {
+        if !self.in_alt_screen {
+            return;
+        }
+        if let Some(backup) = self.alt_saved_fb.take() {
+            let stride = self.framebuffer.pitch / 4;
+            for y in 0..self.framebuffer.height {
+                let row_ptr = unsafe { (self.framebuffer.address as *mut u32).add(y * stride) };
+                let src = &backup[y * self.framebuffer.width..(y + 1) * self.framebuffer.width];
+                unsafe {
+                    core::ptr::copy_nonoverlapping(src.as_ptr(), row_ptr, self.framebuffer.width);
+                }
+            }
+        }
+        self.col = self.alt_saved_col.min(self.cols.saturating_sub(1));
+        self.row = self.alt_saved_row.min(self.rows.saturating_sub(1));
+        self.in_alt_screen = false;
+        self.scroll_top = 0;
+        self.scroll_bottom = self.rows.saturating_sub(1);
+    }
+
+    /// Сбрасывает режимы терминала после аварийного завершения полноэкранного приложения (SIGINT/SIGKILL)
+    pub fn reset_terminal_modes(&mut self) {
+        self.leave_alt_screen();
+        self.scroll_top = 0;
+        self.scroll_bottom = self.rows.saturating_sub(1);
+        self.fg_color = DEFAULT_FG_COLOR;
+        self.bg_color = DEFAULT_BG_COLOR;
+        self.is_inverted = false;
+        self.cursor_enabled = true;
+        self.cursor_key_mode = false;
+        self.ansi_state = AnsiState::Normal;
     }
 
     /// Возвращает эффективные цвета переднего плана и фона с учетом инверсии (SGR 7/27)
@@ -231,14 +299,27 @@ impl DisplayConsole {
         let copy_lines = (bot - top) * line_height;
 
         // Сдвигаем строки с top+1..=bot вверх на top..=bot-1
-        for y in 0..copy_lines {
-            let dst_y = MARGIN_Y + top * line_height + y;
-            let src_y = MARGIN_Y + (top + 1) * line_height + y;
-            if src_y < self.framebuffer.height && dst_y < self.framebuffer.height {
-                unsafe {
-                    let dst = self.framebuffer.address.add(dst_y * self.framebuffer.pitch);
-                    let src = self.framebuffer.address.add(src_y * self.framebuffer.pitch);
-                    core::ptr::copy(src, dst, copy_bytes);
+        let start_dst_y = MARGIN_Y + top * line_height;
+        let start_src_y = MARGIN_Y + (top + 1) * line_height;
+        if copy_bytes == self.framebuffer.pitch
+            && start_src_y + copy_lines <= self.framebuffer.height
+            && start_dst_y + copy_lines <= self.framebuffer.height
+        {
+            unsafe {
+                let dst = self.framebuffer.address.add(start_dst_y * self.framebuffer.pitch);
+                let src = self.framebuffer.address.add(start_src_y * self.framebuffer.pitch);
+                core::ptr::copy(src, dst, copy_lines * copy_bytes);
+            }
+        } else {
+            for y in 0..copy_lines {
+                let dst_y = start_dst_y + y;
+                let src_y = start_src_y + y;
+                if src_y < self.framebuffer.height && dst_y < self.framebuffer.height {
+                    unsafe {
+                        let dst = self.framebuffer.address.add(dst_y * self.framebuffer.pitch);
+                        let src = self.framebuffer.address.add(src_y * self.framebuffer.pitch);
+                        core::ptr::copy(src, dst, copy_bytes);
+                    }
                 }
             }
         }
@@ -249,10 +330,8 @@ impl DisplayConsole {
         for y in clear_start_y..(clear_start_y + line_height) {
             if y < self.framebuffer.height {
                 let row_ptr = unsafe { self.framebuffer.address.add(y * self.framebuffer.pitch) as *mut u32 };
-                for x in 0..self.framebuffer.width {
-                    unsafe {
-                        core::ptr::write_volatile(row_ptr.add(x), bg);
-                    }
+                unsafe {
+                    core::slice::from_raw_parts_mut(row_ptr, self.framebuffer.width).fill(bg);
                 }
             }
         }
@@ -636,6 +715,8 @@ impl DisplayConsole {
                             } else if p == 25 {
                                 self.cursor_enabled = true;
                                 self.draw_cursor();
+                            } else if matches!(p, 47 | 1047 | 1049) {
+                                self.enter_alt_screen();
                             }
                         }
                         self.ansi_state = AnsiState::Normal;
@@ -649,6 +730,8 @@ impl DisplayConsole {
                             } else if p == 25 {
                                 self.erase_cursor();
                                 self.cursor_enabled = false;
+                            } else if matches!(p, 47 | 1047 | 1049) {
+                                self.leave_alt_screen();
                             }
                         }
                         self.ansi_state = AnsiState::Normal;
