@@ -81,9 +81,9 @@ fn do_clone(
         crate::task::get_current_fs_base()
     };
 
-    // Для legacy SYS_CLONE рантайм Go ожидает child_user_rsp в RSI; для clone3
-    // сохраняем все пользовательские caller-saved регистры (включая rdx/r8).
-    let child_rsi = if is_clone3 { regs.rsi } else { child_user_rsp };
+    // Для legacy SYS_CLONE с новым стеком (newsp != 0) рантайм Go ожидает child_user_rsp в RSI;
+    // для fork (newsp == 0) и clone3 сохраняем исходный RSI.
+    let child_rsi = if is_clone3 || newsp == 0 { regs.rsi } else { child_user_rsp };
 
     // Начальный стек-фрейм (120 байт = 15 * 8) для context_switch и ret_from_fork
     let child_rsp = unsafe {
@@ -753,6 +753,16 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
         envp.push(String::from("USER=root"));
         envp.push(String::from("HOME=/root"));
         envp.push(String::from("TERM=xterm-256color"));
+        match crate::i18n::current_language() {
+            crate::i18n::Language::Russian => {
+                envp.push(String::from("LANG=ru_RU.UTF-8"));
+                envp.push(String::from("LC_ALL=ru_RU.UTF-8"));
+            }
+            crate::i18n::Language::English => {
+                envp.push(String::from("LANG=en_US.UTF-8"));
+                envp.push(String::from("LC_ALL=en_US.UTF-8"));
+            }
+        }
     }
 
     let mut cur_path = path_str;
@@ -860,7 +870,6 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     crate::task::set_current_thread_name(bin_name.as_bytes());
     crate::task::set_current_thread_exe_path(&path_str);
     let is_shell = is_shell_binary_path(&path_str);
-    drop(path_str);
 
     let (stack_top, argv_addr) = match crate::task::elf::setup_user_stack(&mut user_space, &args, &envp, &elf_info) {
         Ok(res) => res,
@@ -922,6 +931,7 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     }
 
     let parent_tgid = crate::task::current_thread_tgid();
+    let parent_cr3 = crate::task::current_thread_cr3();
     let child_tgid = NEXT_PID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     super::mem::reset_process_vma_for(child_tgid, brk_start);
     crate::fs::clone_fd_table(parent_tgid, child_tgid);
@@ -943,8 +953,8 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     let next_depth = cur_depth + 1;
     set_child_is_shell(next_depth, is_shell);
 
-    // Сбрасываем старый сигнал SIGINT перед запуском нового процесса
-    crate::task::signal::clear_sigint();
+    // Сбрасываем старый сигнал SIGINT и перехваченные обработчики перед запуском нового процесса
+    crate::task::signal::reset_signals_on_exec(child_tgid);
 
     // Сохраняем FS_BASE родителя и очищаем его для дочернего процесса,
     // чтобы изолировать TLS и предотвратить Page Fault от устаревших указателей
@@ -985,6 +995,9 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
 
     if exit_code >= 128 {
         *crate::task::syscall::fs::CURRENT_TERMIOS.lock() = prev_termios;
+        if let Some(console) = crate::drivers::display::CONSOLE.lock().as_mut() {
+            console.reset_terminal_modes();
+        }
     }
 
     crate::task::set_current_thread_abi(old_abi);
@@ -994,6 +1007,7 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     // Восстанавливаем FS_BASE родительского процесса
     unsafe { crate::arch::x86_64::syscall::write_fs_base(old_fs_base); }
     crate::task::set_current_fs_base(old_fs_base);
+    crate::task::set_current_thread_cr3(parent_cr3);
 
     set_child_is_shell(next_depth, false);
 
@@ -1004,6 +1018,7 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     crate::arch::x86_64::syscall::set_kernel_stack(old_kstack_top);
     crate::fs::remove_process_fd_table(child_tgid);
     super::remove_process_cwd(child_tgid);
+    crate::task::signal::cleanup_process_signals(child_tgid);
     crate::task::set_current_thread_tgid(parent_tgid);
     crate::task::set_current_thread_name(&old_name);
     crate::task::set_current_thread_exe_path(&old_exe_path);
@@ -1053,6 +1068,7 @@ pub fn sys_exit_group(status: u64) -> ! {
     crate::task::terminate_process_threads(cur_tgid, cur_tid);
     crate::fs::remove_process_fd_table(cur_tgid);
     super::remove_process_cwd(cur_tgid);
+    crate::task::signal::cleanup_process_signals(cur_tgid);
     super::mem::remove_process_vma(cur_tgid);
 
     if is_sync && has_parent {
@@ -1072,7 +1088,7 @@ fn uses_sync_execve_spawn(exe_path: &str) -> bool {
     let bin = exe_path.rsplit('/').next().unwrap_or(exe_path);
     matches!(
         bin,
-        "init" | "wsh" | "sh" | "env" | "login" | "sudo" | "su" | "system" | "winstall" | "time" | "[" | "test" | "unalias"
+        "init" | "wsh" | "sh" | "bash" | "env" | "login" | "sudo" | "su" | "system" | "winstall" | "time" | "[" | "test" | "unalias"
     )
 }
 
