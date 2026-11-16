@@ -382,7 +382,7 @@ pub fn linux_syscall_dispatcher(
         SYS_BRK => sys_brk(arg1),
         SYS_RT_SIGACTION => crate::task::signal::sys_rt_sigaction(arg1, arg2, arg3, arg4),
         SYS_RT_SIGPROCMASK => crate::task::signal::sys_rt_sigprocmask(arg1 as i32, arg2, arg3, arg4),
-        SYS_RT_SIGRETURN => 0,
+        SYS_RT_SIGRETURN => crate::task::signal::sys_rt_sigreturn(r as *const SyscallRegisters as *mut SyscallRegisters),
         SYS_IOCTL => sys_ioctl(arg1, arg2, arg3),
         SYS_PREAD64 => sys_pread64(arg1, arg2, arg3, arg4),
         SYS_PWRITE64 => sys_pwrite64(arg1, arg2, arg3, arg4),
@@ -571,16 +571,6 @@ pub extern "C" fn syscall_dispatcher(
     arg5: u64,
     regs: *mut SyscallRegisters,
 ) -> u64 {
-    // Прерываем выполнение дочернего процесса при получении сигнала SIGINT
-    if crate::task::signal::is_sigint_pending_for_current() {
-        crate::task::signal::clear_sigint();
-        crate::fs::handle::flush_stdin();
-        crate::drivers::keyboard::clear_key_queue();
-        crate::serial_println!("^C");
-        crate::println!("^C");
-        sys_exit(130);
-    }
-
     let r = unsafe { &*regs };
     let personality = crate::task::current_thread_abi();
 
@@ -596,16 +586,11 @@ pub extern "C" fn syscall_dispatcher(
         }
     };
 
-    if crate::task::signal::is_sigint_pending_for_current() {
-        crate::task::signal::clear_sigint();
-        crate::fs::handle::flush_stdin();
-        crate::drivers::keyboard::clear_key_queue();
-        crate::serial_println!("^C");
-        crate::println!("^C");
-        sys_exit(130);
+    if nr == SYS_RT_SIGRETURN {
+        return res;
     }
 
-    res
+    crate::task::signal::deliver_pending_signals(regs, res)
 }
 
 pub fn alloc_kernel_stack() -> (alloc::boxed::Box<[u8]>, u64) {

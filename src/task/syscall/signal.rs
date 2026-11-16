@@ -13,6 +13,7 @@ pub const SIGTERM: u64 = 15;
 pub const SIGCHLD: u64 = 17;
 pub const SIGCONT: u64 = 18;
 pub const SIGSTOP: u64 = 19;
+pub const SIGTSTP: u64 = 20;
 pub const SIGWINCH: u64 = 28;
 
 static ALARM_DEADLINE: AtomicU64 = AtomicU64::new(0);
@@ -55,33 +56,22 @@ pub fn sys_kill(pid: i64, sig: u64) -> u64 {
     }
 
     if target_tgid == cur_tgid {
-        match sig {
-            SIGINT => {
-                if crate::task::syscall::proc::is_current_interactive_shell() {
-                    crate::fs::handle::flush_stdin();
-                    crate::drivers::keyboard::clear_key_queue();
-                    crate::serial_println!("^C");
-                    crate::println!("^C");
-                    0
-                } else {
-                    super::proc::sys_exit_group(128 + sig)
-                }
-            }
-            SIGKILL | SIGTERM | SIGQUIT | SIGHUP | SIGPIPE => {
-                super::proc::sys_exit_group(128 + sig)
-            }
-            _ => 0,
-        }
+        crate::task::signal::raise_signal(cur_tgid, sig);
+        0
     } else {
         match sig {
-            SIGKILL | SIGTERM | SIGQUIT | SIGHUP | SIGPIPE | SIGINT => {
+            SIGKILL => {
                 crate::task::kill_process_threads(target_tgid);
                 crate::fs::remove_process_fd_table(target_tgid);
                 super::remove_process_cwd(target_tgid);
+                crate::task::signal::cleanup_process_signals(target_tgid);
                 super::proc::record_process_exit(target_tgid, (sig as i32 & 0x7f) | 0x80);
                 0
             }
-            _ => 0,
+            _ => {
+                crate::task::signal::raise_signal(target_tgid, sig);
+                0
+            }
         }
     }
 }
