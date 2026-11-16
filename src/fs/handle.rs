@@ -179,15 +179,8 @@ pub fn stdin_buffer_len() -> usize {
     })
 }
 
-fn abort_on_foreground_sigint() {
-    if crate::task::signal::is_sigint_pending_for_current() {
-        crate::task::signal::clear_sigint();
-        flush_stdin();
-        crate::drivers::keyboard::clear_key_queue();
-        crate::serial_println!("^C");
-        crate::println!("^C");
-        crate::task::syscall::proc::sys_exit(130);
-    }
+fn has_pending_signal_for_stdin() -> bool {
+    crate::task::signal::has_deliverable_signal_for_current()
 }
 
 /// Опрашивает аппаратную очередь клавиатуры и COM1 serial, перенося символы в буфер stdin.
@@ -210,25 +203,16 @@ pub fn pump_stdin() -> bool {
     }
 
     let mut rx_count = 0;
-    while let Some(b) = crate::drivers::serial::try_receive() {
-        if b == 0x03 && crate::task::syscall::fs::is_isig_enabled() {
-            crate::task::signal::raise_sigint();
-        }
-        let byte_to_push = if b == b'\r' && icrnl {
-            b'\n'
-        } else {
-            b
+    while !crate::fs::devfs::tty::is_serial_probe_active() {
+        let Some(b) = crate::drivers::serial::try_receive() else {
+            break;
         };
-        push_stdin_byte(byte_to_push);
+        crate::fs::devfs::tty::push_serial_rx_byte(b);
         got = true;
         rx_count += 1;
         if rx_count >= 64 {
             break;
         }
-    }
-
-    if got {
-        abort_on_foreground_sigint();
     }
 
     got
@@ -339,15 +323,8 @@ fn process_canon_input() -> bool {
         let mut ready = CANON_READY.lock();
 
         for &b in &raw_chunk[..raw_len] {
-            if b == 0x03 {
-                if isig {
-                    drop(ready);
-                    drop(editing);
-                    crate::task::signal::raise_sigint();
-                    abort_on_foreground_sigint();
-                    return false;
-                }
-                crate::task::signal::clear_sigint();
+            if isig && crate::task::syscall::fs::handle_tty_isig_byte(b) {
+                return false;
             }
             if b == 0x04 {
                 if editing.is_empty() && ready.is_empty() {
@@ -395,7 +372,9 @@ impl FileHandle for StdinHandle {
             return Ok(0);
         }
         loop {
-            abort_on_foreground_sigint();
+            if has_pending_signal_for_stdin() {
+                return Err(-4); // -EINTR
+            }
             if crate::task::syscall::fs::is_icanon_enabled() {
                 let count = drain_canon_ready(buf);
                 if count > 0 {

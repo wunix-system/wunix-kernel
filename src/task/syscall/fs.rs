@@ -411,74 +411,40 @@ pub fn is_echonl_enabled() -> bool {
     (tio.c_lflag & 0x0040) != 0
 }
 
+/// Обрабатывает управляющие символы termios (VINTR, VQUIT, VSUSP) при включённом ISIG.
+/// Возвращает true, если символ сгенерировал сигнал и не должен попадать во входной буфер.
+pub fn handle_tty_isig_byte(b: u8) -> bool {
+    let (isig, vintr, vquit, vsusp) = {
+        let tio = CURRENT_TERMIOS.lock();
+        ((tio.c_lflag & 0x0001) != 0, tio.c_cc[0], tio.c_cc[1], tio.c_cc[10])
+    };
+    if !isig || b == 0 {
+        return false;
+    }
+    if b == vintr {
+        crate::task::signal::raise_foreground_signal(super::signal::SIGINT);
+        return true;
+    }
+    if b == vquit {
+        crate::task::signal::raise_foreground_signal(super::signal::SIGQUIT);
+        return true;
+    }
+    if b == vsusp {
+        crate::task::signal::raise_foreground_signal(super::signal::SIGTSTP);
+        return true;
+    }
+    false
+}
+
 pub fn sys_ioctl(fd: u64, cmd: u64, arg: u64) -> u64 {
     if let Some(handle) = get_file_handle(fd) {
         if let Ok(ret) = handle.ioctl(cmd as u32, arg) {
             return ret;
         }
-    }
-
-    #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default)]
-    struct WinSize {
-        ws_row: u16,
-        ws_col: u16,
-        ws_xpixel: u16,
-        ws_ypixel: u16,
-    }
-
-    let is_tty_fd = get_file_handle(fd).map_or(false, |h| h.is_tty());
-    if is_tty_fd {
-        if let Some(res) = handle_termios_ioctl(cmd, arg) {
-            return match res {
-                Ok(v) => v,
-                Err(e) => e as u64,
-            };
-        }
-        match cmd {
-            TIOCGWINSZ => {
-                if !validate_user_buffer(arg, 8) {
-                    return (-(EFAULT as i64)) as u64;
-                }
-                let (rows, cols) = if let Some(console) = crate::drivers::display::CONSOLE.lock().as_ref() {
-                    (console.rows as u16, console.cols as u16)
-                } else {
-                    (25, 80)
-                };
-                let ws = WinSize {
-                    ws_row: rows,
-                    ws_col: cols,
-                    ws_xpixel: 0,
-                    ws_ypixel: 0,
-                };
-                unsafe {
-                    core::ptr::write_unaligned(arg as *mut WinSize, ws);
-                }
-                return 0;
+        if handle.is_tty() {
+            if let Ok(ret) = crate::fs::devfs::tty::handle_terminal_ioctl(cmd as u32, arg) {
+                return ret;
             }
-            TIOCSWINSZ => return 0,
-            TIOCGPGRP => {
-                if !validate_user_buffer(arg, 4) {
-                    return (-(EFAULT as i64)) as u64;
-                }
-                let pgrp = crate::task::syscall::proc::sys_getpgrp() as u32;
-                unsafe {
-                    core::ptr::write_unaligned(arg as *mut u32, pgrp);
-                }
-                return 0;
-            }
-            TIOCSPGRP | TIOCSCTTY => return 0,
-            FIONREAD => {
-                if !validate_user_buffer(arg, 4) {
-                    return (-(EFAULT as i64)) as u64;
-                }
-                let count = (crate::fs::handle::stdin_buffer_len() + crate::drivers::keyboard::key_queue_len()) as i32;
-                unsafe {
-                    core::ptr::write_unaligned(arg as *mut i32, count);
-                }
-                return 0;
-            }
-            _ => {}
         }
     }
 

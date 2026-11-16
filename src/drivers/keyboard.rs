@@ -390,12 +390,7 @@ pub fn handle_scancode(scancode: u8) {
             let ctrl_char = match key_event.code {
                 KeyCode::A => Some('\x01'), // SOH (Start of heading / начало строки)
                 KeyCode::B => Some('\x02'), // STX (Курсор влево)
-                KeyCode::C => {
-                    if crate::task::syscall::fs::is_isig_enabled() {
-                        crate::task::signal::raise_sigint();
-                    }
-                    Some('\x03')
-                }
+                KeyCode::C => Some('\x03'),
                 KeyCode::D => Some('\x04'), // EOT / EOF
                 KeyCode::E => Some('\x05'), // ENQ (Конец строки)
                 KeyCode::F => Some('\x06'), // ACK (Курсор вправо)
@@ -428,6 +423,9 @@ pub fn handle_scancode(scancode: u8) {
                 _ => None,
             };
             if let Some(ch) = ctrl_char {
+                if crate::task::syscall::fs::handle_tty_isig_byte(ch as u8) {
+                    return;
+                }
                 let mut queue = KEY_QUEUE.lock();
                 let _ = queue.push(ch);
                 return;

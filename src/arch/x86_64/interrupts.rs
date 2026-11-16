@@ -159,21 +159,18 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFra
     // Опрашиваем последовательный порт COM1 на каждом тике таймера (10 мс).
     // Ограничиваем порцию до 64 байт за тик, чтобы прерывание не могло зациклиться.
     let mut rx_count = 0;
-    while let Some(b) = crate::drivers::serial::try_receive() {
-        if b == 0x03 && crate::task::syscall::fs::is_isig_enabled() {
-            crate::task::signal::raise_sigint();
-        }
-        let icrnl = crate::task::syscall::fs::is_icrnl_enabled();
-        let byte_to_push = if b == b'\r' && icrnl {
-            b'\n'
-        } else {
-            b
+    while !crate::fs::devfs::tty::is_serial_probe_active() {
+        let Some(b) = crate::drivers::serial::try_receive() else {
+            break;
         };
-        crate::fs::handle::push_stdin_byte(byte_to_push);
+        crate::fs::devfs::tty::push_serial_rx_byte(b);
         rx_count += 1;
         if rx_count >= 64 {
             break;
         }
+    }
+    if !crate::fs::devfs::tty::is_serial_probe_active() {
+        crate::fs::devfs::tty::flush_stale_serial_esc();
     }
 
     unsafe {

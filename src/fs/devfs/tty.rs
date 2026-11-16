@@ -27,22 +27,266 @@ pub struct WinSize {
     pub ws_ypixel: u16,
 }
 
-fn get_display_winsize() -> WinSize {
-    let (rows, cols) = if let Some(console) = crate::drivers::display::CONSOLE.lock().as_ref() {
-        (console.rows as u16, console.cols as u16)
+static TTY_WINSIZE_OVERRIDE: spin::Mutex<Option<WinSize>> = spin::Mutex::new(None);
+static SERIAL_WINSIZE: spin::Mutex<Option<WinSize>> = spin::Mutex::new(None);
+static LAST_SERIAL_PROBE_TICK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static SERIAL_PROBE_ACTIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn is_serial_probe_active() -> bool {
+    SERIAL_PROBE_ACTIVE.load(Ordering::Acquire)
+}
+
+struct SerialEscFilter {
+    buf: [u8; 24],
+    len: usize,
+    start_tick: u64,
+}
+
+impl SerialEscFilter {
+    const fn new() -> Self {
+        Self {
+            buf: [0; 24],
+            len: 0,
+            start_tick: 0,
+        }
+    }
+}
+
+static SERIAL_ESC_FILTER: spin::Mutex<SerialEscFilter> = spin::Mutex::new(SerialEscFilter::new());
+
+fn forward_serial_byte(b: u8) {
+    if crate::task::syscall::fs::handle_tty_isig_byte(b) {
+        return;
+    }
+    let icrnl = crate::task::syscall::fs::is_icrnl_enabled();
+    let byte_to_push = if b == b'\r' && icrnl { b'\n' } else { b };
+    crate::fs::handle::push_stdin_byte(byte_to_push);
+}
+
+fn parse_xtwinops(buf: &[u8]) -> Option<(u16, u16)> {
+    // Формат: ESC [ 8 ; <rows> ; <cols> t
+    if !buf.starts_with(b"\x1b[8;") || !buf.ends_with(b"t") {
+        return None;
+    }
+    let body = core::str::from_utf8(&buf[4..buf.len() - 1]).ok()?;
+    let (rows_s, cols_s) = body.split_once(';')?;
+    let rows: u16 = rows_s.parse().ok()?;
+    let cols: u16 = cols_s.parse().ok()?;
+    if rows >= 10 && cols >= 20 && rows < 1000 && cols < 1000 {
+        Some((rows, cols))
     } else {
-        (25, 80)
+        None
+    }
+}
+
+fn is_valid_xtwinops_prefix(buf: &[u8]) -> bool {
+    match buf.len() {
+        1 => buf[0] == 0x1b,
+        2 => buf[1] == b'[',
+        3 => buf[2] == b'8',
+        4 => buf[3] == b';',
+        _ => {
+            let last = buf[buf.len() - 1];
+            last.is_ascii_digit() || last == b';' || last == b't'
+        }
+    }
+}
+
+/// Фильтрует входящие байты COM1, перехватывая XTWINOPS (\x1b[8;rows;colst) для обновления размера окна и SIGWINCH.
+pub fn push_serial_rx_byte(b: u8) {
+    let mut flush_buf = [0u8; 24];
+    let mut flush_len = 0usize;
+    let mut new_winsize: Option<(u16, u16)> = None;
+
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut f = SERIAL_ESC_FILTER.lock();
+        if f.len == 0 {
+            if b == 0x1b {
+                f.buf[0] = b;
+                f.len = 1;
+                f.start_tick = crate::arch::x86_64::timer::ticks();
+                return;
+            }
+            flush_buf[0] = b;
+            flush_len = 1;
+            return;
+        }
+
+        let idx = f.len;
+        if idx < f.buf.len() {
+            f.buf[idx] = b;
+            f.len += 1;
+        }
+
+        let cur = &f.buf[..f.len];
+        if b == b't' {
+            if let Some((r, c)) = parse_xtwinops(cur) {
+                new_winsize = Some((r, c));
+                f.len = 0;
+                return;
+            }
+        }
+
+        if !is_valid_xtwinops_prefix(cur) || f.len >= f.buf.len() {
+            flush_len = f.len;
+            flush_buf[..flush_len].copy_from_slice(cur);
+            f.len = 0;
+        }
+    });
+
+    if let Some((rows, cols)) = new_winsize {
+        *SERIAL_WINSIZE.lock() = Some(WinSize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        });
+        crate::task::signal::raise_foreground_signal(crate::task::syscall::signal::SIGWINCH);
+        return;
+    }
+
+    for &byte in &flush_buf[..flush_len] {
+        forward_serial_byte(byte);
+    }
+}
+
+pub fn flush_stale_serial_esc() {
+    let mut flush_buf = [0u8; 24];
+    let mut flush_len = 0usize;
+    let now = crate::arch::x86_64::timer::ticks();
+
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut f = SERIAL_ESC_FILTER.lock();
+        if f.len > 0 && now.saturating_sub(f.start_tick) >= 1 {
+            flush_len = f.len;
+            flush_buf[..flush_len].copy_from_slice(&f.buf[..flush_len]);
+            f.len = 0;
+        }
+    });
+
+    for &byte in &flush_buf[..flush_len] {
+        forward_serial_byte(byte);
+    }
+}
+
+fn parse_dsr_response(buf: &[u8]) -> Option<(u16, u16)> {
+    // Ищем последовательность ESC [ <rows> ; <cols> R
+    let esc_pos = buf.iter().position(|&b| b == 0x1b)?;
+    let rest = &buf[esc_pos + 1..];
+    if rest.first() != Some(&b'[') {
+        return None;
+    }
+    let r_pos = rest.iter().position(|&b| b == b'R')?;
+    let body = core::str::from_utf8(&rest[1..r_pos]).ok()?;
+    let (rows_s, cols_s) = body.split_once(';')?;
+    let rows: u16 = rows_s.parse().ok()?;
+    let cols: u16 = cols_s.parse().ok()?;
+    if rows >= 10 && cols >= 20 && rows < 1000 && cols < 1000 {
+        Some((rows, cols))
+    } else {
+        None
+    }
+}
+
+fn probe_serial_winsize() {
+    if !crate::drivers::serial::is_present() {
+        return;
+    }
+    let now = crate::arch::x86_64::timer::ticks();
+    let last = LAST_SERIAL_PROBE_TICK.load(Ordering::Relaxed);
+    if last != 0 && now.saturating_sub(last) < 200 {
+        return;
+    }
+    if crate::fs::handle::stdin_buffer_len() > 0 || crate::drivers::keyboard::key_queue_len() > 0 {
+        return;
+    }
+    if SERIAL_PROBE_ACTIVE
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    LAST_SERIAL_PROBE_TICK.store(now, Ordering::Relaxed);
+
+    // Запрашиваем размер хост-терминала через ANSI DSR (6n) только по COM1
+    crate::serial_print!("\x1b[s\x1b[999;999H\x1b[6n\x1b[u");
+
+    let mut resp = [0u8; 32];
+    let mut len = 0usize;
+    let deadline = now.saturating_add(5); // до ~50 мс
+
+    while crate::arch::x86_64::timer::ticks() <= deadline {
+        while let Some(b) = crate::drivers::serial::try_receive() {
+            if len < resp.len() {
+                resp[len] = b;
+                len += 1;
+            }
+            if b == b'R' {
+                if let Some((rows, cols)) = parse_dsr_response(&resp[..len]) {
+                    *SERIAL_WINSIZE.lock() = Some(WinSize {
+                        ws_row: rows,
+                        ws_col: cols,
+                        ws_xpixel: 0,
+                        ws_ypixel: 0,
+                    });
+                    SERIAL_PROBE_ACTIVE.store(false, Ordering::Release);
+                    return;
+                }
+            }
+        }
+        x86_64::instructions::interrupts::enable();
+        x86_64::instructions::hlt();
+    }
+
+    // Если пришёл не-DSR ввод, не теряем его
+    for &b in &resp[..len] {
+        crate::fs::handle::push_stdin_byte(b);
+    }
+    SERIAL_PROBE_ACTIVE.store(false, Ordering::Release);
+}
+
+fn current_winsize() -> WinSize {
+    if let Some(ws) = *TTY_WINSIZE_OVERRIDE.lock() {
+        if ws.ws_row > 0 && ws.ws_col > 0 {
+            return ws;
+        }
+    }
+    probe_serial_winsize();
+    if let Some(ws) = *SERIAL_WINSIZE.lock() {
+        if ws.ws_row > 0 && ws.ws_col > 0 {
+            return ws;
+        }
+    }
+    let (rows, cols, xpx, ypx) = if let Some(console) = crate::drivers::display::CONSOLE.lock().as_ref() {
+        let r = console.rows as u16;
+        let c = console.cols as u16;
+        (
+            r,
+            c,
+            c.saturating_mul(crate::drivers::font::FONT_WIDTH as u16),
+            r.saturating_mul(crate::drivers::font::FONT_HEIGHT as u16),
+        )
+    } else {
+        (25, 80, 0, 0)
     };
     WinSize {
         ws_row: rows,
         ws_col: cols,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
+        ws_xpixel: xpx,
+        ws_ypixel: ypx,
     }
 }
 
+fn set_winsize(ws: WinSize) {
+    if ws.ws_row == 0 || ws.ws_col == 0 {
+        return;
+    }
+    *TTY_WINSIZE_OVERRIDE.lock() = Some(ws);
+    crate::task::signal::raise_foreground_signal(crate::task::syscall::signal::SIGWINCH);
+}
+
 /// Обрабатывает типовые ioctl-запросы терминала (разрешение экрана, termios, группы процессов)
-fn handle_terminal_ioctl(cmd: u32, arg: u64) -> Result<u64, i64> {
+pub(crate) fn handle_terminal_ioctl(cmd: u32, arg: u64) -> Result<u64, i64> {
     if let Some(res) = crate::task::syscall::fs::handle_termios_ioctl(cmd as u64, arg) {
         return res;
     }
@@ -51,13 +295,20 @@ fn handle_terminal_ioctl(cmd: u32, arg: u64) -> Result<u64, i64> {
             if !crate::task::syscall::validate_user_buffer(arg, 8) {
                 return Err(-14);
             }
-            let ws = get_display_winsize();
+            let ws = current_winsize();
             unsafe {
                 core::ptr::write_unaligned(arg as *mut WinSize, ws);
             }
             Ok(0)
         }
-        TIOCSWINSZ => Ok(0),
+        TIOCSWINSZ => {
+            if !crate::task::syscall::validate_user_buffer(arg, 8) {
+                return Err(-14);
+            }
+            let ws = unsafe { core::ptr::read_unaligned(arg as *const WinSize) };
+            set_winsize(ws);
+            Ok(0)
+        }
         TIOCGPGRP => {
             if !crate::task::syscall::validate_user_buffer(arg, 4) {
                 return Err(-14);
@@ -208,23 +459,7 @@ impl CharDeviceOp for TtySDev {
     }
 
     fn ioctl(&self, cmd: u32, arg: u64) -> Result<u64, i64> {
-        match cmd {
-            TIOCGWINSZ => {
-                if !crate::task::syscall::validate_user_buffer(arg, 8) {
-                    return Err(-14);
-                }
-                let ws = WinSize {
-                    ws_row: 25,
-                    ws_col: 80,
-                    ws_xpixel: 0,
-                    ws_ypixel: 0,
-                };
-                unsafe { core::ptr::write_unaligned(arg as *mut WinSize, ws); }
-                Ok(0)
-            }
-            TCGETS | TCSETS | TCSETSW | TCSETSF => Ok(0),
-            _ => Err(-25),
-        }
+        handle_terminal_ioctl(cmd, arg)
     }
 }
 
