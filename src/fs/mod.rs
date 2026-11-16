@@ -128,12 +128,32 @@ pub fn init(initramfs_data: Option<&[u8]>) {
         );
     }
 
-    // Сохраняем системный язык в /etc/locale для пользовательских программ
-    let lang_str = match crate::i18n::current_language() {
-        crate::i18n::Language::Russian => "LANG=ru\n",
-        crate::i18n::Language::English => "LANG=en\n",
+    // Сохраняем системный язык в /etc/locale и /etc/environment для пользовательских программ
+    let (lang_str, lc_all_str) = match crate::i18n::current_language() {
+        crate::i18n::Language::Russian => ("LANG=ru_RU.UTF-8\n", "LC_ALL=ru_RU.UTF-8\n"),
+        crate::i18n::Language::English => ("LANG=en_US.UTF-8\n", "LC_ALL=en_US.UTF-8\n"),
     };
-    let _ = write_file("/etc/locale", lang_str.as_bytes());
+    let mut locale_buf = alloc::string::String::from(lang_str);
+    locale_buf.push_str(lc_all_str);
+    let _ = write_file("/etc/locale", locale_buf.as_bytes());
+
+    let mut env_buf = read_file("/etc/environment")
+        .ok()
+        .and_then(|b| alloc::string::String::from_utf8(b).ok())
+        .unwrap_or_default();
+    if !env_buf.contains("LANG=") {
+        if !env_buf.is_empty() && !env_buf.ends_with('\n') {
+            env_buf.push('\n');
+        }
+        env_buf.push_str(lang_str);
+    }
+    if !env_buf.contains("LC_ALL=") {
+        if !env_buf.is_empty() && !env_buf.ends_with('\n') {
+            env_buf.push('\n');
+        }
+        env_buf.push_str(lc_all_str);
+    }
+    let _ = write_file("/etc/environment", env_buf.as_bytes());
 
     // Инициализируем блочные устройства (/dev/vda, /dev/vda1, ...)
     block::init();
