@@ -19,17 +19,20 @@ impl UserAddressSpace {
     ///    чтобы код ядра, HHDM, стек и куча оставались валидными при системных вызовах и IRQ.
     pub fn new() -> Result<Self, &'static str> {
         let pml4_frame = super::allocate_frame().ok_or("Не удалось выделить фрейм для PML4")?;
+        let pml4_phys = pml4_frame.start_address().as_u64();
 
         let hhdm = super::hhdm_offset();
-        let new_pml4_virt = VirtAddr::new(hhdm + pml4_frame.start_address().as_u64());
+        let new_pml4_virt = VirtAddr::new(hhdm + pml4_phys);
         let new_table: &mut PageTable = unsafe { &mut *new_pml4_virt.as_mut_ptr() };
 
         // Обнуляем все 512 записей новой таблицы страниц
         new_table.zero();
 
-        // Получаем доступ к текущей таблице страниц ядра через HHDM
-        let (kernel_pml4_frame, _) = Cr3::read();
-        let kernel_pml4_virt = VirtAddr::new(hhdm + kernel_pml4_frame.start_address().as_u64());
+        // Получаем доступ к эталонной таблице страниц ядра через HHDM.
+        // Используем базовый kernel_cr3, а не Cr3::read(), чтобы исключить чтение из временных
+        // или освобождаемых таблиц страниц Ring 3 пользовательских процессов.
+        let kernel_pml4_phys = super::kernel_cr3() & !0xFFF;
+        let kernel_pml4_virt = VirtAddr::new(hhdm + kernel_pml4_phys);
         let kernel_table: &PageTable = unsafe { &*kernel_pml4_virt.as_ptr() };
 
         // Старшая половина (Higher-Half, индексы 256..511) копируется из ядра.

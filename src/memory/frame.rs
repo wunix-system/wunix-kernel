@@ -26,7 +26,15 @@ impl LimineFrameAllocator {
     }
 
     /// Возвращает физический фрейм обратно в свободный список аллокатора.
+    /// Защищает от double-free, предотвращая порчу каталога страниц и коллизии физической памяти.
     pub fn deallocate_frame(&mut self, frame: PhysFrame<Size4KiB>) {
+        if self.free_list.contains(&frame) {
+            crate::serial_println!(
+                "[mmu] ПРЕДУПРЕЖДЕНИЕ: обнаружено повторное освобождение фрейма {:#x}, пропущено!",
+                frame.start_address().as_u64()
+            );
+            return;
+        }
         self.free_list.push(frame);
     }
 
