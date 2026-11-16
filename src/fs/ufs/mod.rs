@@ -640,6 +640,17 @@ impl Inode for UfsInode {
             return Err(VfsError::NotADirectory);
         }
 
+        let total_blocks = ((dinode.size as usize) + 4095) / 4096;
+        let mut temp_block = [0u8; 4096];
+        for b in 0..total_blocks {
+            if let Some(sec) = dinode.get_block_sec(b, &self.inner) {
+                self.inner.read_sectors(sec, &mut temp_block)?;
+                if find_entry(&temp_block, name).is_some() {
+                    return Err(VfsError::AlreadyExists);
+                }
+            }
+        }
+
         let new_ino = self.inner.allocate_inode()?;
         let (perms, uid, gid) = match itype {
             InodeType::Directory => (0o755, 0, 0),
