@@ -310,12 +310,12 @@ pub fn process_exists(tgid: u64) -> bool {
 /// Проверяет, есть ли активные дочерние процессы, подходящие под фильтр wait4(pid).
 pub fn has_child_process(parent_tgid: u64, target_pid: i64, caller_pgid: u64) -> bool {
     let matches = |t: &super::thread::Thread| -> bool {
-        if t.tgid == parent_tgid {
+        if t.tgid == parent_tgid || t.wait_tgid == parent_tgid {
             return false;
         }
         let is_child = t.parent_tgid == parent_tgid || parent_tgid == 1;
         if target_pid > 0 {
-            t.tgid == target_pid as u64 && is_child
+            (t.tgid == target_pid as u64 || t.wait_tgid == target_pid as u64) && is_child
         } else if target_pid == -1 {
             is_child
         } else if target_pid == 0 {
@@ -357,6 +357,17 @@ pub fn set_current_thread_fork_child(val: bool) {
             }
         }
     });
+}
+
+pub fn current_thread_cr3() -> u64 {
+    interrupts::without_interrupts(|| {
+        SCHEDULER
+            .lock()
+            .as_ref()
+            .and_then(|s| s.current.as_ref())
+            .map(|t| t.cr3)
+            .unwrap_or(0)
+    })
 }
 
 pub fn set_current_thread_cr3(cr3: u64) {

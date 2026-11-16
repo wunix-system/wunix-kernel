@@ -14,7 +14,7 @@ pub mod win_syscall;
 
 pub use abi::AbiPersonality;
 pub use scheduler::{
-    active_process_count, add_thread, block_current, check_timeouts, current_thread_abi, current_thread_egid, current_thread_euid,
+    active_process_count, add_thread, block_current, check_timeouts, current_thread_abi, current_thread_cr3, current_thread_egid, current_thread_euid,
     current_thread_exe_path, current_thread_gid, current_thread_id, current_thread_kernel_stack_top, current_thread_name,
     current_thread_owns_cr3, current_thread_parent_tgid, current_thread_pgid, current_thread_sgid, current_thread_suid,
     current_thread_tgid, current_thread_uid, current_thread_umask, exit, get_current_fs_base,
