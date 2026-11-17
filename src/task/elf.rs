@@ -295,6 +295,19 @@ pub fn load_elf(elf_bytes: &[u8]) -> Result<(UserAddressSpace, ElfLoadInfo), Elf
     let mut entry_point = VirtAddr::new(prog_entry);
     let mut at_base = 0u64;
 
+    // Для позиционно-независимых исполняемых файлов (ET_DYN / PIE) без внешнего динамического
+    // компоновщика (интерпретатора ld.so) выполняем базовую релокацию R_X86_64_RELATIVE в таблицах GOT/данных.
+    if interp_path.is_none() && load_base != 0 {
+        apply_static_relocations(
+            elf_bytes,
+            load_base,
+            ph_offset,
+            ph_num,
+            ph_entry_size,
+            &mut user_space,
+        )?;
+    }
+
     if let Some(path) = interp_path {
         let interp_bytes = crate::fs::read_file(&path)
             .or_else(|_| {
@@ -512,6 +525,118 @@ pub fn setup_user_stack(
     }
 
     Ok((final_sp, argv_addr))
+}
+
+fn apply_static_relocations(
+    elf_bytes: &[u8],
+    load_base: u64,
+    ph_offset: usize,
+    ph_num: usize,
+    ph_entry_size: usize,
+    user_space: &mut UserAddressSpace,
+) -> Result<(), ElfError> {
+    if load_base == 0 {
+        return Ok(());
+    }
+
+    let mut dyn_offset = 0usize;
+    let mut dyn_size = 0usize;
+
+    for i in 0..ph_num {
+        let entry_offset = ph_offset + i * ph_entry_size;
+        if entry_offset + core::mem::size_of::<Elf64ProgramHeader>() > elf_bytes.len() {
+            return Err(ElfError::InvalidProgramHeaders);
+        }
+        let ph = unsafe {
+            core::ptr::read_unaligned(
+                elf_bytes.as_ptr().add(entry_offset) as *const Elf64ProgramHeader,
+            )
+        };
+        if ph.p_type == PT_DYNAMIC {
+            dyn_offset = ph.p_offset as usize;
+            dyn_size = ph.p_filesz as usize;
+            break;
+        }
+    }
+
+    if dyn_offset == 0 || dyn_size == 0 || dyn_offset + dyn_size > elf_bytes.len() {
+        return Ok(());
+    }
+
+    const DT_NULL: i64 = 0;
+    const DT_RELA: i64 = 7;
+    const DT_RELASZ: i64 = 8;
+    const DT_RELAENT: i64 = 9;
+    const R_X86_64_RELATIVE: u32 = 8;
+
+    let mut rela_vaddr = 0u64;
+    let mut rela_size = 0u64;
+    let mut rela_ent = 24u64;
+
+    let num_dyn = dyn_size / 16;
+    for i in 0..num_dyn {
+        let off = dyn_offset + i * 16;
+        let d_tag = unsafe { core::ptr::read_unaligned(elf_bytes.as_ptr().add(off) as *const i64) };
+        let d_val = unsafe { core::ptr::read_unaligned(elf_bytes.as_ptr().add(off + 8) as *const u64) };
+
+        match d_tag {
+            DT_NULL => break,
+            DT_RELA => rela_vaddr = d_val,
+            DT_RELASZ => rela_size = d_val,
+            DT_RELAENT => {
+                if d_val > 0 {
+                    rela_ent = d_val;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if rela_vaddr == 0 || rela_size == 0 || rela_ent < 24 {
+        return Ok(());
+    }
+
+    // Преобразуем виртуальный адрес rela_vaddr в файловое смещение через PT_LOAD
+    let mut rela_file_offset = None;
+    for i in 0..ph_num {
+        let entry_offset = ph_offset + i * ph_entry_size;
+        let ph = unsafe {
+            core::ptr::read_unaligned(
+                elf_bytes.as_ptr().add(entry_offset) as *const Elf64ProgramHeader,
+            )
+        };
+        if ph.p_type == PT_LOAD && rela_vaddr >= ph.p_vaddr && rela_vaddr < ph.p_vaddr + ph.p_filesz {
+            rela_file_offset = Some((ph.p_offset + (rela_vaddr - ph.p_vaddr)) as usize);
+            break;
+        }
+    }
+
+    let Some(file_off) = rela_file_offset else {
+        return Ok(());
+    };
+
+    if file_off + (rela_size as usize) > elf_bytes.len() {
+        return Err(ElfError::InvalidProgramHeaders);
+    }
+
+    let count = (rela_size / rela_ent) as usize;
+    for i in 0..count {
+        let ent_off = file_off + i * (rela_ent as usize);
+        let r_offset = unsafe { core::ptr::read_unaligned(elf_bytes.as_ptr().add(ent_off) as *const u64) };
+        let r_info = unsafe { core::ptr::read_unaligned(elf_bytes.as_ptr().add(ent_off + 8) as *const u64) };
+        let r_addend = unsafe { core::ptr::read_unaligned(elf_bytes.as_ptr().add(ent_off + 16) as *const i64) };
+
+        let r_type = (r_info & 0xffff_ffff) as u32;
+        if r_type == R_X86_64_RELATIVE {
+            let target_vaddr = load_base + r_offset;
+            let val = (load_base as i64 + r_addend) as u64;
+            user_space
+                .write_user_bytes(target_vaddr, &val.to_ne_bytes())
+                .map_err(|_| ElfError::MappingFailed)?;
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
