@@ -251,29 +251,33 @@ fn current_winsize() -> WinSize {
             return ws;
         }
     }
+    // Если активна графическая консоль DisplayConsole (Limine Framebuffer),
+    // именно её физическое разрешение экрана (rows, cols) является истинным размером дисплея.
+    // Серийный порт COM1 (SERIAL_WINSIZE) сообщает размеры терминала хоста (часто 140+ колонок),
+    // из-за чего TUI-интерфейсы на экране QEMU разъезжаются и переносят строки.
+    if let Some(console) = crate::drivers::display::CONSOLE.lock().as_ref() {
+        let r = console.rows as u16;
+        let c = console.cols as u16;
+        if r > 0 && c > 0 {
+            return WinSize {
+                ws_row: r,
+                ws_col: c,
+                ws_xpixel: c.saturating_mul(crate::drivers::font::FONT_WIDTH as u16),
+                ws_ypixel: r.saturating_mul(crate::drivers::font::FONT_HEIGHT as u16),
+            };
+        }
+    }
     probe_serial_winsize();
     if let Some(ws) = *SERIAL_WINSIZE.lock() {
         if ws.ws_row > 0 && ws.ws_col > 0 {
             return ws;
         }
     }
-    let (rows, cols, xpx, ypx) = if let Some(console) = crate::drivers::display::CONSOLE.lock().as_ref() {
-        let r = console.rows as u16;
-        let c = console.cols as u16;
-        (
-            r,
-            c,
-            c.saturating_mul(crate::drivers::font::FONT_WIDTH as u16),
-            r.saturating_mul(crate::drivers::font::FONT_HEIGHT as u16),
-        )
-    } else {
-        (25, 80, 0, 0)
-    };
     WinSize {
-        ws_row: rows,
-        ws_col: cols,
-        ws_xpixel: xpx,
-        ws_ypixel: ypx,
+        ws_row: 25,
+        ws_col: 80,
+        ws_xpixel: 640,
+        ws_ypixel: 400,
     }
 }
 
@@ -322,6 +326,7 @@ pub(crate) fn handle_terminal_ioctl(cmd: u32, arg: u64) -> Result<u64, i64> {
             if !crate::task::syscall::validate_user_buffer(arg, 4) {
                 return Err(-14);
             }
+            let _ = crate::fs::handle::pump_stdin();
             let count = (crate::fs::handle::stdin_buffer_len() + crate::drivers::keyboard::key_queue_len()) as i32;
             unsafe { core::ptr::write_unaligned(arg as *mut i32, count); }
             Ok(0)
