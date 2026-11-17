@@ -1,5 +1,5 @@
 use core::sync::atomic::{AtomicU64, Ordering};
-use super::{EINTR, EINVAL, EPERM, ESRCH};
+use super::{validate_user_buffer, EFAULT, EINTR, EINVAL, EPERM, ESRCH, Timeval};
 
 pub const SIGHUP: u64 = 1;
 pub const SIGINT: u64 = 2;
@@ -111,4 +111,71 @@ pub fn sys_alarm(seconds: u64) -> u64 {
     }
 
     rem
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Itimerval {
+    pub it_interval: Timeval,
+    pub it_value: Timeval,
+}
+
+pub fn sys_getitimer(which: u64, curr_value_ptr: u64) -> u64 {
+    if which > 2 {
+        return (-(EINVAL as i64)) as u64;
+    }
+    if curr_value_ptr != 0 {
+        if !validate_user_buffer(curr_value_ptr, core::mem::size_of::<Itimerval>() as u64) {
+            return (-(EFAULT as i64)) as u64;
+        }
+        let now = crate::arch::x86_64::timer::ticks();
+        let dl = ALARM_DEADLINE.load(Ordering::Relaxed);
+        let (sec, usec) = if which == 0 && dl > now {
+            let rem_ticks = dl - now;
+            let sec = (rem_ticks / 100) as i64;
+            let usec = ((rem_ticks % 100) * 10_000) as i64;
+            (sec, usec)
+        } else {
+            (0, 0)
+        };
+        let it = Itimerval {
+            it_interval: Timeval { tv_sec: 0, tv_usec: 0 },
+            it_value: Timeval { tv_sec: sec, tv_usec: usec },
+        };
+        unsafe {
+            core::ptr::write_unaligned(curr_value_ptr as *mut Itimerval, it);
+        }
+    }
+    0
+}
+
+pub fn sys_setitimer(which: u64, new_value_ptr: u64, old_value_ptr: u64) -> u64 {
+    if which > 2 {
+        return (-(EINVAL as i64)) as u64;
+    }
+    if old_value_ptr != 0 {
+        let ret = sys_getitimer(which, old_value_ptr);
+        if ret != 0 {
+            return ret;
+        }
+    }
+    if new_value_ptr != 0 {
+        if !validate_user_buffer(new_value_ptr, core::mem::size_of::<Itimerval>() as u64) {
+            return (-(EFAULT as i64)) as u64;
+        }
+        let new_it: Itimerval = unsafe { core::ptr::read_unaligned(new_value_ptr as *const Itimerval) };
+        if which == 0 {
+            let now = crate::arch::x86_64::timer::ticks();
+            if new_it.it_value.tv_sec == 0 && new_it.it_value.tv_usec == 0 {
+                ALARM_DEADLINE.store(0, Ordering::Relaxed);
+            } else {
+                let sec_ticks = (new_it.it_value.tv_sec.max(0) as u64).saturating_mul(100);
+                let usec_ticks = (new_it.it_value.tv_usec.max(0) as u64) / 10_000;
+                let delta = sec_ticks.saturating_add(usec_ticks).max(1);
+                let new_dl = now.saturating_add(delta);
+                ALARM_DEADLINE.store(new_dl, Ordering::Relaxed);
+            }
+        }
+    }
+    0
 }
