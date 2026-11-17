@@ -232,8 +232,9 @@ pub extern "C" fn _start() -> ! {
     klog!();
 
     let init_binary = wunix_kernel::fs::read_file("/bin/init")
+        .or_else(|_| wunix_kernel::fs::read_file("/sbin/init"))
         .or_else(|_| wunix_kernel::fs::read_file("/bin/wsh"))
-        .expect("FATAL: Failed to find /bin/init or /bin/wsh in VFS");
+        .expect("FATAL: Failed to find /bin/init, /sbin/init or /bin/wsh in VFS");
 
     let (mut user_space, elf_info) = wunix_kernel::task::elf::load_elf(&init_binary)
         .expect("FATAL: Failed to load ELF binary for PID 1");
