@@ -204,11 +204,21 @@ impl VirtioBlock {
 
         // Ожидаем завершения транзакции устройством
         let mut spins = 0u64;
+        let start_tick = crate::arch::x86_64::timer::ticks();
         while !self.queue.can_pop() {
-            x86_64::instructions::nop();
+            core::hint::spin_loop();
             spins += 1;
-            if spins > 10_000_000 {
-                return Err(VirtioError::IoError);
+            if spins % 1_000_000 == 0 {
+                // Если прерывания активны — таймаут 10 секунд (1000 тиков по 10 мс)
+                if crate::arch::x86_64::timer::ticks().saturating_sub(start_tick) > 1000 {
+                    crate::serial_println!("VirtioBlock: do_io TIMEOUT (10s) req_type={}, start_sec={}", req_type, start_sector);
+                    return Err(VirtioError::IoError);
+                }
+                // Фоллбек при выключенных прерываниях (~2-3 секунды на 3+ ГГц CPU)
+                if spins > 2_000_000_000 {
+                    crate::serial_println!("VirtioBlock: do_io TIMEOUT (2B spins) req_type={}, start_sec={}", req_type, start_sector);
+                    return Err(VirtioError::IoError);
+                }
             }
         }
 

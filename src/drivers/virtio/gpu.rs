@@ -243,11 +243,17 @@ impl VirtioGpu {
         self.transport.notify_queue(0);
 
         let mut spins = 0u64;
+        let start_tick = crate::arch::x86_64::timer::ticks();
         while !self.ctrl_queue.can_pop() {
-            x86_64::instructions::nop();
+            core::hint::spin_loop();
             spins += 1;
-            if spins > 10_000_000 {
-                return Err(VirtioError::IoError);
+            if spins % 1_000_000 == 0 {
+                if crate::arch::x86_64::timer::ticks().saturating_sub(start_tick) > 500 {
+                    return Err(VirtioError::IoError);
+                }
+                if spins > 1_000_000_000 {
+                    return Err(VirtioError::IoError);
+                }
             }
         }
 
