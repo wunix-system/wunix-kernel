@@ -357,6 +357,19 @@ impl Inode for Ext4Inode {
         }
 
         let block_size = self.inner.sb.lock().block_size as usize;
+        let mut temp_block = vec![0u8; block_size];
+        let total_blocks = ((dinode.size as usize) + block_size - 1) / block_size;
+
+        // Предотвращаем дублирование записей в каталоге при повторном создании
+        for b in 0..total_blocks {
+            if let Some(phys) = lookup_logical_block(&dinode.block, b as u32)? {
+                self.inner.read_block(phys, &mut temp_block)?;
+                if find_entry(&temp_block, name).is_some() {
+                    return Err(VfsError::AlreadyExists);
+                }
+            }
+        }
+
         let new_ino = self.inner.allocate_inode(itype)?;
 
         let (perms, uid, gid) = match itype {

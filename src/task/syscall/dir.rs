@@ -42,6 +42,10 @@ pub fn sys_mkdir(path_ptr: u64, _mode: u64) -> u64 {
         return (-(EACCES as i64)) as u64;
     }
 
+    if parent.lookup(leaf).is_ok() {
+        return (-(EEXIST as i64)) as u64;
+    }
+
     match parent.create(leaf, InodeType::Directory) {
         Ok(dir_node) => {
             let umask = crate::task::current_thread_umask() as u16;
