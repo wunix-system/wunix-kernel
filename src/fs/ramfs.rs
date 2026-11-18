@@ -282,6 +282,25 @@ impl Inode for RamInode {
         self.insert_child(name, node)
     }
 
+    fn rename(
+        &self,
+        old_name: &str,
+        new_parent: &Arc<dyn Inode>,
+        new_name: &str,
+    ) -> Result<(), VfsError> {
+        let node = self.lookup(old_name)?;
+        if new_parent.lookup(new_name).is_ok() {
+            let _ = new_parent.unlink(new_name);
+        }
+        new_parent.insert_child(new_name, node)?;
+        let _ = self.unlink(old_name);
+        Ok(())
+    }
+
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        Some(self)
+    }
+
     fn chmod(&self, mode: u16) -> Result<(), VfsError> {
         self.permissions.store(mode, Ordering::Relaxed);
         Ok(())

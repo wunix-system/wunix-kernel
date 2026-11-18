@@ -410,16 +410,15 @@ pub fn sys_renameat2(olddirfd: i64, oldpath_ptr: u64, newdirfd: i64, newpath_ptr
         return (-(EXDEV as i64)) as u64;
     }
 
-    // Если ФС (например, Ext4/FAT32/UFS) не реализует insert_child на уровне VFS,
-    // возвращаем EXDEV до изменения целевого узла — mv выполнит перенос через copy + unlink.
-    match new_parent.insert_child(new_leaf, old_node) {
-        Ok(()) => {
-            let _ = old_parent.unlink(old_leaf);
-            0
-        }
-        Err(VfsError::NotADirectory) | Err(VfsError::NotSupported) => (-(EXDEV as i64)) as u64,
+    match old_parent.rename(old_leaf, &new_parent, new_leaf) {
+        Ok(()) => 0,
+        Err(VfsError::NotFound) => (-(ENOENT as i64)) as u64,
+        Err(VfsError::AlreadyExists) => (-(EEXIST as i64)) as u64,
+        Err(VfsError::IsADirectory) => (-(EISDIR as i64)) as u64,
+        Err(VfsError::NotADirectory) => (-(ENOTDIR as i64)) as u64,
         Err(VfsError::PermissionDenied) => (-(EACCES as i64)) as u64,
-        Err(_) => (-(EINVAL as i64)) as u64,
+        Err(VfsError::NotSupported) => (-(EXDEV as i64)) as u64,
+        Err(_) => (-(super::EIO as i64)) as u64,
     }
 }
 

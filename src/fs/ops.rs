@@ -324,6 +324,30 @@ pub fn unlink(path: &str) -> Result<(), VfsError> {
     parent.unlink(leaf)
 }
 
+/// Переименовывает или перемещает файл/каталог в пределах одной файловой системы
+pub fn rename(old_path: &str, new_path: &str) -> Result<(), VfsError> {
+    let old_norm = path::normalize_path(&path::translate_path(old_path));
+    let new_norm = path::normalize_path(&path::translate_path(new_path));
+    if old_norm == new_norm {
+        return Ok(());
+    }
+
+    let (old_parent_path, old_leaf) = match old_norm.rfind('/') {
+        Some(0) => ("/", &old_norm[1..]),
+        Some(idx) => (&old_norm[..idx], &old_norm[idx + 1..]),
+        None => ("/", old_norm.as_str()),
+    };
+    let (new_parent_path, new_leaf) = match new_norm.rfind('/') {
+        Some(0) => ("/", &new_norm[1..]),
+        Some(idx) => (&new_norm[..idx], &new_norm[idx + 1..]),
+        None => ("/", new_norm.as_str()),
+    };
+
+    let old_parent = resolve_path(old_parent_path, true)?;
+    let new_parent = resolve_path(new_parent_path, true)?;
+    old_parent.rename(old_leaf, &new_parent, new_leaf)
+}
+
 /// Проверяет права текущего потока ядра на доступ к узлу VFS по стандартам POSIX.
 /// Root (EUID == 0) всегда имеет права на чтение и запись, а на исполнение —
 /// если хотя бы один бит 'x' (владелец, группа или остальные) выставлен в режиме файла.

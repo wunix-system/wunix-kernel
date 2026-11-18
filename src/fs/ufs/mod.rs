@@ -317,6 +317,59 @@ pub struct UfsInode {
     dinode: Mutex<Ufs2Dinode>,
 }
 
+impl UfsInode {
+    fn insert_child_entry(&self, ino: u32, name: &str, itype: InodeType) -> Result<(), VfsError> {
+        let mut dinode = self.dinode.lock();
+        let mut inserted = false;
+        let mut temp_block = [0u8; 4096];
+        let total_blocks = ((dinode.size as usize) + 4095) / 4096;
+
+        for b in 0..total_blocks {
+            if let Some(sec) = dinode.get_block_sec(b, &self.inner) {
+                self.inner.read_sectors(sec, &mut temp_block)?;
+                if insert_entry(&mut temp_block, ino, name, itype).is_ok() {
+                    self.inner.write_sectors(sec, &temp_block)?;
+                    inserted = true;
+                    break;
+                }
+            }
+        }
+
+        if !inserted {
+            let new_sec = self.inner.allocate_block()? as u64;
+            let logical_idx = total_blocks;
+            if logical_idx < UFS_NDADDR {
+                dinode.db[logical_idx] = new_sec as i64;
+            } else if logical_idx < UFS_NDADDR + 512 {
+                let ib_sec = if dinode.ib[0] != 0 {
+                    dinode.ib[0] as u64
+                } else {
+                    let new_ib = self.inner.allocate_block()? as u64;
+                    dinode.ib[0] = new_ib as i64;
+                    dinode.bytes += 4096;
+                    self.inner.write_sectors(new_ib, &ZERO_BLOCK)?;
+                    new_ib
+                };
+                let mut ib_buf = [0u8; 4096];
+                self.inner.read_sectors(ib_sec, &mut ib_buf)?;
+                let off = (logical_idx - UFS_NDADDR) * 8;
+                ib_buf[off..off + 8].copy_from_slice(&(new_sec as i64).to_le_bytes());
+                self.inner.write_sectors(ib_sec, &ib_buf)?;
+            }
+            dinode.size += 4096;
+            dinode.bytes += 4096;
+
+            dir::init_empty_dir_block(&mut temp_block);
+            insert_entry(&mut temp_block, ino, name, itype)?;
+            self.inner.write_sectors(new_sec, &temp_block)?;
+            self.inner.write_inode(self.ino, &dinode)?;
+        }
+
+        self.inner.flush_bmap_cache()?;
+        Ok(())
+    }
+}
+
 struct CachedBlock {
     sec: u64,
     data: [u8; 4096],
@@ -635,18 +688,20 @@ impl Inode for UfsInode {
     }
 
     fn create(&self, name: &str, itype: InodeType) -> Result<Arc<dyn Inode>, VfsError> {
-        let mut dinode = self.dinode.lock();
-        if dinode.inode_type() != InodeType::Directory {
-            return Err(VfsError::NotADirectory);
-        }
+        {
+            let dinode = self.dinode.lock();
+            if dinode.inode_type() != InodeType::Directory {
+                return Err(VfsError::NotADirectory);
+            }
 
-        let total_blocks = ((dinode.size as usize) + 4095) / 4096;
-        let mut temp_block = [0u8; 4096];
-        for b in 0..total_blocks {
-            if let Some(sec) = dinode.get_block_sec(b, &self.inner) {
-                self.inner.read_sectors(sec, &mut temp_block)?;
-                if find_entry(&temp_block, name).is_some() {
-                    return Err(VfsError::AlreadyExists);
+            let total_blocks = ((dinode.size as usize) + 4095) / 4096;
+            let mut temp_block = [0u8; 4096];
+            for b in 0..total_blocks {
+                if let Some(sec) = dinode.get_block_sec(b, &self.inner) {
+                    self.inner.read_sectors(sec, &mut temp_block)?;
+                    if find_entry(&temp_block, name).is_some() {
+                        return Err(VfsError::AlreadyExists);
+                    }
                 }
             }
         }
@@ -671,54 +726,7 @@ impl Inode for UfsInode {
 
         self.inner.write_inode(new_ino, &new_dinode)?;
 
-        // Вставляем запись в родительский каталог
-        let mut inserted = false;
-        let mut temp_block = [0u8; 4096];
-        let total_blocks = ((dinode.size as usize) + 4095) / 4096;
-
-        for b in 0..total_blocks {
-            if let Some(sec) = dinode.get_block_sec(b, &self.inner) {
-                self.inner.read_sectors(sec, &mut temp_block)?;
-                if insert_entry(&mut temp_block, new_ino, name, itype).is_ok() {
-                    self.inner.write_sectors(sec, &temp_block)?;
-                    inserted = true;
-                    break;
-                }
-            }
-        }
-
-        if !inserted {
-            // Выделяем новый блок под каталог
-            let new_sec = self.inner.allocate_block()? as u64;
-            let logical_idx = total_blocks;
-            if logical_idx < UFS_NDADDR {
-                dinode.db[logical_idx] = new_sec as i64;
-            } else if logical_idx < UFS_NDADDR + 512 {
-                let ib_sec = if dinode.ib[0] != 0 {
-                    dinode.ib[0] as u64
-                } else {
-                    let new_ib = self.inner.allocate_block()? as u64;
-                    dinode.ib[0] = new_ib as i64;
-                    dinode.bytes += 4096;
-                    self.inner.write_sectors(new_ib, &ZERO_BLOCK)?;
-                    new_ib
-                };
-                let mut ib_buf = [0u8; 4096];
-                self.inner.read_sectors(ib_sec, &mut ib_buf)?;
-                let off = (logical_idx - UFS_NDADDR) * 8;
-                ib_buf[off..off + 8].copy_from_slice(&(new_sec as i64).to_le_bytes());
-                self.inner.write_sectors(ib_sec, &ib_buf)?;
-            }
-            dinode.size += 4096;
-            dinode.bytes += 4096;
-
-            dir::init_empty_dir_block(&mut temp_block);
-            insert_entry(&mut temp_block, new_ino, name, itype)?;
-            self.inner.write_sectors(new_sec, &temp_block)?;
-            self.inner.write_inode(self.ino, &dinode)?;
-        }
-
-        self.inner.flush_bmap_cache()?;
+        self.insert_child_entry(new_ino, name, itype)?;
 
         Ok(Arc::new(UfsInode {
             inner: self.inner.clone(),
@@ -775,5 +783,52 @@ impl Inode for UfsInode {
         dinode.uid = uid;
         dinode.gid = gid;
         self.inner.write_inode(self.ino, &dinode)
+    }
+
+    fn rename(
+        &self,
+        old_name: &str,
+        new_parent: &Arc<dyn Inode>,
+        new_name: &str,
+    ) -> Result<(), VfsError> {
+        let new_ufs = new_parent
+            .as_any()
+            .and_then(|a| a.downcast_ref::<UfsInode>())
+            .ok_or(VfsError::NotSupported)?;
+
+        let dinode = self.dinode.lock();
+        if dinode.inode_type() != InodeType::Directory {
+            return Err(VfsError::NotADirectory);
+        }
+        let mut temp_block = [0u8; 4096];
+        let total_blocks = ((dinode.size as usize) + 4095) / 4096;
+        let mut target_ino = None;
+        let mut target_itype = InodeType::File;
+
+        for b in 0..total_blocks {
+            if let Some(sec) = dinode.get_block_sec(b, &self.inner) {
+                self.inner.read_sectors(sec, &mut temp_block)?;
+                if let Some(entry) = find_entry(&temp_block, old_name) {
+                    target_ino = Some(entry.ino);
+                    target_itype = entry.itype();
+                    break;
+                }
+            }
+        }
+        drop(dinode);
+
+        let target_ino = target_ino.ok_or(VfsError::NotFound)?;
+
+        if new_ufs.lookup(new_name).is_ok() {
+            let _ = new_ufs.unlink(new_name);
+        }
+
+        self.unlink(old_name)?;
+        new_ufs.insert_child_entry(target_ino, new_name, target_itype)?;
+        Ok(())
+    }
+
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        Some(self)
     }
 }

@@ -803,6 +803,158 @@ impl Fat32DirInode {
 
         Ok(list)
     }
+
+    /// Вспомогательный метод для записи LFN и RawDirEntry в каталог
+    fn write_entry_to_dir(&self, name: &str, mut raw: RawDirEntry) -> Result<usize, VfsError> {
+        let name_utf16: Vec<u16> = name.encode_utf16().collect();
+        let num_lfn = (name_utf16.len() + 12) / 13;
+        let slots_needed = 1 + num_lfn;
+
+        let mut chain = self.inner.get_cluster_chain(self.cluster)?;
+        let clus_size = self.inner.cluster_bytes;
+        let mut clus_buf = alloc::vec![0u8; clus_size];
+
+        let mut target_clus = 0u32;
+        let mut target_clus_idx = 0usize;
+        let mut target_slot_idx = 0usize;
+        let mut found = false;
+
+        'search: for (clus_idx, c) in chain.iter().enumerate() {
+            self.inner.read_cluster(*c, &mut clus_buf)?;
+            let total_entries = clus_size / 32;
+            let mut consecutive = 0;
+            let mut start_idx = 0;
+
+            for i in 0..total_entries {
+                let b = clus_buf[i * 32];
+                if b == 0x00 || b == 0xE5 {
+                    if consecutive == 0 {
+                        start_idx = i;
+                    }
+                    consecutive += 1;
+                    if consecutive == slots_needed {
+                        target_clus = *c;
+                        target_clus_idx = clus_idx;
+                        target_slot_idx = start_idx;
+                        found = true;
+                        break 'search;
+                    }
+                } else {
+                    consecutive = 0;
+                }
+            }
+        }
+
+        if !found {
+            let new_c = self.inner.alloc_cluster()?;
+            let last = *chain.last().unwrap_or(&self.cluster);
+            self.inner.set_fat_entry(last, new_c)?;
+            self.inner.flush_fat_cache()?;
+            target_clus_idx = chain.len();
+            chain.push(new_c);
+            target_clus = new_c;
+            target_slot_idx = 0;
+            clus_buf.fill(0);
+            self.inner.write_cluster(target_clus, &clus_buf)?;
+        }
+
+        let existing_entries = self.read_parsed_entries()?;
+        let (dos_name, dos_ext) = match generate_unique_dos_83(name, &existing_entries) {
+            Some(p) => p,
+            None => return Err(VfsError::InvalidPath),
+        };
+        let checksum = lfn_checksum(&dos_name, &dos_ext);
+
+        let mut cur_slot = target_slot_idx;
+
+        if num_lfn > 0 {
+            for entry_idx in (1..=num_lfn).rev() {
+                let is_last = entry_idx == num_lfn;
+                let seq = (entry_idx as u8) | (if is_last { 0x40 } else { 0x00 });
+                let char_start = (entry_idx - 1) * 13;
+
+                let mut name1 = [0xFFFFu16; 5];
+                let mut name2 = [0xFFFFu16; 6];
+                let mut name3 = [0xFFFFu16; 2];
+
+                for j in 0..13 {
+                    let ch_idx = char_start + j;
+                    let val = if ch_idx < name_utf16.len() {
+                        name_utf16[ch_idx]
+                    } else if ch_idx == name_utf16.len() {
+                        0x0000
+                    } else {
+                        0xFFFF
+                    };
+                    if j < 5 {
+                        name1[j] = val;
+                    } else if j < 11 {
+                        name2[j - 5] = val;
+                    } else {
+                        name3[j - 11] = val;
+                    }
+                }
+
+                let lfn = LfnEntry {
+                    seq,
+                    name1,
+                    attr: FAT32_ATTR_LFN,
+                    lfn_type: 0,
+                    checksum,
+                    name2,
+                    first_cluster: 0,
+                    name3,
+                };
+
+                unsafe {
+                    let ptr = clus_buf.as_mut_ptr().add(cur_slot * 32) as *mut LfnEntry;
+                    core::ptr::write(ptr, lfn);
+                }
+                cur_slot += 1;
+            }
+        }
+
+        raw.name = dos_name;
+        raw.ext = dos_ext;
+        let raw_dir_offset = target_clus_idx * clus_size + cur_slot * 32;
+
+        unsafe {
+            let ptr = clus_buf.as_mut_ptr().add(cur_slot * 32) as *mut RawDirEntry;
+            core::ptr::write(ptr, raw);
+        }
+
+        self.inner.write_cluster(target_clus, &clus_buf)?;
+        Ok(raw_dir_offset)
+    }
+
+    /// Помечает слоты записи как удаленные (0xE5) без освобождения цепочки кластеров
+    fn remove_entry_slots_only(&self, target_entry: &ParsedDirEntry) -> Result<(), VfsError> {
+        let chain = self.inner.get_cluster_chain(self.cluster)?;
+        let clus_size = self.inner.cluster_bytes;
+        let mut clus_buf = alloc::vec![0u8; clus_size];
+
+        let num_lfn = if let Some(ref s) = target_entry.lfn {
+            (s.encode_utf16().count() + 12) / 13
+        } else {
+            0
+        };
+        let slots_to_delete = 1 + num_lfn;
+        let start_offset = target_entry.offset.saturating_sub(num_lfn * 32);
+
+        for slot_idx in 0..slots_to_delete {
+            let cur_offset = start_offset + slot_idx * 32;
+            let c_idx = cur_offset / clus_size;
+            let off_in_c = cur_offset % clus_size;
+
+            if c_idx < chain.len() {
+                let clus = chain[c_idx];
+                self.inner.read_cluster(clus, &mut clus_buf)?;
+                clus_buf[off_in_c] = 0xE5;
+                self.inner.write_cluster(clus, &clus_buf)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Inode for Fat32DirInode {
@@ -911,118 +1063,6 @@ impl Inode for Fat32DirInode {
             return Err(VfsError::AlreadyExists);
         }
 
-        let name_utf16: Vec<u16> = name.encode_utf16().collect();
-        let num_lfn = (name_utf16.len() + 12) / 13;
-        let slots_needed = 1 + num_lfn;
-
-        let mut chain = self.inner.get_cluster_chain(self.cluster)?;
-        let clus_size = self.inner.cluster_bytes;
-        let mut clus_buf = alloc::vec![0u8; clus_size];
-
-        let mut target_clus = 0u32;
-        let mut target_clus_idx = 0usize;
-        let mut target_slot_idx = 0usize;
-        let mut found = false;
-
-        'search: for (clus_idx, c) in chain.iter().enumerate() {
-            self.inner.read_cluster(*c, &mut clus_buf)?;
-            let total_entries = clus_size / 32;
-            let mut consecutive = 0;
-            let mut start_idx = 0;
-
-            for i in 0..total_entries {
-                let b = clus_buf[i * 32];
-                if b == 0x00 || b == 0xE5 {
-                    if consecutive == 0 {
-                        start_idx = i;
-                    }
-                    consecutive += 1;
-                    if consecutive == slots_needed {
-                        target_clus = *c;
-                        target_clus_idx = clus_idx;
-                        target_slot_idx = start_idx;
-                        found = true;
-                        break 'search;
-                    }
-                } else {
-                    consecutive = 0;
-                }
-            }
-        }
-
-        if !found {
-            // Выделяем новый кластер для каталога и сразу обнуляем его, исключая мусорные записи
-            let new_c = self.inner.alloc_cluster()?;
-            let last = *chain.last().unwrap_or(&self.cluster);
-            self.inner.set_fat_entry(last, new_c)?;
-            self.inner.flush_fat_cache()?;
-            target_clus_idx = chain.len();
-            chain.push(new_c);
-            target_clus = new_c;
-            target_slot_idx = 0;
-            clus_buf.fill(0);
-            self.inner.write_cluster(target_clus, &clus_buf)?;
-        }
-
-        // Генерируем уникальное 8.3 короткое имя файла с суффиксом ~1..~999 при необходимости
-        let existing_entries = self.read_parsed_entries()?;
-        let (dos_name, dos_ext) = match generate_unique_dos_83(name, &existing_entries) {
-            Some(p) => p,
-            None => return Err(VfsError::InvalidPath),
-        };
-        let checksum = lfn_checksum(&dos_name, &dos_ext);
-
-        let mut cur_slot = target_slot_idx;
-
-        // 1. Записываем LFN записи в обратном порядке (от N до 1)
-        if num_lfn > 0 {
-            for entry_idx in (1..=num_lfn).rev() {
-                let is_last = entry_idx == num_lfn;
-                let seq = (entry_idx as u8) | (if is_last { 0x40 } else { 0x00 });
-                let char_start = (entry_idx - 1) * 13;
-
-                let mut name1 = [0xFFFFu16; 5];
-                let mut name2 = [0xFFFFu16; 6];
-                let mut name3 = [0xFFFFu16; 2];
-
-                for j in 0..13 {
-                    let ch_idx = char_start + j;
-                    let val = if ch_idx < name_utf16.len() {
-                        name_utf16[ch_idx]
-                    } else if ch_idx == name_utf16.len() {
-                        0x0000
-                    } else {
-                        0xFFFF
-                    };
-                    if j < 5 {
-                        name1[j] = val;
-                    } else if j < 11 {
-                        name2[j - 5] = val;
-                    } else {
-                        name3[j - 11] = val;
-                    }
-                }
-
-                let lfn = LfnEntry {
-                    seq,
-                    name1,
-                    attr: FAT32_ATTR_LFN,
-                    lfn_type: 0,
-                    checksum,
-                    name2,
-                    first_cluster: 0,
-                    name3,
-                };
-
-                unsafe {
-                    let ptr = clus_buf.as_mut_ptr().add(cur_slot * 32) as *mut LfnEntry;
-                    core::ptr::write(ptr, lfn);
-                }
-                cur_slot += 1;
-            }
-        }
-
-        // 2. Записываем стандартную запись каталога RawDirEntry
         let is_dir = itype == InodeType::Directory;
         let first_clus = if is_dir {
             let clus = self.inner.alloc_cluster()?;
@@ -1069,8 +1109,8 @@ impl Inode for Fat32DirInode {
         };
 
         let raw = RawDirEntry {
-            name: dos_name,
-            ext: dos_ext,
+            name: [0u8; 8],
+            ext: [0u8; 3],
             attr: if is_dir {
                 FAT32_ATTR_DIRECTORY
             } else {
@@ -1088,14 +1128,7 @@ impl Inode for Fat32DirInode {
             file_size: 0,
         };
 
-        let raw_dir_offset = target_clus_idx * clus_size + cur_slot * 32;
-
-        unsafe {
-            let ptr = clus_buf.as_mut_ptr().add(cur_slot * 32) as *mut RawDirEntry;
-            core::ptr::write(ptr, raw);
-        }
-
-        self.inner.write_cluster(target_clus, &clus_buf)?;
+        let raw_dir_offset = self.write_entry_to_dir(name, raw)?;
 
         let euid = crate::task::current_thread_euid();
         let egid = crate::task::current_thread_egid();
@@ -1142,30 +1175,7 @@ impl Inode for Fat32DirInode {
             None => return Err(VfsError::NotFound),
         };
 
-        let chain = self.inner.get_cluster_chain(self.cluster)?;
-        let clus_size = self.inner.cluster_bytes;
-        let mut clus_buf = alloc::vec![0u8; clus_size];
-
-        let num_lfn = if let Some(ref s) = target_entry.lfn {
-            (s.encode_utf16().count() + 12) / 13
-        } else {
-            0
-        };
-        let slots_to_delete = 1 + num_lfn;
-        let start_offset = target_entry.offset.saturating_sub(num_lfn * 32);
-
-        for slot_idx in 0..slots_to_delete {
-            let cur_offset = start_offset + slot_idx * 32;
-            let c_idx = cur_offset / clus_size;
-            let off_in_c = cur_offset % clus_size;
-
-            if c_idx < chain.len() {
-                let clus = chain[c_idx];
-                self.inner.read_cluster(clus, &mut clus_buf)?;
-                clus_buf[off_in_c] = 0xE5;
-                self.inner.write_cluster(clus, &clus_buf)?;
-            }
-        }
+        self.remove_entry_slots_only(&target_entry)?;
 
         let first_clus = target_entry.raw.first_cluster();
         if first_clus >= 2 {
@@ -1173,6 +1183,77 @@ impl Inode for Fat32DirInode {
         }
 
         Ok(())
+    }
+
+    fn rename(
+        &self,
+        old_name: &str,
+        new_parent: &Arc<dyn Inode>,
+        new_name: &str,
+    ) -> Result<(), VfsError> {
+        let new_fat_dir = new_parent
+            .as_any()
+            .and_then(|a| a.downcast_ref::<Fat32DirInode>())
+            .ok_or(VfsError::NotSupported)?;
+
+        if !Arc::ptr_eq(&self.inner, &new_fat_dir.inner) {
+            return Err(VfsError::NotSupported);
+        }
+
+        // Если целевое имя уже существует, по POSIX rename удаляет его
+        if new_fat_dir.lookup(new_name).is_ok() {
+            new_fat_dir.unlink(new_name)?;
+        }
+
+        // Ищем исходный элемент в self
+        let entries = self.read_parsed_entries()?;
+        let target = entries.into_iter().find(|e| {
+            e.display_name().eq_ignore_ascii_case(old_name)
+                || e.raw.to_display_name().eq_ignore_ascii_case(old_name)
+        });
+
+        let target_entry = match target {
+            Some(e) => e,
+            None => return Err(VfsError::NotFound),
+        };
+
+        let old_raw = target_entry.raw;
+        let is_dir = (old_raw.attr & FAT32_ATTR_DIRECTORY) != 0;
+        let first_clus = old_raw.first_cluster();
+
+        // Помечаем старые слоты каталога удаленными без освобождения цепочки кластеров
+        self.remove_entry_slots_only(&target_entry)?;
+
+        // Записываем новое имя с сохранением старых атрибутов и кластеров
+        if let Err(e) = new_fat_dir.write_entry_to_dir(new_name, old_raw) {
+            let _ = self.write_entry_to_dir(old_name, old_raw);
+            return Err(e);
+        }
+
+        // Если перемещаем директорию в другой родительский каталог, обновляем запись ".."
+        if is_dir && self.cluster != new_fat_dir.cluster && first_clus >= 2 {
+            let mut dot_buf = alloc::vec![0u8; self.inner.cluster_bytes];
+            if self.inner.read_cluster(first_clus, &mut dot_buf).is_ok() {
+                let dotdot_ptr = unsafe {
+                    &mut *(dot_buf.as_mut_ptr().add(32) as *mut RawDirEntry)
+                };
+                if dotdot_ptr.name.starts_with(b"..") {
+                    let parent_clus = if new_fat_dir.cluster == self.inner.root_cluster {
+                        0
+                    } else {
+                        new_fat_dir.cluster
+                    };
+                    dotdot_ptr.set_first_cluster(parent_clus);
+                    let _ = self.inner.write_cluster(first_clus, &dot_buf);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        Some(self)
     }
 }
 

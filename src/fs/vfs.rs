@@ -83,6 +83,19 @@ pub trait Inode: Send + Sync {
         Err(VfsError::NotADirectory)
     }
 
+    fn rename(
+        &self,
+        _old_name: &str,
+        _new_parent: &Arc<dyn Inode>,
+        _new_name: &str,
+    ) -> Result<(), VfsError> {
+        Err(VfsError::NotSupported)
+    }
+
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        None
+    }
+
     fn chmod(&self, _mode: u16) -> Result<(), VfsError> {
         Err(VfsError::NotSupported)
     }

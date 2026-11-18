@@ -33,7 +33,7 @@ pub use handle::{
 };
 pub use mount::{list_mounts, mount, umount, MountEntry};
 pub use ops::{
-    check_permission, create_symlink, mkdir_p, open, read_file, resolve_path, root, unlink,
+    check_permission, create_symlink, mkdir_p, open, read_file, rename, resolve_path, root, unlink,
     write_file,
 };
 pub use path::{is_windows_subsystem, normalize_path, translate_path};
