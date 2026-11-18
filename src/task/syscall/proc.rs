@@ -581,10 +581,11 @@ pub fn sys_uname(uts_ptr: u64) -> u64 {
         return (-(EFAULT as i64)) as u64;
     }
 
+    let release_str = concat!("0.1-", env!("WUNIX_GIT_COMMIT"), "\0");
     let fields: [&[u8]; 6] = [
         b"Wunix\0",
         b"wunix\0",
-        b"0.1.0-wunix\0",
+        release_str.as_bytes(),
         b"#1 SMP PREEMPT Wunix 2026 x86_64\0",
         b"x86_64\0",
         b"(none)\0",
