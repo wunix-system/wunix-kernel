@@ -20,7 +20,7 @@ use spin::Mutex;
 
 use crate::drivers::BlockDevice;
 use super::vfs::{DirEntry, FileSystem, Inode, InodeType, Metadata, VfsError};
-use self::block_group::{allocate_bit, BlockGroupDesc};
+use self::block_group::{allocate_bit, free_bit, BlockGroupDesc};
 use self::dir::{find_entry, insert_entry, remove_entry, to_vfs_entries};
 use self::extent::{append_extent, lookup_logical_block};
 use self::inode::{DiskInode, EXT4_INODE_ROOT_INO};
@@ -120,9 +120,17 @@ impl Ext4Inner {
         for (grp_idx, desc) in groups.iter_mut().enumerate() {
             if desc.free_blocks_count > 0 {
                 let mut bitmap = vec![0u8; sb.block_size as usize];
-                self.read_block(desc.block_bitmap as u64, &mut bitmap)?;
+                if self.read_block(desc.block_bitmap as u64, &mut bitmap).is_err() {
+                    continue;
+                }
 
-                let bit = allocate_bit(&mut bitmap, sb.blocks_per_group as usize)?;
+                let bit = match allocate_bit(&mut bitmap, sb.blocks_per_group as usize) {
+                    Ok(b) => b,
+                    Err(_) => {
+                        desc.free_blocks_count = 0;
+                        continue;
+                    }
+                };
                 desc.free_blocks_count = desc.free_blocks_count.saturating_sub(1);
                 sb.free_blocks_count = sb.free_blocks_count.saturating_sub(1);
 
@@ -142,9 +150,17 @@ impl Ext4Inner {
         for (grp_idx, desc) in groups.iter_mut().enumerate() {
             if desc.free_inodes_count > 0 {
                 let mut bitmap = vec![0u8; sb.block_size as usize];
-                self.read_block(desc.inode_bitmap as u64, &mut bitmap)?;
+                if self.read_block(desc.inode_bitmap as u64, &mut bitmap).is_err() {
+                    continue;
+                }
 
-                let bit = allocate_bit(&mut bitmap, sb.inodes_per_group as usize)?;
+                let bit = match allocate_bit(&mut bitmap, sb.inodes_per_group as usize) {
+                    Ok(b) => b,
+                    Err(_) => {
+                        desc.free_inodes_count = 0;
+                        continue;
+                    }
+                };
                 desc.free_inodes_count = desc.free_inodes_count.saturating_sub(1);
                 if itype == InodeType::Directory {
                     desc.used_dirs_count += 1;
@@ -158,6 +174,27 @@ impl Ext4Inner {
             }
         }
         Err(VfsError::IoError)
+    }
+
+    pub fn free_inode(&self, ino: u32) -> Result<(), VfsError> {
+        if ino == 0 {
+            return Ok(());
+        }
+        let mut groups = self.group_descs.lock();
+        let mut sb = self.sb.lock();
+        let grp_idx = ((ino - 1) / sb.inodes_per_group) as usize;
+        let bit = ((ino - 1) % sb.inodes_per_group) as usize;
+        if grp_idx >= groups.len() {
+            return Err(VfsError::IoError);
+        }
+        let desc = &mut groups[grp_idx];
+        let mut bitmap = vec![0u8; sb.block_size as usize];
+        self.read_block(desc.inode_bitmap as u64, &mut bitmap)?;
+        free_bit(&mut bitmap, bit);
+        self.write_block(desc.inode_bitmap as u64, &bitmap)?;
+        desc.free_inodes_count = desc.free_inodes_count.saturating_add(1);
+        sb.free_inodes_count = sb.free_inodes_count.saturating_add(1);
+        Ok(())
     }
 }
 
@@ -449,8 +486,9 @@ impl Inode for Ext4Inode {
         for b in 0..total_blocks {
             if let Some(phys) = lookup_logical_block(&dinode.block, b as u32)? {
                 self.inner.read_block(phys, &mut temp_block)?;
-                if remove_entry(&mut temp_block, name).is_ok() {
+                if let Ok(unlinked_ino) = remove_entry(&mut temp_block, name) {
                     self.inner.write_block(phys, &temp_block)?;
+                    let _ = self.inner.free_inode(unlinked_ino);
                     return Ok(());
                 }
             }

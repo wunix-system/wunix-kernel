@@ -184,8 +184,8 @@ pub fn insert_entry(
 }
 
 /// Удаление записи каталога по имени.
-/// Сбрасывает inode в 0 и объединяет свободное пространство с предыдущей записью.
-pub fn remove_entry(block: &mut [u8], target_name: &str) -> Result<(), VfsError> {
+/// Сбрасывает inode в 0, объединяет свободное пространство и возвращает удаленный inode.
+pub fn remove_entry(block: &mut [u8], target_name: &str) -> Result<u32, VfsError> {
     let limit = block.len();
     let mut pos = 0;
     let mut prev_pos: Option<usize> = None;
@@ -210,7 +210,7 @@ pub fn remove_entry(block: &mut [u8], target_name: &str) -> Result<(), VfsError>
                     } else {
                         block[pos..pos + 4].copy_from_slice(&0u32.to_le_bytes());
                     }
-                    return Ok(());
+                    return Ok(inode);
                 }
             }
         }
