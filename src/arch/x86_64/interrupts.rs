@@ -96,6 +96,15 @@ extern "x86-interrupt" fn page_fault_handler(
                 }
             }
             crate::task::syscall::sys_exit(128 + 14);
+        } else if is_user_addr {
+            serial_println!(
+                "[kernel] #PF in Ring 0 accessing user address {:?}, error: {:?}, RIP {:#x} - terminating user task tgid={}",
+                accessed_addr,
+                error_code,
+                stack_frame.instruction_pointer.as_u64(),
+                crate::task::current_thread_tgid()
+            );
+            crate::task::syscall::sys_exit(128 + 14);
         }
     }
 

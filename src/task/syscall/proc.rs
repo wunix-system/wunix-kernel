@@ -673,6 +673,19 @@ fn resolve_executable_file(
             }
         }
     }
+
+    // Совместимость с POSIX: если запрошен bash или sh, а отдельного бинарника/симлинка нет, используем системную оболочку wsh
+    let base_name = path_str.rsplit('/').next().unwrap_or(path_str);
+    if base_name == "bash" || base_name == "sh" {
+        if let Ok(node) = crate::fs::resolve_path("/bin/wsh", true) {
+            if node.metadata().itype != crate::fs::InodeType::Directory {
+                if let Ok(data) = crate::fs::read_file("/bin/wsh") {
+                    return Some((alloc::format!("/bin/wsh"), data, node));
+                }
+            }
+        }
+    }
+
     None
 }
 

@@ -318,10 +318,30 @@ pub fn validate_user_buffer(ptr: u64, len: u64) -> bool {
     if len == 0 {
         return true;
     }
-    match ptr.checked_add(len) {
-        Some(end) => ptr > 0 && end <= USER_SPACE_END,
-        None => false,
+    let end = match ptr.checked_add(len) {
+        Some(e) if ptr > 0 && e <= USER_SPACE_END => e,
+        _ => return false,
+    };
+
+    // Проверяем наличие отображения каждой 4КиБ страницы в адресном пространстве процесса
+    let start_page = ptr & !0xfff;
+    let end_page = (end - 1) & !0xfff;
+    let mut page = start_page;
+    while page <= end_page {
+        if crate::memory::translate_address(page).is_none() {
+            if crate::memory::handle_user_page_fault(
+                x86_64::VirtAddr::new(page),
+                x86_64::structures::idt::PageFaultErrorCode::empty(),
+            ).is_err() {
+                return false;
+            }
+        }
+        page = match page.checked_add(4096) {
+            Some(p) => p,
+            None => break,
+        };
     }
+    true
 }
 
 fn read_user_cstr(ptr: u64, max_len: usize) -> Result<String, u64> {
@@ -332,6 +352,9 @@ fn read_user_cstr(ptr: u64, max_len: usize) -> Result<String, u64> {
     let mut curr = ptr;
     while bytes.len() < max_len {
         if curr >= USER_SPACE_END {
+            return Err(EFAULT);
+        }
+        if !validate_user_buffer(curr, 1) {
             return Err(EFAULT);
         }
         let b = unsafe { *(curr as *const u8) };
