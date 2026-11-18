@@ -412,6 +412,7 @@ impl Inode for Ext4Inode {
 
         let (perms, uid, gid) = match itype {
             InodeType::Directory => (0o755, 0, 0),
+            InodeType::Symlink => (0o777, 0, 0),
             _ => (0o644, 0, 0),
         };
         let mut new_dinode = DiskInode::new_empty(itype, perms, uid, gid);

@@ -709,6 +709,7 @@ impl Inode for UfsInode {
         let new_ino = self.inner.allocate_inode()?;
         let (perms, uid, gid) = match itype {
             InodeType::Directory => (0o755, 0, 0),
+            InodeType::Symlink => (0o777, 0, 0),
             _ => (0o644, 0, 0),
         };
         let mut new_dinode = Ufs2Dinode::new_empty(itype, perms, uid, gid);

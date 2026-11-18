@@ -668,6 +668,10 @@ fn resolve_executable_file(
             if node.metadata().itype == crate::fs::InodeType::Directory {
                 continue;
             }
+            // Если ищем в PATH (команда без слэша), пропускаем кандидаты без прав на исполнение
+            if !path_str.contains('/') && crate::fs::check_permission(&node, false, false, true).is_err() {
+                continue;
+            }
             if let Ok(data) = crate::fs::read_file(&cand) {
                 return Some((cand, data, node));
             }

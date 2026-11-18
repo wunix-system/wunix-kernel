@@ -76,7 +76,15 @@ pub trait Inode: Send + Sync {
     }
 
     fn read_link(&self) -> Result<String, VfsError> {
-        Err(VfsError::NotSupported)
+        let meta = self.metadata();
+        if meta.itype != InodeType::Symlink {
+            return Err(VfsError::InvalidPath);
+        }
+        let mut buf = alloc::vec![0u8; meta.size];
+        let n = self.read_at(0, &mut buf)?;
+        buf.truncate(n);
+        let s = core::str::from_utf8(&buf).map_err(|_| VfsError::IoError)?;
+        Ok(String::from(s.trim_end_matches('\0')))
     }
 
     fn insert_child(&self, _name: &str, _node: Arc<dyn Inode>) -> Result<(), VfsError> {

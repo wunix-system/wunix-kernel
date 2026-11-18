@@ -104,8 +104,44 @@ pub fn resolve_path(path: &str, follow_last_symlink: bool) -> Result<Arc<dyn Ino
                 .filter(|s| !s.is_empty() && *s != ".")
                 .collect();
             let mut m_curr = m_fs.root();
-            for seg in sub_segments {
-                m_curr = m_curr.lookup(seg)?;
+            let mount_prefix = if norm.len() > subpath.len() {
+                let p = &norm[..norm.len() - subpath.len()];
+                p.trim_end_matches('/')
+            } else {
+                ""
+            };
+
+            for (idx, &seg) in sub_segments.iter().enumerate() {
+                let is_last = idx == sub_segments.len() - 1;
+                let next_node = m_curr.lookup(seg)?;
+                let meta = next_node.metadata();
+                if meta.itype == InodeType::Symlink && (!is_last || follow_last_symlink) {
+                    let target = next_node.read_link()?;
+                    symlink_depth += 1;
+
+                    let remaining = &sub_segments[idx + 1..];
+                    let mut new_path = if target.starts_with('/') {
+                        target
+                    } else {
+                        let mut p = String::from(mount_prefix);
+                        for ps in &sub_segments[..idx] {
+                            p.push('/');
+                            p.push_str(ps);
+                        }
+                        p.push('/');
+                        p.push_str(&target);
+                        p
+                    };
+
+                    for rem in remaining {
+                        new_path.push('/');
+                        new_path.push_str(rem);
+                    }
+
+                    current_path = path::normalize_path(&new_path);
+                    continue 'resolve_loop;
+                }
+                m_curr = next_node;
             }
             return Ok(m_curr);
         }
@@ -358,6 +394,12 @@ pub fn check_permission(
     want_exec: bool,
 ) -> Result<(), VfsError> {
     let meta = node.metadata();
+
+    // Для символических ссылок проверка прав всегда успешна (POSIX: права проверяются на целевом файле)
+    if meta.itype == InodeType::Symlink {
+        return Ok(());
+    }
+
     let euid = crate::task::current_thread_euid();
     let egid = crate::task::current_thread_egid();
 
