@@ -9,7 +9,7 @@ extern crate alloc;
 use core::panic::PanicInfo;
 use limine::request::{
     BootloaderInfoRequest, ExecutableFileRequest, FirmwareTypeRequest, FramebufferRequest,
-    HhdmRequest, MemmapRequest, ModulesRequest as ModuleRequest,
+    HhdmRequest, MemmapRequest, ModulesRequest as ModuleRequest, RsdpRequest,
 };
 use limine::BaseRevision;
 use wunix_kernel::i18n::t;
@@ -44,6 +44,11 @@ pub static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 #[used]
 #[unsafe(no_mangle)]
 pub static MEMORY_MAP_REQUEST: MemmapRequest = MemmapRequest::new();
+
+// Запрашиваем у Limine указатель на таблицу ACPI RSDP
+#[used]
+#[unsafe(no_mangle)]
+pub static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
 
 // Запрашиваем у Limine графический фреймбуфер
 #[used]
@@ -138,6 +143,11 @@ pub extern "C" fn _start() -> ! {
     // 7. Инициализация виртуальной памяти и кучи
     wunix_kernel::memory::init(memmap_entries, hhdm_offset);
 
+    // Передаем адрес ACPI RSDP от Limine в подсистему питания ядра
+    if let Some(rsdp_response) = RSDP_REQUEST.response() {
+        wunix_kernel::drivers::acpi::set_rsdp_address(rsdp_response.address as u64);
+    }
+
     // 8. Инициализация таймера и устройств ввода
     wunix_kernel::arch::x86_64::timer::init(100);
     wunix_kernel::drivers::keyboard::init();
@@ -194,8 +204,22 @@ pub extern "C" fn _start() -> ! {
 
         for token in cmdline.split_whitespace() {
             if let Some(root_dev) = token.strip_prefix("root=") {
-                if let Err(e) = wunix_kernel::fs::mount(root_dev, "/", "", 0) {
-                    klog!("  {}: {} (ошибка: {:?})", t("Монтирование корня", "Mounting root"), root_dev, e);
+                match wunix_kernel::fs::mount(root_dev, "/", "", 0) {
+                    Ok(_) => {
+                        klog!(
+                            "  {}: {} смонтирован в /",
+                            t("Корневой раздел", "Root partition"),
+                            root_dev
+                        );
+                    }
+                    Err(e) => {
+                        klog!(
+                            "  {}: ошибка монтирования {} в /: {:?}",
+                            t("Корневой раздел", "Root partition"),
+                            root_dev,
+                            e
+                        );
+                    }
                 }
             }
         }

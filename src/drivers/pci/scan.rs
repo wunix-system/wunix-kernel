@@ -125,6 +125,7 @@ pub fn probe_device(addr: PciAddress) -> Option<PciDevice> {
         interrupt_line,
         interrupt_pin,
         bars,
+        driver_name: None,
     })
 }
 

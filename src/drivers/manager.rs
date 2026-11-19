@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use spin::{Mutex, RwLock};
 
 use crate::drivers::pci;
-use crate::drivers::traits::{BlockDevice, DisplayDevice, InputDevice, NetDevice};
+use crate::drivers::traits::{AudioDevice, BlockDevice, DisplayDevice, InputDevice, NetDevice};
 use crate::drivers::virt::{self, HypervisorType};
 use crate::drivers::virtio;
 use crate::serial_println;
@@ -18,6 +18,7 @@ pub struct DeviceManager {
     pub(crate) net_devices: Vec<Arc<Mutex<dyn NetDevice>>>,
     pub(crate) input_devices: Vec<Arc<Mutex<dyn InputDevice>>>,
     pub(crate) display_devices: Vec<Arc<Mutex<dyn DisplayDevice>>>,
+    pub(crate) audio_devices: Vec<Arc<Mutex<dyn AudioDevice>>>,
 }
 
 impl DeviceManager {
@@ -28,6 +29,7 @@ impl DeviceManager {
             net_devices: Vec::new(),
             input_devices: Vec::new(),
             display_devices: Vec::new(),
+            audio_devices: Vec::new(),
         }
     }
 
@@ -51,6 +53,11 @@ impl DeviceManager {
         self.display_devices.push(dev);
     }
 
+    /// Регистрирует звуковое устройство
+    pub fn register_audio_device(&mut self, dev: Arc<Mutex<dyn AudioDevice>>) {
+        self.audio_devices.push(dev);
+    }
+
     /// Возвращает блочное устройство по системному имени
     pub fn get_block_device(&self, name: &str) -> Option<Arc<Mutex<dyn BlockDevice>>> {
         self.block_devices.get(name).cloned()
@@ -69,6 +76,11 @@ impl DeviceManager {
     /// Возвращает графическое устройство по его индексу
     pub fn get_display_device(&self, index: usize) -> Option<Arc<Mutex<dyn DisplayDevice>>> {
         self.display_devices.get(index).cloned()
+    }
+
+    /// Возвращает звуковое устройство по его индексу
+    pub fn get_audio_device(&self, index: usize) -> Option<Arc<Mutex<dyn AudioDevice>>> {
+        self.audio_devices.get(index).cloned()
     }
 
     /// Список всех обнаруженных устройств на шине PCI
@@ -96,16 +108,27 @@ impl DeviceManager {
         self.display_devices.len()
     }
 
+    /// Количество активных звуковых контроллеров
+    pub fn audio_device_count(&self) -> usize {
+        self.audio_devices.len()
+    }
+
     /// Сканирует шину PCI, инициализирует контроллеры и интеграции сред виртуализации.
     pub fn init_hardware(&mut self) {
+        super::acpi::init();
+        super::tpm::init();
+        if let Some(mouse) = super::input::ps2_mouse::init() {
+            self.register_input_device(mouse);
+        }
+
         let hv = virt::init();
         serial_println!("virt: detected hypervisor: {} ({})", hv.name(), hv.display_name(true));
 
         serial_println!("pci: scanning bus topology...");
-        let pci_list = pci::scan::scan_all_busses();
+        let mut pci_list = pci::scan::scan_all_busses();
         let mut block_count = 0usize;
 
-        for dev in &pci_list {
+        for dev in &mut pci_list {
             let class_str = pci::PciClass::name(dev.class_code, dev.subclass);
             serial_println!(
                 "pci: [{}] {:04x}:{:04x} class: {:02x}:{:02x} ({})",
@@ -118,17 +141,35 @@ impl DeviceManager {
                 self.probe_ide(dev);
             } else if super::ahci::probe_pci(dev, self, &mut block_count) {
                 // Контроллер SATA / AHCI обработал устройство
+            } else if super::nvme::probe_pci(dev, self) {
+                // Высокоскоростной SSD накопитель NVMe (PCI Express)
             } else if virt::vbox::probe_pci(dev, self) {
-                // VirtualBox драйвер обработал устройство
+                dev.driver_name = Some(if dev.device_id == 0xBEEF { "vboxvideo" } else { "vboxguest" });
             } else if virt::vmware::probe_pci(dev, self) {
-                // VMware драйвер обработал устройство
+                dev.driver_name = Some(match dev.device_id {
+                    0x0405 => "vmw_svga",
+                    0x07B0 => "vmxnet3",
+                    0x07C0 => "pvscsi",
+                    _ => "vmware",
+                });
             } else if virt::hyperv::probe_pci(dev, self) {
-                // Hyper-V синтетическое видео обработано
+                dev.driver_name = Some("hyperv_fb");
             } else if virt::qemu::probe_pci(dev, self) {
-                // Bochs / QEMU Standard VGA
+                dev.driver_name = Some("bochs-vga");
             } else if virt::xen::platform::probe_pci(dev) {
-                // Xen Platform Device (HVM Unplug)
+                dev.driver_name = Some("xen-platform");
+            } else if super::net::probe_pci(dev, self) {
+                // Сетевые контроллеры Realtek RTL8139 / RTL8168 / RTL8125
+            } else if super::usb::probe_pci(dev, self, &mut block_count) {
+                // Хост-контроллеры шины USB (xHCI, EHCI, OHCI, UHCI)
+            } else if dev.class_code == 0x08 && dev.subclass == 0x05 {
+                if super::sdhci::probe(dev, self).is_ok() {
+                    dev.driver_name = Some("sdhci");
+                }
+            } else if super::audio::probe_pci(dev, self) {
+                // Звуковые контроллеры Intel HDA и AC'97
             } else if let Some(nic) = super::e1000::probe_pci(dev) {
+                dev.driver_name = Some("e1000");
                 let mac = nic.mac_address();
                 serial_println!(
                     "e1000: registered eth{} (Intel PRO/1000, MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
@@ -140,10 +181,12 @@ impl DeviceManager {
 
         self.pci_devices = pci_list;
         self.init_hypervisor_integrations(hv);
+        super::audio::init_legacy(self);
     }
 
     /// Инициализация обнаруженного контроллера IDE/ATA
-    fn probe_ide(&mut self, dev: &pci::PciDevice) {
+    fn probe_ide(&mut self, dev: &mut pci::PciDevice) {
+        dev.driver_name = Some("ata_piix");
         dev.enable_io_space();
         dev.enable_bus_mastering();
 
@@ -170,8 +213,16 @@ impl DeviceManager {
     }
 
     /// Инициализация обнаруженных устройств VirtIO.
-    fn probe_virtio(&mut self, dev: &pci::PciDevice, block_count: &mut usize) {
+    fn probe_virtio(&mut self, dev: &mut pci::PciDevice, block_count: &mut usize) {
         let vtype = virtio::VirtioDeviceType::from_pci(dev.device_id, dev.subsystem_id);
+        dev.driver_name = Some(match vtype {
+            virtio::VirtioDeviceType::Block => "virtio_blk",
+            virtio::VirtioDeviceType::Net => "virtio_net",
+            virtio::VirtioDeviceType::Gpu => "virtio_gpu",
+            virtio::VirtioDeviceType::Input => "virtio_input",
+            virtio::VirtioDeviceType::Scsi => "virtio_scsi",
+            _ => "virtio_pci",
+        });
         serial_println!("virtio: found {} at {}", vtype, dev.address);
 
         let transport = match virtio::transport::create_transport_from_pci(dev) {
@@ -306,6 +357,12 @@ pub fn get_input_device(index: usize) -> Option<Arc<Mutex<dyn InputDevice>>> {
 pub fn get_display_device(index: usize) -> Option<Arc<Mutex<dyn DisplayDevice>>> {
     let guard = DEVICE_MANAGER.read();
     guard.as_ref()?.get_display_device(index)
+}
+
+/// Получает звуковое устройство по его номеру
+pub fn get_audio_device(index: usize) -> Option<Arc<Mutex<dyn AudioDevice>>> {
+    let guard = DEVICE_MANAGER.read();
+    guard.as_ref()?.get_audio_device(index)
 }
 
 /// Предоставляет доступ к глобальному DeviceManager для чтения информации

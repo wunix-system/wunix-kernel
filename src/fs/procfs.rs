@@ -46,6 +46,23 @@ pub fn pci_device_name(vendor: u16, device: u16) -> &'static str {
         (0x1234, 0x1111) => "VGA / VBE Compatible Graphics Adapter",
         (0x1013, 0x00B8) => "CL-GD5446 VisualMedia Accelerator",
         (0x10EC, 0x8139) => "RTL-8139 Fast Ethernet NIC",
+        (0x10EC, 0x8125) => "RTL8125 2.5GbE Ethernet Controller",
+        (0x8086, 0x10FB) | (0x8086, 0x1528) | (0x8086, 0x1563) => "Intel 10-Gigabit Ethernet Controller (ixgbe)",
+        (0x8086, 0x2723) | (0x8086, 0x06F0) | (0x8086, 0x2725) => "Intel Wi-Fi 6/6E Wireless Network Adapter",
+        (0x14E4, 0x1600) | (0x14E4, 0x1659) | (0x14E4, 0x165A) | (0x14E4, 0x165F) => {
+            "Broadcom NetXtreme Gigabit Ethernet (tg3)"
+        }
+        (0x10EC, 0x8168) | (0x10EC, 0x8111) | (0x10EC, 0x8136) | (0x10EC, 0x8169) => {
+            "RTL8168/8111 PCIe Gigabit Ethernet"
+        }
+        (0x8086, 0x2415) | (0x8086, 0x2445) | (0x8086, 0x7195) => "82801AA AC'97 Audio",
+        (0x8086, 0x2668) | (0x8086, 0x27D8) | (0x8086, 0x284B) | (0x8086, 0x293E) | (0x8086, 0x3B56) => {
+            "Intel High Definition Audio Controller"
+        }
+        (0x1B36, 0x000D) => "QEMU USB 3.0 xHCI Controller",
+        (0x1B36, 0x0010) => "NVM Express Controller",
+        (0x8086, 0x265C) | (0x8086, 0x293A) => "Intel USB 2.0 EHCI Controller",
+        (0x8086, 0x7020) | (0x8086, 0x7112) => "Intel USB 1.1 UHCI Controller",
         _ => "Generic Device",
     }
 }
@@ -53,6 +70,16 @@ pub fn pci_device_name(vendor: u16, device: u16) -> &'static str {
 pub fn pci_driver_name(vendor: u16, device: u16) -> &'static str {
     match (vendor, device) {
         (0x8086, 0x100E) | (0x8086, 0x100F) | (0x8086, 0x1004) | (0x8086, 0x10D3) => "e1000",
+        (0x10EC, 0x8139) => "rtl8139",
+        (0x10EC, 0x8168) | (0x10EC, 0x8111) | (0x10EC, 0x8136) | (0x10EC, 0x8169) => "rtl8168",
+        (0x8086, 0x2415) | (0x8086, 0x2445) | (0x8086, 0x7195) => "snd_ac97",
+        (0x8086, 0x2668) | (0x8086, 0x27D8) | (0x8086, 0x284B) | (0x8086, 0x293E) | (0x8086, 0x3B56) => {
+            "snd_hda"
+        }
+        (0x1B36, 0x000D) => "xhci",
+        (0x1B36, 0x0010) => "nvme",
+        (0x8086, 0x265C) | (0x8086, 0x293A) => "ehci",
+        (0x8086, 0x7020) | (0x8086, 0x7112) => "uhci",
         (0x80EE, 0xCAFE) => "vboxguest",
         (0x80EE, 0xBEEF) => "vboxvideo",
         (0x15AD, 0x0405) => "vmw_svga",
@@ -103,7 +130,18 @@ pub fn refresh_proc_files(path: &str) {
         let _ = write_file_ramfs("/sys/class/net/lo/ipv4_broadcast", b"127.255.255.255\n");
 
         if let Some(info) = crate::net::get_info() {
-            text.push_str("  eth0: 1048576      10    0    0    0     0          0         0  1048576      10    0    0    0     0       0          0\n");
+            let (rx_b, rx_p, tx_b, tx_p) = crate::drivers::with_device_manager(|dm| {
+                if let Some(nic) = dm.get_net_device(0) {
+                    let dev = nic.lock();
+                    (dev.rx_bytes(), dev.rx_packets(), dev.tx_bytes(), dev.tx_packets())
+                } else {
+                    (0, 0, 0, 0)
+                }
+            }).unwrap_or((0, 0, 0, 0));
+            text.push_str(&alloc::format!(
+                "  eth0: {:7} {:7}    0    0    0     0          0         0  {:7} {:7}    0    0    0     0       0          0\n",
+                rx_b, rx_p, tx_b, tx_p
+            ));
             let mac_str = alloc::format!(
                 "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n",
                 info.mac[0], info.mac[1], info.mac[2], info.mac[3], info.mac[4], info.mac[5]
@@ -200,7 +238,7 @@ pub fn refresh_proc_files(path: &str) {
                     | (((dev.address.device & 0x1F) as u32) << 3)
                     | ((dev.address.function & 0x07) as u32);
                 let vend_dev = ((dev.vendor_id as u32) << 16) | (dev.device_id as u32);
-                let drv = pci_driver_name(dev.vendor_id, dev.device_id);
+                let drv = dev.driver_name.unwrap_or_else(|| pci_driver_name(dev.vendor_id, dev.device_id));
 
                 let mut b_addrs = [0u64; 6];
                 let mut b_sizes = [0u64; 6];
@@ -433,5 +471,16 @@ pub fn refresh_proc_files(path: &str) {
         let hv = crate::drivers::virt::current_hypervisor();
         let text = alloc::format!("{}\n", hv.name());
         let _ = write_file_ramfs("/sys/hypervisor/type", text.as_bytes());
+    } else if path.starts_with("/sys/class/power_supply") {
+        let pwr = crate::drivers::acpi::power::get_power_supply_info();
+        let _ = write_file_ramfs("/sys/class/power_supply/AC/online", if pwr.ac_online { b"1\n" } else { b"0\n" });
+        let _ = write_file_ramfs("/sys/class/power_supply/AC/type", b"Mains\n");
+        let _ = write_file_ramfs("/sys/class/power_supply/BAT0/status", alloc::format!("{}\n", pwr.battery_status).as_bytes());
+        let _ = write_file_ramfs("/sys/class/power_supply/BAT0/capacity", alloc::format!("{}\n", pwr.battery_percent).as_bytes());
+        let _ = write_file_ramfs("/sys/class/power_supply/BAT0/present", if pwr.battery_present { b"1\n" } else { b"0\n" });
+        let _ = write_file_ramfs("/sys/class/power_supply/BAT0/type", b"Battery\n");
+    } else if path == "/proc/net/wireless" {
+        let text = "Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE\n face | tus | link level noise |  nwid  crypt   frag  retry   misc | beacon | 22\nwlan0: 0000   65.  -45.  -256        0      0      0      0      0        0\n";
+        let _ = write_file_ramfs("/proc/net/wireless", text.as_bytes());
     }
 }

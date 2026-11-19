@@ -6,16 +6,7 @@ use crate::drivers::pci::PciDevice;
 use crate::drivers::traits::{NetDevice, NetDeviceError};
 use crate::memory::{allocate_contiguous_frames, deallocate_frame, hhdm_offset, map_kernel_mmio};
 
-pub use hw::{
-    E1000RxDesc, E1000TxDesc, BUFFER_SIZE, E1000_DEV_82540EM, E1000_DEV_82543GC,
-    E1000_DEV_82545EM, E1000_DEV_82574L, INTEL_PCI_VENDOR_ID, NUM_RX_DESCRIPTORS,
-    NUM_TX_DESCRIPTORS, RCTL_BAM, RCTL_BSIZE_2048, RCTL_EN, RCTL_MPE, RCTL_SBP, RCTL_SECRC,
-    RCTL_UPE, REG_CTRL, REG_EERD, REG_ICR, REG_IMC, REG_MTA, REG_RAH, REG_RAL, REG_RCTL,
-    REG_RDBAH, REG_RDBAL, REG_RDH, REG_RDLEN, REG_RDT, REG_TCTL, REG_TDBAH, REG_TDBAL,
-    REG_TDH, REG_TDLEN, REG_TDT, RXD_STAT_DD, RX_BUFFERS_OFFSET, TCTL_COLD_SHIFT, TCTL_CT_SHIFT,
-    TCTL_EN, TCTL_PSP, TXD_CMD_EOP, TXD_CMD_IFCS, TXD_CMD_RS, TXD_STAT_DD, TX_BUFFERS_OFFSET,
-    TX_RING_OFFSET,
-};
+pub use hw::*;
 
 /// Высокопроизводительный драйвер сетевых контроллеров Intel Gigabit Ethernet (e1000).
 /// Является универсальным стандартным сетевым адаптером во всех основных гипервизорах:
@@ -27,6 +18,10 @@ pub struct E1000Device {
     dma_virt: *mut u8,
     rx_cur: usize,
     tx_cur: usize,
+    rx_bytes_count: usize,
+    rx_packets_count: usize,
+    tx_bytes_count: usize,
+    tx_packets_count: usize,
 }
 
 unsafe impl Send for E1000Device {}
@@ -71,6 +66,10 @@ impl E1000Device {
             dma_virt,
             rx_cur: 0,
             tx_cur: 0,
+            rx_bytes_count: 0,
+            rx_packets_count: 0,
+            tx_bytes_count: 0,
+            tx_packets_count: 0,
         };
 
         // Сброс и программная инициализация контроллера
@@ -137,6 +136,18 @@ impl E1000Device {
         if self.mac == [0; 6] {
             self.mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
         }
+
+        // Программируем фильтр MAC-адреса с установленным битом валидности (AV = 1 << 31),
+        // чтобы сетевая карта не сбрасывала входящие Unicast пакеты (ARP, DHCP, TCP, ICMP)
+        let ral_val = (self.mac[0] as u32)
+            | ((self.mac[1] as u32) << 8)
+            | ((self.mac[2] as u32) << 16)
+            | ((self.mac[3] as u32) << 24);
+        let rah_val = (self.mac[4] as u32)
+            | ((self.mac[5] as u32) << 8)
+            | (1 << 31);
+        self.write_reg(REG_RAL, ral_val);
+        self.write_reg(REG_RAH, rah_val);
     }
 
     fn read_eeprom_word(&self, addr: u8) -> u16 {
@@ -230,7 +241,11 @@ impl NetDevice for E1000Device {
         };
 
         let idx = self.tx_cur;
-        if (tx_descs[idx].status & TXD_STAT_DD) == 0 {
+        let tx_status = unsafe {
+            let ptr = &tx_descs[idx].status as *const u8;
+            core::ptr::read_volatile(ptr)
+        };
+        if (tx_status & TXD_STAT_DD) == 0 {
             return Err(NetDeviceError::NotReady);
         }
 
@@ -241,10 +256,16 @@ impl NetDevice for E1000Device {
 
         tx_descs[idx].length = packet.len() as u16;
         tx_descs[idx].cmd = TXD_CMD_EOP | TXD_CMD_IFCS | TXD_CMD_RS;
-        tx_descs[idx].status = 0;
+        unsafe {
+            core::ptr::write_volatile(&mut tx_descs[idx].status, 0);
+        }
+
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
 
         self.tx_cur = (self.tx_cur + 1) % NUM_TX_DESCRIPTORS;
         self.write_reg(REG_TDT, self.tx_cur as u32);
+        self.tx_packets_count += 1;
+        self.tx_bytes_count += packet.len();
 
         Ok(())
     }
@@ -254,10 +275,16 @@ impl NetDevice for E1000Device {
             core::slice::from_raw_parts_mut(self.dma_virt as *mut E1000RxDesc, NUM_RX_DESCRIPTORS)
         };
 
-        let idx = (self.rx_cur + 1) % NUM_RX_DESCRIPTORS;
-        if (rx_descs[idx].status & RXD_STAT_DD) == 0 {
+        let idx = self.rx_cur;
+        let rx_status = unsafe {
+            let ptr = &rx_descs[idx].status as *const u8;
+            core::ptr::read_volatile(ptr)
+        };
+        if (rx_status & RXD_STAT_DD) == 0 {
             return Ok(None);
         }
+
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Acquire);
 
         let pkt_len = rx_descs[idx].length as usize;
         if pkt_len > buf.len() {
@@ -267,21 +294,35 @@ impl NetDevice for E1000Device {
         let rx_buf_virt = (self.dma_virt as usize + RX_BUFFERS_OFFSET + (idx * BUFFER_SIZE)) as *const u8;
         unsafe {
             core::ptr::copy_nonoverlapping(rx_buf_virt, buf.as_mut_ptr(), pkt_len);
+            core::ptr::write_volatile(&mut rx_descs[idx].status, 0);
         }
 
-        rx_descs[idx].status = 0;
-        self.rx_cur = idx;
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
+
         self.write_reg(REG_RDT, idx as u32);
+        self.rx_cur = (self.rx_cur + 1) % NUM_RX_DESCRIPTORS;
+        self.rx_packets_count += 1;
+        self.rx_bytes_count += pkt_len;
 
         Ok(Some(pkt_len))
     }
+
+    fn rx_bytes(&self) -> usize { self.rx_bytes_count }
+    fn rx_packets(&self) -> usize { self.rx_packets_count }
+    fn tx_bytes(&self) -> usize { self.tx_bytes_count }
+    fn tx_packets(&self) -> usize { self.tx_packets_count }
 }
 
 impl Drop for E1000Device {
     fn drop(&mut self) {
         self.write_reg(REG_RCTL, 0);
         self.write_reg(REG_TCTL, 0);
-        deallocate_frame(self.dma_frame);
+        for i in 0..16 {
+            let frame = PhysFrame::containing_address(
+                self.dma_frame.start_address() + (i as u64 * 4096)
+            );
+            deallocate_frame(frame);
+        }
     }
 }
 
@@ -292,9 +333,30 @@ pub fn probe_pci(dev: &PciDevice) -> Option<E1000Device> {
     }
 
     match dev.device_id {
-        E1000_DEV_82540EM | E1000_DEV_82545EM | E1000_DEV_82543GC | E1000_DEV_82574L => {
-            E1000Device::new(dev).ok()
-        }
+        E1000_DEV_82540EM
+        | E1000_DEV_82545EM
+        | E1000_DEV_82543GC
+        | E1000_DEV_82571EB
+        | E1000_DEV_82572EI
+        | E1000_DEV_82573L
+        | E1000_DEV_82574L
+        | E1000_DEV_82579LM
+        | E1000_DEV_82579V
+        | E1000_DEV_I217LM
+        | E1000_DEV_I217V
+        | E1000_DEV_I218V
+        | E1000_DEV_I219LM
+        | E1000_DEV_I219V
+        | E1000_DEV_I219V2
+        | E1000_DEV_82575EB
+        | E1000_DEV_82576
+        | E1000_DEV_I350
+        | E1000_DEV_I210
+        | E1000_DEV_I211
+        | E1000_DEV_I225_LM
+        | E1000_DEV_I225_V
+        | E1000_DEV_I226_V
+        | E1000_DEV_I226_LM => E1000Device::new(dev).ok(),
         _ => None,
     }
 }

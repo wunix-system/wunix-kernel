@@ -1,4 +1,5 @@
 pub mod config;
+pub mod msi;
 pub mod scan;
 
 use core::fmt;
@@ -122,6 +123,7 @@ pub struct PciDevice {
     pub interrupt_line: u8,
     pub interrupt_pin: u8,
     pub bars: [Option<PciBar>; 6],
+    pub driver_name: Option<&'static str>,
 }
 
 impl PciDevice {

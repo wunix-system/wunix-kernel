@@ -39,6 +39,17 @@ pub enum DisplayDeviceError {
     NotReady,
 }
 
+/// Ошибки воспроизведения звука
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioDeviceError {
+    /// Ошибка передачи данных через DMA или таймаут контроллера
+    IoError,
+    /// Операция не поддерживается данным типом звукового чипа
+    Unsupported,
+    /// Звуковой буфер или кольцо воспроизведения переполнено
+    NotReady,
+}
+
 /// Унифицированное событие устройства ввода (мышь, клавиатура, сенсорный экран)
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
@@ -50,6 +61,11 @@ pub struct InputEvent {
 
 /// Унифицированный интерфейс блочного накопителя (/dev/vda, ATA, SATA/AHCI, NVMe).
 pub trait BlockDevice: Send + Sync {
+    /// Имя драйвера блочного накопителя (например, "nvme", "ahci", "ata", "virtio-blk")
+    fn driver_name(&self) -> &'static str {
+        "generic-blk"
+    }
+
     /// Считывает последовательность 512-байтных секторов, начиная с `start_sector`
     fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError>;
 
@@ -78,6 +94,26 @@ pub trait NetDevice: Send + Sync {
 
     /// Принимает входящий сетевой пакет из очереди RX
     fn receive_packet(&mut self, buf: &mut [u8]) -> Result<Option<usize>, NetDeviceError>;
+
+    /// Количество принятых байт
+    fn rx_bytes(&self) -> usize {
+        0
+    }
+
+    /// Количество принятых пакетов
+    fn rx_packets(&self) -> usize {
+        0
+    }
+
+    /// Количество переданных байт
+    fn tx_bytes(&self) -> usize {
+        0
+    }
+
+    /// Количество переданных пакетов
+    fn tx_packets(&self) -> usize {
+        0
+    }
 }
 
 /// Унифицированный интерфейс устройства ввода (планшет, мышь, тачпад, клавиатура).
@@ -106,3 +142,19 @@ pub trait DisplayDevice: Send + Sync {
     /// Сбрасывает измененный кадровый буфер на экран
     fn flush(&mut self) -> Result<(), DisplayDeviceError>;
 }
+
+/// Унифицированный интерфейс звукового контроллера (Intel HDA, AC'97, SB16).
+pub trait AudioDevice: Send + Sync {
+    /// Название звукового устройства
+    fn device_name(&self) -> &'static str;
+
+    /// Воспроизводит порцию PCM аудиоданных (16-бит, 44.1/48 кГц stereo)
+    fn play_pcm(&mut self, samples: &[u8]) -> Result<(), AudioDeviceError>;
+
+    /// Устанавливает громкость воспроизведения (0..100%)
+    fn set_volume(&mut self, volume_percent: u8) -> Result<(), AudioDeviceError>;
+
+    /// Проверяет, занят ли аудиовыход воспроизведением
+    fn is_busy(&self) -> bool;
+}
+
