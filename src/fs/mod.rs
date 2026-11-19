@@ -23,8 +23,10 @@ use alloc::sync::Arc;
 pub use epoll::EpollInstance;
 pub use eventfd::EventFdHandle;
 pub use fd::{
-    clone_fd_table, get_file_handle, init_stdio, insert_file_handle, insert_file_handle_at,
-    insert_file_handle_from, remove_file_handle, remove_process_fd_table, share_fd_table,
+    clone_fd_table, close_cloexec_fds, close_cloexec_fds_for, get_fd_flags, get_file_handle,
+    init_stdio, insert_file_handle, insert_file_handle_at, insert_file_handle_at_flags,
+    insert_file_handle_flags, insert_file_handle_from, remove_file_handle, remove_process_fd_table,
+    set_fd_flags, share_fd_table, FD_CLOEXEC,
 };
 pub use handle::{
     FileHandle, RegularFileHandle, StdinHandle, StdoutStderrHandle, EPOLLERR, EPOLLET, EPOLLHUP,

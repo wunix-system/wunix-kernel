@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 use spin::Mutex;
 
 use crate::fs::{
-    get_file_handle, insert_file_handle, remove_file_handle, RegularFileHandle, O_CREAT,
+    get_file_handle, remove_file_handle, RegularFileHandle, O_CREAT,
 };
 use super::{
     read_user_cstr, resolve_relative_path, validate_user_buffer, EACCES, EBADF, EFAULT, EINVAL,
@@ -132,8 +132,14 @@ pub fn sys_open(path_ptr: u64, flags: u64, mode: u64) -> u64 {
         }
     };
 
+    let cloexec = if (flags & crate::fs::O_CLOEXEC as u64) != 0 {
+        crate::fs::FD_CLOEXEC
+    } else {
+        0
+    };
+
     if let Some(dev_handle) = crate::fs::devfs::open_device_node(&node, flags as u32, Some(target_path.clone())) {
-        return insert_file_handle(dev_handle);
+        return crate::fs::insert_file_handle_flags(dev_handle, 3, cloexec);
     }
 
     let initial_offset = if (flags & 0x400) != 0 {
@@ -149,7 +155,7 @@ pub fn sys_open(path_ptr: u64, flags: u64, mode: u64) -> u64 {
         path: Some(target_path),
     });
 
-    insert_file_handle(handle)
+    crate::fs::insert_file_handle_flags(handle, 3, cloexec)
 }
 
 
@@ -169,12 +175,26 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
     };
 
     match cmd {
-        0 | 1030 => {
-            // F_DUPFD (0) / F_DUPFD_CLOEXEC (1030) обязаны вернуть минимальный свободный fd >= arg
-            crate::fs::insert_file_handle_from(handle, arg)
+        0 => {
+            // F_DUPFD (0) обязан вернуть минимальный свободный fd >= arg с очищенным FD_CLOEXEC
+            crate::fs::insert_file_handle_flags(handle, arg, 0)
         }
-        1 => 0, // F_GETFD (FD_CLOEXEC = 0)
-        2 => 0, // F_SETFD
+        1030 => {
+            // F_DUPFD_CLOEXEC (1030) обязан вернуть минимальный свободный fd >= arg с установленным FD_CLOEXEC
+            crate::fs::insert_file_handle_flags(handle, arg, crate::fs::FD_CLOEXEC)
+        }
+        1 => {
+            // F_GETFD
+            crate::fs::get_fd_flags(fd).map(|fl| (fl & crate::fs::FD_CLOEXEC) as u64).unwrap_or(0)
+        }
+        2 => {
+            // F_SETFD
+            if crate::fs::set_fd_flags(fd, (arg as u32) & crate::fs::FD_CLOEXEC) {
+                0
+            } else {
+                (-(EBADF as i64)) as u64
+            }
+        }
         3 => handle.get_flags() as u64, // F_GETFL
         4 => {
             // F_SETFL не имеет права затирать биты режима доступа (O_RDONLY/O_WRONLY/O_RDWR = 0..3)
@@ -234,7 +254,10 @@ pub fn sys_lseek(fd: u64, offset: i64, whence: u64) -> u64 {
         Some(h) => h,
         None => return (-(EBADF as i64)) as u64,
     };
-    let file_size = handle.as_inode().map(|i| i.metadata().size).unwrap_or(0);
+    let Some(inode) = handle.as_inode() else {
+        return (-(29i64)) as u64; // -ESPIPE: Illegal seek on pipe / socket / stream
+    };
+    let file_size = inode.metadata().size;
     let cur_off = handle.offset();
     let new_off = match whence {
         0 => offset,                         // SEEK_SET
@@ -661,10 +684,23 @@ pub fn sys_dup(fd: u64) -> u64 {
         Some(h) => h,
         None => return (-(EBADF as i64)) as u64,
     };
-    insert_file_handle(handle)
+    crate::fs::insert_file_handle_flags(handle, 3, 0)
 }
 
-pub fn sys_dup3(oldfd: u64, newfd: u64, _flags: u64) -> u64 {
+pub fn sys_dup2(oldfd: u64, newfd: u64) -> u64 {
+    let handle = match get_file_handle(oldfd) {
+        Some(h) => h,
+        None => return (-(EBADF as i64)) as u64,
+    };
+    if oldfd == newfd {
+        return newfd;
+    }
+    let _ = remove_file_handle(newfd);
+    crate::fs::insert_file_handle_at_flags(newfd, handle, 0);
+    newfd
+}
+
+pub fn sys_dup3(oldfd: u64, newfd: u64, flags: u64) -> u64 {
     if oldfd == newfd {
         return (-(EINVAL as i64)) as u64;
     }
@@ -672,8 +708,13 @@ pub fn sys_dup3(oldfd: u64, newfd: u64, _flags: u64) -> u64 {
         Some(h) => h,
         None => return (-(EBADF as i64)) as u64,
     };
+    let cloexec = if (flags as u32 & crate::fs::O_CLOEXEC) != 0 {
+        crate::fs::FD_CLOEXEC
+    } else {
+        0
+    };
     let _ = remove_file_handle(newfd);
-    crate::fs::insert_file_handle_at(newfd, handle);
+    crate::fs::insert_file_handle_at_flags(newfd, handle, cloexec);
     newfd
 }
 

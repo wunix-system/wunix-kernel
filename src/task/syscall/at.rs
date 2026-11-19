@@ -4,7 +4,7 @@ use alloc::sync::Arc;
 use spin::Mutex;
 
 use crate::fs::{
-    get_file_handle, insert_file_handle, InodeType, RegularFileHandle, VfsError, O_CREAT,
+    get_file_handle, InodeType, RegularFileHandle, VfsError, O_CREAT,
 };
 use super::{
     read_user_cstr, resolve_relative_path, validate_user_buffer, EACCES, EBADF, EBUSY, EEXIST,
@@ -121,8 +121,14 @@ pub fn sys_openat(dirfd: i64, path_ptr: u64, flags: u64, mode: u64) -> u64 {
         }
     };
 
+    let cloexec = if (flags & (crate::fs::O_CLOEXEC as u64)) != 0 {
+        crate::fs::FD_CLOEXEC
+    } else {
+        0
+    };
+
     if let Some(dev_handle) = crate::fs::devfs::open_device_node(&node, flags as u32, Some(target_path.clone())) {
-        return insert_file_handle(dev_handle);
+        return crate::fs::insert_file_handle_flags(dev_handle, 0, cloexec);
     }
 
     let initial_offset = if (flags & 0x400) != 0 {
@@ -138,7 +144,7 @@ pub fn sys_openat(dirfd: i64, path_ptr: u64, flags: u64, mode: u64) -> u64 {
         path: Some(target_path),
     });
 
-    insert_file_handle(handle)
+    crate::fs::insert_file_handle_flags(handle, 0, cloexec)
 }
 
 pub fn sys_newfstatat(dirfd: i64, path_ptr: u64, statbuf_ptr: u64, flags: u64) -> u64 {

@@ -16,7 +16,6 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::arch::x86_64::SyscallRegisters;
-use crate::fs::insert_file_handle;
 use crate::serial_println;
 
 pub use at::*;
@@ -420,7 +419,7 @@ pub fn linux_syscall_dispatcher(
         SYS_MINCORE => sys_mincore(arg1, arg2, arg3),
         SYS_MADVISE => sys_madvise(arg1, arg2, arg3),
         SYS_DUP => sys_dup(arg1),
-        SYS_DUP2 => sys_dup3(arg1, arg2, 0),
+        SYS_DUP2 => sys_dup2(arg1, arg2),
         SYS_PAUSE => sys_pause(),
         SYS_NANOSLEEP => sys_nanosleep(arg1, arg2),
         SYS_GETITIMER => crate::task::syscall::signal::sys_getitimer(arg1, arg2),
@@ -428,7 +427,14 @@ pub fn linux_syscall_dispatcher(
         SYS_SETITIMER => crate::task::syscall::signal::sys_setitimer(arg1, arg2, arg3),
         SYS_GETPID => crate::task::current_thread_tgid(),
         SYS_SOCKET => match crate::fs::socket::create_socket(arg1 as u16, arg2 as u32, arg3 as i32) {
-            Ok(sock) => insert_file_handle(sock),
+            Ok(sock) => {
+                let cloexec = if (arg2 as u32 & crate::net::socket::SOCK_CLOEXEC) != 0 {
+                    crate::fs::FD_CLOEXEC
+                } else {
+                    0
+                };
+                crate::fs::insert_file_handle_flags(sock, 3, cloexec)
+            }
             Err(err) => (-(err.abs())) as u64,
         },
         SYS_CONNECT => sys_connect(arg1, arg2, arg3),

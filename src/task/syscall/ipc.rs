@@ -2,8 +2,8 @@ use alloc::sync::Arc;
 use spin::Mutex;
 
 use crate::fs::{
-    get_file_handle, insert_file_handle, EpollInstance, PipeBuffer, PipeReadHandle,
-    PipeWriteHandle,
+    get_file_handle, insert_file_handle, insert_file_handle_flags, EpollInstance, PipeBuffer,
+    PipeReadHandle, PipeWriteHandle, FD_CLOEXEC,
 };
 use super::{read_user_cstr, validate_user_buffer, EBADF, EFAULT, EINVAL, ENOENT, EEXIST, ENODEV};
 
@@ -15,8 +15,14 @@ pub fn sys_pipe2(pipefd_ptr: u64, flags: u64) -> u64 {
     let read_handle = Arc::new(PipeReadHandle::new(pipe.clone(), flags as u32));
     let write_handle = Arc::new(PipeWriteHandle::new(pipe, flags as u32));
 
-    let r_fd = insert_file_handle(read_handle);
-    let w_fd = insert_file_handle(write_handle);
+    let cloexec = if (flags as u32 & crate::fs::handle::O_CLOEXEC) != 0 {
+        FD_CLOEXEC
+    } else {
+        0
+    };
+
+    let r_fd = insert_file_handle_flags(read_handle, 3, cloexec);
+    let w_fd = insert_file_handle_flags(write_handle, 3, cloexec);
 
     unsafe {
         let ptr = pipefd_ptr as *mut i32;
@@ -27,9 +33,14 @@ pub fn sys_pipe2(pipefd_ptr: u64, flags: u64) -> u64 {
 }
 
 
-pub fn sys_epoll_create1(_flags: u64) -> u64 {
+pub fn sys_epoll_create1(flags: u64) -> u64 {
     let epoll = Arc::new(EpollInstance::new());
-    insert_file_handle(epoll)
+    let cloexec = if (flags as u32 & crate::fs::epoll::EPOLL_CLOEXEC) != 0 {
+        FD_CLOEXEC
+    } else {
+        0
+    };
+    insert_file_handle_flags(epoll, 3, cloexec)
 }
 
 

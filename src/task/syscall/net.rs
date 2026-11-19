@@ -315,9 +315,14 @@ pub fn sys_socketpair(domain: u64, sock_type: u64, _protocol: u64, sv_ptr: u64) 
     }
 
     let flags = (sock_type & 0o4000) as u32; // O_NONBLOCK
+    let cloexec = if (sock_type & (crate::fs::O_CLOEXEC as u64)) != 0 {
+        crate::fs::FD_CLOEXEC
+    } else {
+        0
+    };
     let (sock_a, sock_b) = crate::fs::create_socketpair(flags);
-    let fd_a = crate::fs::insert_file_handle(sock_a);
-    let fd_b = crate::fs::insert_file_handle(sock_b);
+    let fd_a = crate::fs::insert_file_handle_flags(sock_a, 0, cloexec);
+    let fd_b = crate::fs::insert_file_handle_flags(sock_b, 0, cloexec);
 
     unsafe {
         let ptr = sv_ptr as *mut i32;

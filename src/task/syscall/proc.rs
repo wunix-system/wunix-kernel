@@ -905,6 +905,7 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     // заменяем образ текущего процесса на месте, не возвращаясь в вызывающий код.
     let in_place_exec = crate::task::is_current_thread_fork_child() || !uses_sync_execve_spawn(&old_exe_path);
     if in_place_exec {
+        crate::fs::close_cloexec_fds();
         let cur_tgid = crate::task::current_thread_tgid();
         let old_cr3: u64;
         unsafe {
@@ -953,6 +954,7 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     let child_tgid = NEXT_PID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     super::mem::reset_process_vma_for(child_tgid, brk_start);
     crate::fs::clone_fd_table(parent_tgid, child_tgid);
+    crate::fs::close_cloexec_fds_for(child_tgid);
     crate::task::set_current_thread_tgid(child_tgid);
     super::clone_process_cwd(parent_tgid, child_tgid);
 

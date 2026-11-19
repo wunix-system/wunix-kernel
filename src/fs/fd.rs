@@ -4,16 +4,33 @@ use spin::RwLock;
 
 use crate::fs::handle::{FileHandle, StdinHandle, StdoutStderrHandle};
 
-pub type FdMap = BTreeMap<u64, Arc<dyn FileHandle>>;
+pub const FD_CLOEXEC: u32 = 1;
+
+#[derive(Clone)]
+pub struct FdEntry {
+    pub handle: Arc<dyn FileHandle>,
+    pub flags: u32,
+}
+
+pub type FdMap = BTreeMap<u64, FdEntry>;
 
 static PROCESS_FD_TABLES: RwLock<BTreeMap<u64, Arc<RwLock<FdMap>>>> =
     RwLock::new(BTreeMap::new());
 
 fn default_stdio_map() -> FdMap {
     let mut map = BTreeMap::new();
-    map.insert(0, Arc::new(StdinHandle) as Arc<dyn FileHandle>);
-    map.insert(1, Arc::new(StdoutStderrHandle) as Arc<dyn FileHandle>);
-    map.insert(2, Arc::new(StdoutStderrHandle) as Arc<dyn FileHandle>);
+    map.insert(0, FdEntry {
+        handle: Arc::new(StdinHandle) as Arc<dyn FileHandle>,
+        flags: 0,
+    });
+    map.insert(1, FdEntry {
+        handle: Arc::new(StdoutStderrHandle) as Arc<dyn FileHandle>,
+        flags: 0,
+    });
+    map.insert(2, FdEntry {
+        handle: Arc::new(StdoutStderrHandle) as Arc<dyn FileHandle>,
+        flags: 0,
+    });
     map
 }
 
@@ -47,11 +64,19 @@ pub fn share_fd_table(source_tgid: u64, target_tgid: u64) {
 
 pub fn remove_process_fd_table(tgid: u64) {
     if let Some(table) = PROCESS_FD_TABLES.write().remove(&tgid) {
-        // Очищаем таблицу дескрипторов процесса. При освобождении ссылок Arc
-        // для ресурсов, у которых счетчик ссылок достигает нуля, автоматически
-        // срабатывает деструктор Drop (RAII), не затрагивая параллельные процессы.
         table.write().clear();
     }
+}
+
+pub fn close_cloexec_fds_for(tgid: u64) {
+    let tables = PROCESS_FD_TABLES.read();
+    if let Some(table) = tables.get(&tgid) {
+        table.write().retain(|_, entry| (entry.flags & FD_CLOEXEC) == 0);
+    }
+}
+
+pub fn close_cloexec_fds() {
+    close_cloexec_fds_for(crate::task::current_thread_tgid());
 }
 
 fn get_current_process_fd_table() -> Arc<RwLock<FdMap>> {
@@ -86,30 +111,54 @@ fn get_current_process_fd_table() -> Arc<RwLock<FdMap>> {
 
 pub fn get_file_handle(fd: u64) -> Option<Arc<dyn FileHandle>> {
     let table = get_current_process_fd_table();
-    table.read().get(&fd).cloned()
+    table.read().get(&fd).map(|e| Arc::clone(&e.handle))
+}
+
+pub fn get_fd_flags(fd: u64) -> Option<u32> {
+    let table = get_current_process_fd_table();
+    table.read().get(&fd).map(|e| e.flags)
+}
+
+pub fn set_fd_flags(fd: u64, flags: u32) -> bool {
+    let table = get_current_process_fd_table();
+    let mut map = table.write();
+    if let Some(entry) = map.get_mut(&fd) {
+        entry.flags = flags;
+        true
+    } else {
+        false
+    }
 }
 
 pub fn insert_file_handle(handle: Arc<dyn FileHandle>) -> u64 {
-    insert_file_handle_from(handle, 3)
+    insert_file_handle_flags(handle, 3, 0)
 }
 
 pub fn insert_file_handle_from(handle: Arc<dyn FileHandle>, min_fd: u64) -> u64 {
+    insert_file_handle_flags(handle, min_fd, 0)
+}
+
+pub fn insert_file_handle_flags(handle: Arc<dyn FileHandle>, min_fd: u64, flags: u32) -> u64 {
     let table = get_current_process_fd_table();
     let mut map = table.write();
     let mut candidate = min_fd;
     while map.contains_key(&candidate) {
         candidate += 1;
     }
-    map.insert(candidate, handle);
+    map.insert(candidate, FdEntry { handle, flags });
     candidate
 }
 
 pub fn insert_file_handle_at(fd: u64, handle: Arc<dyn FileHandle>) {
+    insert_file_handle_at_flags(fd, handle, 0);
+}
+
+pub fn insert_file_handle_at_flags(fd: u64, handle: Arc<dyn FileHandle>, flags: u32) {
     let table = get_current_process_fd_table();
-    table.write().insert(fd, handle);
+    table.write().insert(fd, FdEntry { handle, flags });
 }
 
 pub fn remove_file_handle(fd: u64) -> Option<Arc<dyn FileHandle>> {
     let table = get_current_process_fd_table();
-    table.write().remove(&fd)
+    table.write().remove(&fd).map(|e| e.handle)
 }

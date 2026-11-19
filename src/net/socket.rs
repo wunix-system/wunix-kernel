@@ -681,7 +681,12 @@ impl FileHandle for SocketFileHandle {
                                 *client_sock.bound_endpoint.lock() = Some(local_ep);
                                 *client_sock.peer_endpoint.lock() = Some(remote_ep);
 
-                                let new_fd = crate::fs::insert_file_handle(client_sock);
+                                let cloexec = if (flags & SOCK_CLOEXEC) != 0 {
+                                    crate::fs::FD_CLOEXEC
+                                } else {
+                                    0
+                                };
+                                let new_fd = crate::fs::insert_file_handle_flags(client_sock, 3, cloexec);
                                 return Ok((new_fd, SockAddrIn::from_endpoint(remote_ep)));
                             }
                         }
