@@ -337,6 +337,7 @@ impl FileHandle for SocketFileHandle {
                     if !sock.is_open() {
                         let local_port = alloc_ephemeral_port();
                         let _ = sock.bind(local_port);
+                        *self.bound_endpoint.lock() = Some(IpEndpoint::new(IpAddress::v4(0, 0, 0, 0), local_port));
                     }
                     if sock.can_send() {
                         match sock.send_slice(buf, dest) {
@@ -508,7 +509,10 @@ impl FileHandle for SocketFileHandle {
         let kind = *self.smol_kind.lock();
         match kind {
             SmolSocketKind::Tcp(handle) => {
-                let local_port = alloc_ephemeral_port();
+                let local_port = self.bound_endpoint.lock()
+                    .map(|ep| ep.port)
+                    .filter(|&p| p != 0)
+                    .unwrap_or_else(alloc_ephemeral_port);
                 *self.bound_endpoint.lock() = Some(IpEndpoint::new(IpAddress::v4(0, 0, 0, 0), local_port));
 
                 {
@@ -562,16 +566,32 @@ impl FileHandle for SocketFileHandle {
                     scheduler::yield_now();
                 }
             }
-            SmolSocketKind::Udp(_) | SmolSocketKind::Icmp(_) => {
-                // Для UDP/ICMP вызов connect просто фиксирует адрес назначения по умолчанию
+            SmolSocketKind::Udp(handle) => {
+                let mut guard = crate::net::NET_STACK.lock();
+                if let Some(stack) = guard.as_mut() {
+                    let sock = stack.sockets.get_mut::<UdpSocket>(handle);
+                    if !sock.is_open() {
+                        let local_port = alloc_ephemeral_port();
+                        let _ = sock.bind(local_port);
+                        *self.bound_endpoint.lock() = Some(IpEndpoint::new(IpAddress::v4(0, 0, 0, 0), local_port));
+                    }
+                }
                 Ok(())
             }
+            SmolSocketKind::Icmp(_) => Ok(()),
             SmolSocketKind::Unix => Ok(()),
         }
     }
 
     fn socket_bind(&self, addr: &SockAddrIn) -> Result<(), i64> {
-        let endpoint = addr.to_endpoint();
+        let mut endpoint = addr.to_endpoint();
+        let kind = *self.smol_kind.lock();
+        // В POSIX bind() с портом 0 запрашивает динамическое выделение свободного порта.
+        // Если оставить 0, smoltcp отправит UDP-датаграмму (например DNS-запрос от musl resolver)
+        // с source port = 0, что нарушает RFC 768 и отбрасывается QEMU SLIRP.
+        if endpoint.port == 0 && matches!(kind, SmolSocketKind::Tcp(_) | SmolSocketKind::Udp(_)) {
+            endpoint.port = alloc_ephemeral_port();
+        }
         *self.bound_endpoint.lock() = Some(endpoint);
 
         let kind = *self.smol_kind.lock();
