@@ -786,6 +786,15 @@ impl Inode for UfsInode {
         self.inner.write_inode(self.ino, &dinode)
     }
 
+    fn truncate(&self, len: usize) -> Result<(), VfsError> {
+        let mut dinode = self.dinode.lock();
+        if dinode.inode_type() == InodeType::Directory {
+            return Err(VfsError::IsADirectory);
+        }
+        dinode.size = len as u64;
+        self.inner.write_inode(self.ino, &dinode)
+    }
+
     fn rename(
         &self,
         old_name: &str,

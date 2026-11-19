@@ -283,7 +283,7 @@ pub struct Ext4Inode {
 
 impl Ext4Inode {
     fn insert_child_entry(&self, ino: u32, name: &str, itype: InodeType) -> Result<(), VfsError> {
-        let mut dinode = self.dinode.lock();
+        let mut dinode = self.inner.read_inode(self.ino).unwrap_or_else(|_| self.dinode.lock().clone());
         let block_size = self.inner.sb.lock().block_size as usize;
         let mut inserted = false;
         let mut temp_block = vec![0u8; block_size];
@@ -313,7 +313,26 @@ impl Ext4Inode {
             self.inner.write_inode(self.ino, &dinode)?;
         }
 
+        *self.dinode.lock() = dinode;
         Ok(())
+    }
+
+    fn remove_child_entry(&self, name: &str) -> Result<u32, VfsError> {
+        let dinode = self.inner.read_inode(self.ino).unwrap_or_else(|_| self.dinode.lock().clone());
+        let block_size = self.inner.sb.lock().block_size as usize;
+        let mut temp_block = vec![0u8; block_size];
+        let total_blocks = ((dinode.size as usize) + block_size - 1) / block_size;
+
+        for b in 0..total_blocks {
+            if let Some(phys) = lookup_logical_block(&dinode.block, b as u32)? {
+                self.inner.read_block(phys, &mut temp_block)?;
+                if let Ok(unlinked_ino) = remove_entry(&mut temp_block, name) {
+                    self.inner.write_block(phys, &temp_block)?;
+                    return Ok(unlinked_ino);
+                }
+            }
+        }
+        Err(VfsError::NotFound)
     }
 }
 
@@ -398,7 +417,7 @@ impl Inode for Ext4Inode {
     }
 
     fn lookup(&self, name: &str) -> Result<Arc<dyn Inode>, VfsError> {
-        let dinode = self.dinode.lock();
+        let dinode = self.inner.read_inode(self.ino).unwrap_or_else(|_| self.dinode.lock().clone());
         if dinode.inode_type() != InodeType::Directory {
             return Err(VfsError::NotADirectory);
         }
@@ -426,7 +445,7 @@ impl Inode for Ext4Inode {
     fn create(&self, name: &str, itype: InodeType) -> Result<Arc<dyn Inode>, VfsError> {
         let block_size = self.inner.sb.lock().block_size as usize;
         {
-            let dinode = self.dinode.lock();
+            let dinode = self.inner.read_inode(self.ino).unwrap_or_else(|_| self.dinode.lock().clone());
             if dinode.inode_type() != InodeType::Directory {
                 return Err(VfsError::NotADirectory);
             }
@@ -478,26 +497,22 @@ impl Inode for Ext4Inode {
     }
 
     fn unlink(&self, name: &str) -> Result<(), VfsError> {
-        let dinode = self.dinode.lock();
-        let block_size = self.inner.sb.lock().block_size as usize;
-        let mut temp_block = vec![0u8; block_size];
-        let total_blocks = ((dinode.size as usize) + block_size - 1) / block_size;
-
-        for b in 0..total_blocks {
-            if let Some(phys) = lookup_logical_block(&dinode.block, b as u32)? {
-                self.inner.read_block(phys, &mut temp_block)?;
-                if let Ok(unlinked_ino) = remove_entry(&mut temp_block, name) {
-                    self.inner.write_block(phys, &temp_block)?;
-                    let _ = self.inner.free_inode(unlinked_ino);
-                    return Ok(());
-                }
+        let unlinked_ino = self.remove_child_entry(name)?;
+        if let Ok(mut target_dinode) = self.inner.read_inode(unlinked_ino) {
+            target_dinode.links_count = target_dinode.links_count.saturating_sub(1);
+            if target_dinode.links_count == 0 {
+                let _ = self.inner.free_inode(unlinked_ino);
+            } else {
+                let _ = self.inner.write_inode(unlinked_ino, &target_dinode);
             }
+        } else {
+            let _ = self.inner.free_inode(unlinked_ino);
         }
-        Err(VfsError::NotFound)
+        Ok(())
     }
 
     fn readdir(&self) -> Result<Vec<DirEntry>, VfsError> {
-        let dinode = self.dinode.lock();
+        let dinode = self.inner.read_inode(self.ino).unwrap_or_else(|_| self.dinode.lock().clone());
         if dinode.inode_type() != InodeType::Directory {
             return Err(VfsError::NotADirectory);
         }
@@ -530,6 +545,15 @@ impl Inode for Ext4Inode {
         self.inner.write_inode(self.ino, &dinode)
     }
 
+    fn truncate(&self, len: usize) -> Result<(), VfsError> {
+        let mut dinode = self.dinode.lock();
+        if dinode.inode_type() == InodeType::Directory {
+            return Err(VfsError::IsADirectory);
+        }
+        dinode.size = len as u64;
+        self.inner.write_inode(self.ino, &dinode)
+    }
+
     fn rename(
         &self,
         old_name: &str,
@@ -541,7 +565,7 @@ impl Inode for Ext4Inode {
             .and_then(|a| a.downcast_ref::<Ext4Inode>())
             .ok_or(VfsError::NotSupported)?;
 
-        let dinode = self.dinode.lock();
+        let dinode = self.inner.read_inode(self.ino).unwrap_or_else(|_| self.dinode.lock().clone());
         if dinode.inode_type() != InodeType::Directory {
             return Err(VfsError::NotADirectory);
         }
@@ -561,7 +585,6 @@ impl Inode for Ext4Inode {
                 }
             }
         }
-        drop(dinode);
 
         let target_ino = target_ino.ok_or(VfsError::NotFound)?;
 
@@ -569,8 +592,25 @@ impl Inode for Ext4Inode {
             let _ = new_ext4.unlink(new_name);
         }
 
-        self.unlink(old_name)?;
+        // Перемещаем запись: удаляем старую запись каталога БЕЗ освобождения самого инода
+        self.remove_child_entry(old_name)?;
         new_ext4.insert_child_entry(target_ino, new_name, target_itype)?;
+
+        // Если переносится поддиректория в другого родителя, обновляем ее запись '..'
+        if target_itype == InodeType::Directory && self.ino != new_ext4.ino {
+            if let Ok(target_dinode) = self.inner.read_inode(target_ino) {
+                if let Ok(Some(first_block)) = lookup_logical_block(&target_dinode.block, 0) {
+                    let mut dir_block = vec![0u8; block_size];
+                    if self.inner.read_block(first_block, &mut dir_block).is_ok() {
+                        if dir_block.len() >= 24 && dir_block[18] == 2 && &dir_block[20..22] == b".." {
+                            dir_block[12..16].copy_from_slice(&new_ext4.ino.to_le_bytes());
+                            let _ = self.inner.write_block(first_block, &dir_block);
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
