@@ -25,7 +25,9 @@ pub const IPPROTO_ICMP: i32 = 1;
 pub const IPPROTO_TCP: i32 = 6;
 pub const IPPROTO_UDP: i32 = 17;
 
-// Генератор эфемерных портов для исходящих TCP/UDP подключений (IANA 49152..65535)
+// Диапазон динамических/приватных портов по стандарту IANA (49152-65535).
+// Используется ядром при неявном связывании или явном bind(sin_port = 0).
+// Без этого musl resolver шлёт DNS с порта 0, который режется сетевым стеком эмулятора и шлюза.
 static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(49152);
 
 pub fn alloc_ephemeral_port() -> u16 {
