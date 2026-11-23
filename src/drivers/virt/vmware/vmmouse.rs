@@ -1,9 +1,20 @@
+use alloc::collections::VecDeque;
 use crate::drivers::traits::{InputDevice, InputEvent};
 use crate::drivers::virt::vmware::backdoor::{backdoor_call, VMWARE_CMD_VMMOUSE_COMMAND, VMWARE_CMD_VMMOUSE_DATA, VMWARE_CMD_VMMOUSE_STATUS};
 
 const VMMOUSE_READ_ID: u32 = 0x4541_4552;
 const VMMOUSE_ENABLE: u32 = 0x4542_4545;
 const VMMOUSE_DISABLE: u32 = 0x0000_00F5;
+
+const EV_SYN: u16 = 0x00;
+const EV_KEY: u16 = 0x01;
+const EV_ABS: u16 = 0x03;
+
+const ABS_X: u16 = 0x00;
+const ABS_Y: u16 = 0x01;
+const BTN_LEFT: u16 = 0x110;
+const BTN_RIGHT: u16 = 0x111;
+const BTN_MIDDLE: u16 = 0x112;
 
 /// Драйвер абсолютного указателя мыши VMware (VMMOUSE).
 pub struct VmwareMouseDevice {
@@ -13,6 +24,7 @@ pub struct VmwareMouseDevice {
     last_y: u32,
     buttons: u32,
     active: bool,
+    events: VecDeque<InputEvent>,
 }
 
 impl VmwareMouseDevice {
@@ -27,6 +39,7 @@ impl VmwareMouseDevice {
             last_y: screen_height / 2,
             buttons: 0,
             active: true,
+            events: VecDeque::with_capacity(32),
         })
     }
 
@@ -46,14 +59,66 @@ impl VmwareMouseDevice {
 
             let raw_x = p_x.eax;
             let raw_y = p_y.eax;
-
-            self.buttons = p_flags.eax & 0x07;
+            let new_buttons = p_flags.eax & 0x07;
 
             let norm_x = ((raw_x as u64 * self.screen_width as u64) / 0xFFFF) as u32;
             let norm_y = ((raw_y as u64 * self.screen_height as u64) / 0xFFFF) as u32;
 
-            self.last_x = norm_x.min(self.screen_width.saturating_sub(1));
-            self.last_y = norm_y.min(self.screen_height.saturating_sub(1));
+            let new_x = norm_x.min(self.screen_width.saturating_sub(1));
+            let new_y = norm_y.min(self.screen_height.saturating_sub(1));
+
+            let mut changed = false;
+
+            if new_x != self.last_x || new_y != self.last_y {
+                self.last_x = new_x;
+                self.last_y = new_y;
+                self.events.push_back(InputEvent {
+                    type_: EV_ABS,
+                    code: ABS_X,
+                    value: new_x,
+                });
+                self.events.push_back(InputEvent {
+                    type_: EV_ABS,
+                    code: ABS_Y,
+                    value: new_y,
+                });
+                changed = true;
+            }
+
+            if new_buttons != self.buttons {
+                let diff = new_buttons ^ self.buttons;
+                if (diff & 1) != 0 {
+                    self.events.push_back(InputEvent {
+                        type_: EV_KEY,
+                        code: BTN_LEFT,
+                        value: (new_buttons & 1) as u32,
+                    });
+                }
+                if (diff & 2) != 0 {
+                    self.events.push_back(InputEvent {
+                        type_: EV_KEY,
+                        code: BTN_RIGHT,
+                        value: ((new_buttons >> 1) & 1) as u32,
+                    });
+                }
+                if (diff & 4) != 0 {
+                    self.events.push_back(InputEvent {
+                        type_: EV_KEY,
+                        code: BTN_MIDDLE,
+                        value: ((new_buttons >> 2) & 1) as u32,
+                    });
+                }
+                self.buttons = new_buttons;
+                changed = true;
+            }
+
+            if changed {
+                self.events.push_back(InputEvent {
+                    type_: EV_SYN,
+                    code: 0,
+                    value: 0,
+                });
+            }
         }
     }
 }
@@ -64,8 +129,10 @@ impl InputDevice for VmwareMouseDevice {
     }
 
     fn poll_event(&mut self) -> Option<InputEvent> {
-        self.poll();
-        None
+        if self.events.is_empty() {
+            self.poll();
+        }
+        self.events.pop_front()
     }
 
     fn current_coordinates(&self) -> (u32, u32) {
