@@ -382,6 +382,16 @@ impl XhciController {
                         serial_println!("xhci: registered USB Optical Mouse");
                         dm.register_input_device(Arc::new(Mutex::new(mouse)));
                     }
+                } else if if_class == 0x02 || if_class == 0x0A {
+                    // USB Communications / CDC Ethernet (CDC-ECM / CDC-NCM)
+                    let mac = [0x02, 0x1A, 0x2B, 0x3C, slot.slot_id, 0x01];
+                    super::classes::cdc_net::probe_cdc_device(slot.slot_id, 1, 2, mac, dm);
+                } else if if_class == 0x01 {
+                    // USB Audio Class (UAC 1.0/2.0)
+                    super::classes::audio::probe_audio_device(slot.slot_id, 1, dm);
+                } else if if_class == 0x09 {
+                    // USB Hub
+                    let _hub = super::classes::hub::UsbHub::new(slot.slot_id, 4);
                 }
             }
             idx += len;

@@ -1,3 +1,4 @@
+use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use spin::Mutex;
 use crate::drivers::manager::DeviceManager;
@@ -7,12 +8,15 @@ pub const USB_CLASS_AUDIO: u8 = 0x01;
 pub const AUDIO_SUBCLASS_CONTROL: u8 = 0x01;
 pub const AUDIO_SUBCLASS_STREAMING: u8 = 0x02;
 
+const MAX_PCM_BUFFER: usize = 32768; // 32 КиБ буфер сэмплов
+
 pub struct UsbAudioDevice {
     slot_id: u8,
     isochronous_ep: u8,
     volume: u8,
     sample_rate: u32,
     channels: u8,
+    pcm_buffer: VecDeque<u8>,
 }
 
 impl UsbAudioDevice {
@@ -23,7 +27,27 @@ impl UsbAudioDevice {
             volume: 80,
             sample_rate: 48000,
             channels: 2,
+            pcm_buffer: VecDeque::with_capacity(MAX_PCM_BUFFER),
         }
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    pub fn channels(&self) -> u8 {
+        self.channels
+    }
+
+    /// Считывает очередную порцию сэмплов для отправки в изохронный эндпоинт контроллера
+    pub fn fetch_samples(&mut self, buf: &mut [u8]) -> usize {
+        let count = buf.len().min(self.pcm_buffer.len());
+        for b in buf.iter_mut().take(count) {
+            if let Some(sample) = self.pcm_buffer.pop_front() {
+                *b = sample;
+            }
+        }
+        count
     }
 }
 
@@ -36,15 +60,25 @@ impl AudioDevice for UsbAudioDevice {
         if samples.is_empty() {
             return Ok(());
         }
-        // В реальном контроллере xHCI/EHCI данные передаются через Isochronous Transfer Ring
+
+        let available = MAX_PCM_BUFFER.saturating_sub(self.pcm_buffer.len());
+        let to_copy = samples.len().min(available);
+        if to_copy == 0 {
+            return Err(AudioDeviceError::NotReady);
+        }
+
+        for &byte in &samples[..to_copy] {
+            self.pcm_buffer.push_back(byte);
+        }
+
         crate::klog!(
-            "usb_audio: streaming {} bytes PCM ({}Hz, {}ch) to slot {} ep {}",
-            samples.len(),
-            self.sample_rate,
-            self.channels,
+            "usb_audio: buffered {} bytes PCM (total in buffer: {} bytes) for slot {} ep {}",
+            to_copy,
+            self.pcm_buffer.len(),
             self.slot_id,
             self.isochronous_ep
         );
+
         Ok(())
     }
 
@@ -55,7 +89,7 @@ impl AudioDevice for UsbAudioDevice {
     }
 
     fn is_busy(&self) -> bool {
-        false
+        !self.pcm_buffer.is_empty()
     }
 }
 
