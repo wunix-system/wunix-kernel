@@ -1,5 +1,16 @@
+use alloc::collections::VecDeque;
 use crate::drivers::keyboard::push_char;
 use crate::drivers::traits::{InputDevice, InputEvent};
+
+const EV_SYN: u16 = 0x00;
+const EV_KEY: u16 = 0x01;
+const EV_REL: u16 = 0x02;
+
+const REL_X: u16 = 0x00;
+const REL_Y: u16 = 0x01;
+const BTN_LEFT: u16 = 0x110;
+const BTN_RIGHT: u16 = 0x111;
+const BTN_MIDDLE: u16 = 0x112;
 
 /// 8-байтный отчёт USB клавиатуры (Boot Keyboard Protocol)
 #[repr(C, packed)]
@@ -29,6 +40,75 @@ impl UsbKeyboardReport {
                 push_char(ch);
             }
         }
+    }
+}
+
+/// Устройство ввода USB Клавиатура (HID Boot Keyboard)
+pub struct UsbKeyboardDevice {
+    prev_report: UsbKeyboardReport,
+    events: VecDeque<InputEvent>,
+}
+
+impl UsbKeyboardDevice {
+    pub fn new() -> Self {
+        Self {
+            prev_report: UsbKeyboardReport::default(),
+            events: VecDeque::with_capacity(32),
+        }
+    }
+
+    pub fn update(&mut self, report: &UsbKeyboardReport) {
+        report.process(&self.prev_report);
+
+        // Формируем события EV_KEY для новых нажатых клавиш
+        for &key in &report.keycodes {
+            if key != 0 && !self.prev_report.keycodes.contains(&key) {
+                self.events.push_back(InputEvent {
+                    type_: EV_KEY,
+                    code: key as u16,
+                    value: 1, // Нажата
+                });
+            }
+        }
+
+        // Формируем события отпускания для клавиш, которых больше нет в отчёте
+        for &key in &self.prev_report.keycodes {
+            if key != 0 && !report.keycodes.contains(&key) {
+                self.events.push_back(InputEvent {
+                    type_: EV_KEY,
+                    code: key as u16,
+                    value: 0, // Отпущена
+                });
+            }
+        }
+
+        if !self.events.is_empty() {
+            self.events.push_back(InputEvent {
+                type_: EV_SYN,
+                code: 0,
+                value: 0,
+            });
+        }
+
+        self.prev_report = *report;
+    }
+}
+
+impl InputDevice for UsbKeyboardDevice {
+    fn name(&self) -> &str {
+        "USB Boot Keyboard"
+    }
+
+    fn poll_event(&mut self) -> Option<InputEvent> {
+        self.events.pop_front()
+    }
+
+    fn current_coordinates(&self) -> (u32, u32) {
+        (0, 0)
+    }
+
+    fn button_mask(&self) -> u32 {
+        0
     }
 }
 
@@ -93,6 +173,7 @@ pub struct UsbMouseDevice {
     cur_x: u32,
     cur_y: u32,
     button_mask: u32,
+    events: VecDeque<InputEvent>,
 }
 
 impl UsbMouseDevice {
@@ -101,13 +182,72 @@ impl UsbMouseDevice {
             cur_x: 512,
             cur_y: 384,
             button_mask: 0,
+            events: VecDeque::with_capacity(32),
         }
     }
 
     pub fn update(&mut self, report: &UsbMouseReport) {
-        self.button_mask = (report.buttons & 0x07) as u32;
-        self.cur_x = (self.cur_x as i32 + report.x_displacement as i32).clamp(0, 1920) as u32;
-        self.cur_y = (self.cur_y as i32 + report.y_displacement as i32).clamp(0, 1080) as u32;
+        let new_buttons = (report.buttons & 0x07) as u32;
+        let dx = report.x_displacement as i32;
+        let dy = report.y_displacement as i32;
+
+        self.cur_x = (self.cur_x as i32 + dx).clamp(0, 1920) as u32;
+        self.cur_y = (self.cur_y as i32 + dy).clamp(0, 1080) as u32;
+
+        let mut changed = false;
+
+        if dx != 0 || dy != 0 {
+            if dx != 0 {
+                self.events.push_back(InputEvent {
+                    type_: EV_REL,
+                    code: REL_X,
+                    value: dx as u32,
+                });
+            }
+            if dy != 0 {
+                self.events.push_back(InputEvent {
+                    type_: EV_REL,
+                    code: REL_Y,
+                    value: dy as u32,
+                });
+            }
+            changed = true;
+        }
+
+        if new_buttons != self.button_mask {
+            let diff = new_buttons ^ self.button_mask;
+            if (diff & 1) != 0 {
+                self.events.push_back(InputEvent {
+                    type_: EV_KEY,
+                    code: BTN_LEFT,
+                    value: (new_buttons & 1),
+                });
+            }
+            if (diff & 2) != 0 {
+                self.events.push_back(InputEvent {
+                    type_: EV_KEY,
+                    code: BTN_RIGHT,
+                    value: ((new_buttons >> 1) & 1),
+                });
+            }
+            if (diff & 4) != 0 {
+                self.events.push_back(InputEvent {
+                    type_: EV_KEY,
+                    code: BTN_MIDDLE,
+                    value: ((new_buttons >> 2) & 1),
+                });
+            }
+            self.button_mask = new_buttons;
+            changed = true;
+        }
+
+        if changed {
+            self.events.push_back(InputEvent {
+                type_: EV_SYN,
+                code: 0,
+                value: 0,
+            });
+        }
     }
 }
 
@@ -117,7 +257,7 @@ impl InputDevice for UsbMouseDevice {
     }
 
     fn poll_event(&mut self) -> Option<InputEvent> {
-        None
+        self.events.pop_front()
     }
 
     fn current_coordinates(&self) -> (u32, u32) {

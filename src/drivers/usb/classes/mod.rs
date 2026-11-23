@@ -10,5 +10,5 @@ pub use cdc_net::CdcNetDevice;
 pub use hub::UsbHub;
 pub use serial::UsbSerialPort;
 
-pub use hid::{UsbKeyboardReport, UsbMouseDevice, UsbMouseReport};
+pub use hid::{UsbKeyboardDevice, UsbKeyboardReport, UsbMouseDevice, UsbMouseReport};
 pub use storage::UsbStorageDevice;

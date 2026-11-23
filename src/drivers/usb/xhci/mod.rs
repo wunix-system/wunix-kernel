@@ -374,7 +374,9 @@ impl XhciController {
                 } else if if_class == 0x03 {
                     // USB HID
                     if if_proto == 0x01 {
+                        let kbd = super::classes::hid::UsbKeyboardDevice::new();
                         serial_println!("xhci: registered USB Boot Keyboard");
+                        dm.register_input_device(Arc::new(Mutex::new(kbd)));
                     } else if if_proto == 0x02 {
                         let mouse = super::classes::hid::UsbMouseDevice::new();
                         serial_println!("xhci: registered USB Optical Mouse");
