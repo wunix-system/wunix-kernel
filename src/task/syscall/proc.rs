@@ -1,7 +1,6 @@
 use alloc::string::String;
 use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use crate::arch::x86_64::SyscallRegisters;
-use crate::serial_println;
 use super::{
     get_cwd, read_user_cstr, resolve_relative_path, set_cwd, validate_user_buffer, EACCES, EFAULT,
     EINTR, EINVAL, ENOENT, ENOEXEC, ENOMEM, ENOTDIR, EPERM, ERANGE,
@@ -800,13 +799,11 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
 
     for depth in 0..=MAX_SHEBANG_DEPTH {
         let Some((resolved_path, data, node)) = resolve_executable_file(&cur_path, &envp) else {
-            crate::serial_println!("[sys_execve] FAILED binary not found: {}", cur_path);
             return (-(ENOENT as i64)) as u64;
         };
 
         // Проверка прав на исполнение (флаг 'x') для скрипта или бинарника на каждом шаге
         if crate::fs::check_permission(&node, false, false, true).is_err() {
-            crate::serial_println!("[sys_execve] FAILED permission denied: {}", resolved_path);
             return (-(EACCES as i64)) as u64;
         }
 
@@ -869,24 +866,21 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
     let (mut user_space, elf_info, child_abi) = if crate::task::pe::is_pe(&data) {
         match crate::task::pe::load_pe(&data) {
             Ok((us, info)) => (us, info, crate::task::abi::AbiPersonality::WindowsNt),
-            Err(e) => {
-                serial_println!("[execve] PE load error for '{}': {:?}", path_str, e);
+            Err(_) => {
                 return (-(ENOEXEC as i64)) as u64;
             }
         }
     } else if crate::task::darwin::is_macho(&data) {
         match crate::task::darwin::load_macho(&data) {
             Ok((us, info)) => (us, info, crate::task::abi::AbiPersonality::Darwin),
-            Err(e) => {
-                serial_println!("[execve] Mach-O load error for '{}': {:?}", path_str, e);
+            Err(_) => {
                 return (-(ENOEXEC as i64)) as u64;
             }
         }
     } else {
         match crate::task::elf::load_elf(&data) {
             Ok((us, info)) => (us, info, crate::task::abi::AbiPersonality::Linux),
-            Err(e) => {
-                serial_println!("[execve] ELF load error for '{}': {:?}", path_str, e);
+            Err(_) => {
                 return (-(ENOEXEC as i64)) as u64;
             }
         }

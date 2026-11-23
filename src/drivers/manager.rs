@@ -122,19 +122,11 @@ impl DeviceManager {
         }
 
         let hv = virt::init();
-        serial_println!("virt: detected hypervisor: {} ({})", hv.name(), hv.display_name(true));
 
-        serial_println!("pci: scanning bus topology...");
         let mut pci_list = pci::scan::scan_all_busses();
         let mut block_count = 0usize;
 
         for dev in &mut pci_list {
-            let class_str = pci::PciClass::name(dev.class_code, dev.subclass);
-            serial_println!(
-                "pci: [{}] {:04x}:{:04x} class: {:02x}:{:02x} ({})",
-                dev.address, dev.vendor_id, dev.device_id, dev.class_code, dev.subclass, class_str
-            );
-
             if dev.vendor_id == virtio::VIRTIO_PCI_VENDOR_ID {
                 self.probe_virtio(dev, &mut block_count);
             } else if dev.class_code == 0x01 && dev.subclass == 0x01 {
@@ -223,14 +215,9 @@ impl DeviceManager {
             virtio::VirtioDeviceType::Scsi => "virtio_scsi",
             _ => "virtio_pci",
         });
-        serial_println!("virtio: found {} at {}", vtype, dev.address);
-
         let transport = match virtio::transport::create_transport_from_pci(dev) {
             Ok(t) => t,
-            Err(e) => {
-                serial_println!("virtio: transport creation failed for {}: {:?}", dev.address, e);
-                return;
-            }
+            Err(_) => return,
         };
 
         match vtype {
@@ -238,68 +225,45 @@ impl DeviceManager {
                 if let Ok(blk) = virtio::blk::VirtioBlock::new(transport) {
                     let letter = (b'a' + (*block_count as u8).min(25)) as char;
                     let name = format!("vd{}", letter);
-                    let cap_mb = (blk.sector_count() * 512) / (1024 * 1024);
-                    serial_println!("virtio-blk: registered /dev/{} ({} MB)", name, cap_mb);
                     self.register_block_device(name, Arc::new(Mutex::new(blk)));
                     *block_count += 1;
                 }
             }
             virtio::VirtioDeviceType::Scsi => {
-                match virtio::scsi::VirtioScsi::new(transport) {
-                    Ok(scsi) => {
-                        let letter = (b'a' + (*block_count as u8).min(25)) as char;
-                        let name = format!("sd{}", letter);
-                        let cap_mb =
-                            (scsi.sector_count() * scsi.sector_size() as u64) / (1024 * 1024);
-                        serial_println!("virtio-scsi: registered /dev/{} ({} MB)", name, cap_mb);
-                        self.register_block_device(name, Arc::new(Mutex::new(scsi)));
-                        *block_count += 1;
-                    }
-                    Err(e) => {
-                        serial_println!("virtio-scsi: init failed: {:?}", e);
-                    }
+                if let Ok(scsi) = virtio::scsi::VirtioScsi::new(transport) {
+                    let letter = (b'a' + (*block_count as u8).min(25)) as char;
+                    let name = format!("sd{}", letter);
+                    self.register_block_device(name, Arc::new(Mutex::new(scsi)));
+                    *block_count += 1;
                 }
             }
             virtio::VirtioDeviceType::Net => {
                 if let Ok(net) = virtio::net::VirtioNet::new(transport) {
-                    let m = net.mac_address();
-                    serial_println!("virtio-net: registered eth{} (MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
-                        self.net_devices.len(), m[0], m[1], m[2], m[3], m[4], m[5]);
                     self.register_net_device(Arc::new(Mutex::new(net)));
                 }
             }
             virtio::VirtioDeviceType::Input => {
                 if let Ok(input) = virtio::input::VirtioInput::new(transport) {
-                    serial_println!("virtio-input: registered input{} ('{}')", self.input_devices.len(), input.name());
                     self.register_input_device(Arc::new(Mutex::new(input)));
                 }
             }
             virtio::VirtioDeviceType::Gpu => {
                 if let Ok(gpu) = virtio::gpu::VirtioGpu::new(transport, 1024, 768) {
-                    let (w, h) = gpu.resolution();
-                    serial_println!("virtio-gpu: registered gpu{} ({}x{})", self.display_devices.len(), w, h);
                     self.register_display_device(Arc::new(Mutex::new(gpu)));
                 }
             }
             virtio::VirtioDeviceType::Entropy => {
                 if let Ok(rng) = virtio::rng::VirtioRng::new(transport) {
-                    serial_println!("virtio-rng: registered hardware entropy source");
                     *virtio::rng::VIRTIO_RNG.lock() = Some(rng);
                 }
             }
             virtio::VirtioDeviceType::Console => {
-                if let Ok(_cons) = virtio::console::VirtioConsole::new(transport) {
-                    serial_println!("virtio-console: registered virtual console device /dev/hvc0");
-                }
+                let _ = virtio::console::VirtioConsole::new(transport);
             }
             virtio::VirtioDeviceType::Balloon => {
-                if let Ok(_balloon) = virtio::balloon::VirtioBalloon::new(transport) {
-                    serial_println!("virtio-balloon: registered dynamic memory ballooning service");
-                }
+                let _ = virtio::balloon::VirtioBalloon::new(transport);
             }
-            _ => {
-                serial_println!("virtio: device type {:?} not activated", vtype);
-            }
+            _ => {}
         }
     }
 

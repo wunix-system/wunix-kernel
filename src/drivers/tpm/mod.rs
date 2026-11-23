@@ -10,18 +10,12 @@ static TPM_INSTANCE: Mutex<Option<TpmCrb>> = Mutex::new(None);
 pub fn init() {
     let mmio = match crate::memory::map_kernel_mmio(regs::TPM_CRB_BASE_PHYS, 4096) {
         Ok(v) => v.as_u64(),
-        Err(_) => {
-            crate::klog!("tpm: TPM 2.0 module not present");
-            return;
-        }
+        Err(_) => return,
     };
 
     let tpm = TpmCrb::new(mmio);
     if tpm.request_locality() {
-        crate::klog!("tpm: TPM 2.0 security module detected and activated (Locality 0)");
         *TPM_INSTANCE.lock() = Some(tpm);
-    } else {
-        crate::klog!("tpm: TPM 2.0 module not present or inactive");
     }
 }
 

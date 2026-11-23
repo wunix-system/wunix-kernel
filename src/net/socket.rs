@@ -522,8 +522,7 @@ impl FileHandle for SocketFileHandle {
                     let stack = guard.as_mut().ok_or(-107i64)?;
                     let sock = stack.sockets.get_mut::<TcpSocket>(handle);
                     let cx = stack.iface.context();
-                    sock.connect(cx, endpoint, local_port).map_err(|e| {
-                        crate::serial_println!("net: tcp connect error: {:?}", e);
+                    sock.connect(cx, endpoint, local_port).map_err(|_| {
                         -111i64 // -ECONNREFUSED
                     })?;
                 }

@@ -6,7 +6,6 @@ use spin::{Mutex, RwLock};
 
 use crate::drivers::{BlockDevice, BlockDeviceError};
 use crate::fs::vfs::{Inode, InodeType, Metadata, VfsError};
-use crate::serial_println;
 
 /// Блочный накопитель или логический раздел как индексный узел VFS (`/dev/vda`, `/dev/vda1`)
 pub struct BlockDevInode {
@@ -303,16 +302,6 @@ pub fn rescan_partitions(base_name: &str) {
             if let Ok(dev_dir) = crate::fs::open("/dev") {
                 let _ = dev_dir.create(&part_name, InodeType::BlockDevice);
             }
-
-            let mb = ((p.sector_count as u64) * 512) / (1024 * 1024);
-            serial_println!(
-                "mbr: registered /dev/{} start LBA {}, size {} MB ({} sectors), type {:#02x}",
-                part_name,
-                p.start_lba,
-                mb,
-                p.sector_count,
-                p.part_type
-            );
         }
     }
 }
@@ -333,7 +322,6 @@ pub fn init() {
     let dev_names =
         crate::drivers::with_device_manager(|dm| dm.block_device_names()).unwrap_or_default();
     if dev_names.is_empty() {
-        serial_println!("block: no block devices found in DeviceManager");
         return;
     }
 
@@ -356,9 +344,7 @@ pub fn init() {
             parse_mbr(&mut *d)
         };
 
-        if parts.is_empty() {
-            serial_println!("mbr: no valid partitions found on /dev/{} (raw disk)", name);
-        } else {
+        if !parts.is_empty() {
             for (i, p) in parts.iter().enumerate() {
                 let part_num = i + 1;
                 let part_name = alloc::format!("{}{}", name, part_num);
@@ -373,17 +359,6 @@ pub fn init() {
                 if let Ok(dev_dir) = crate::fs::open("/dev") {
                     let _ = dev_dir.create(&part_name, InodeType::BlockDevice);
                 }
-
-                let mb = ((p.sector_count as u64) * 512) / (1024 * 1024);
-                serial_println!(
-                    "mbr: found /dev/{} start LBA {}, size {} MB ({} sectors), type {:#02x}{}",
-                    part_name,
-                    p.start_lba,
-                    mb,
-                    p.sector_count,
-                    p.part_type,
-                    if p.bootable { " [bootable]" } else { "" }
-                );
             }
         }
     }

@@ -8,7 +8,6 @@ use super::fat::Fat32FileSystem;
 use super::path::normalize_path;
 use super::ufs::UfsFileSystem;
 use super::vfs::{FileSystem, VfsError};
-use crate::serial_println;
 
 #[derive(Clone)]
 pub struct MountEntry {
@@ -82,7 +81,6 @@ pub fn mount(source: &str, target: &str, fstype: &str, _flags: u64) -> Result<()
         fs,
     });
 
-    serial_println!("vfs: mounted {} on {} ({})", source, norm_target, detected_fstype);
     Ok(())
 }
 
@@ -95,8 +93,7 @@ pub fn umount(target: &str, _flags: i32) -> Result<(), VfsError> {
 
     match idx {
         Some(i) => {
-            let removed = table.remove(i);
-            serial_println!("vfs: unmounted {} from {}", removed.source, removed.target);
+            let _removed = table.remove(i);
             Ok(())
         }
         None => Err(VfsError::NotFound),

@@ -50,8 +50,6 @@ pub use socket::{create_socket, SockAddrIn, SocketFileHandle};
 pub use tar::unpack_tar;
 pub use vfs::{DirEntry, FileSystem, Inode, InodeType, Metadata, VfsError};
 
-use crate::serial_println;
-
 /// Инициализирует подсистему виртуальной файловой системы (VFS):
 /// 1. Монтирует RamFS в качестве корня '/'.
 /// 2. Создает гибридный скелет директорий Unix/NT.
@@ -93,15 +91,11 @@ pub fn init(initramfs_data: Option<&[u8]>) {
     ];
 
     for dir in SKELETON_DIRS {
-        if let Err(e) = mkdir_p(dir) {
-            serial_println!("vfs: failed to create skeleton dir '{}': {:?}", dir, e);
-        }
+        let _ = mkdir_p(dir);
     }
 
     // Создаем каталог для пользователей Windows:
-    if let Err(e) = mkdir_p("/win/drives/c/Users") {
-        serial_println!("vfs: failed to create /win/drives/c/Users: {:?}", e);
-    }
+    let _ = mkdir_p("/win/drives/c/Users");
 
     // Если Limine передал initramfs — распаковываем его поверх корня
     let root_node = root().expect("vfs: root inode must exist");

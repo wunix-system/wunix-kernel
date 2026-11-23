@@ -85,12 +85,10 @@ pub fn load_macho(bytes: &[u8]) -> Result<(UserAddressSpace, ElfLoadInfo), ElfEr
 
     let header = unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const MachHeader64) };
     if header.magic != MH_MAGIC_64 {
-        crate::serial_println!("[macho] unsupported magic: {:#x}", header.magic);
         return Err(ElfError::InvalidMagic);
     }
 
     if header.cputype != CPU_TYPE_X86_64 {
-        crate::serial_println!("[macho] unsupported cputype: {:#x}", header.cputype);
         return Err(ElfError::UnsupportedMachine);
     }
 

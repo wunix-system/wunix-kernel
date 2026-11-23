@@ -210,9 +210,6 @@ pub fn init() -> Option<Arc<Mutex<Ps2Mouse>>> {
         let dev_id = data_port.read();
         if dev_id == 0x03 || dev_id == 0x04 {
             mouse.is_intellimouse = true;
-            crate::klog!("ps2_mouse: Microsoft IntelliMouse detected (ID: {:#x})", dev_id);
-        } else {
-            crate::klog!("ps2_mouse: Standard 3-button PS/2 mouse detected");
         }
 
         send_mouse_cmd(MOUSE_CMD_SET_RESOLUTION);

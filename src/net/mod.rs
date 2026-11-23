@@ -13,7 +13,6 @@ use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpo
 use self::device::NetDeviceSmolAdapter;
 pub use self::socket::{create_socket, SockAddrIn, SocketFileHandle};
 use crate::drivers::NetDevice;
-use crate::serial_println;
 
 /// Вычисляет IPv4-маску подсети в сетевом порядке байт по длине префикса CIDR
 pub fn prefix_to_netmask(prefix: u8) -> [u8; 4] {
@@ -67,8 +66,6 @@ pub fn init(net_dev: Arc<Mutex<dyn NetDevice>>) {
     let dhcp_socket = dhcpv4::Socket::new();
     let dhcp_handle = sockets.add(dhcp_socket);
 
-    serial_println!("net: discovering network configuration via DHCPv4...");
-
     let mut ip = [0u8; 4];
     let mut netmask = [0u8; 4];
     let mut gateway = [0u8; 4];
@@ -111,7 +108,6 @@ pub fn init(net_dev: Arc<Mutex<dyn NetDevice>>) {
 
     if !dhcp_ok {
         // Если DHCP-сервер в сети не обнаружен, используем fallback
-        serial_println!("net: DHCP discovery timed out, applying fallback static configuration");
         ip = [10, 0, 2, 15];
         netmask = [255, 255, 255, 0];
         gateway = [10, 0, 2, 2];
@@ -174,22 +170,6 @@ pub fn init(net_dev: Arc<Mutex<dyn NetDevice>>) {
         dns[0], dns[1], dns[2], dns[3]
     );
     let _ = crate::fs::ops::write_file_ramfs("/etc/resolv.conf", resolv_content.as_bytes());
-
-    if dhcp_ok {
-        serial_println!(
-            "net: eth0 ready (DHCP lease): IP {}.{}.{}.{}, Mask {}.{}.{}.{}, GW {}.{}.{}.{}, DNS {}.{}.{}.{}",
-            ip[0], ip[1], ip[2], ip[3],
-            netmask[0], netmask[1], netmask[2], netmask[3],
-            gateway[0], gateway[1], gateway[2], gateway[3],
-            dns[0], dns[1], dns[2], dns[3]
-        );
-    } else {
-        serial_println!(
-            "net: eth0 ready (fallback): IP {}.{}.{}.{}/24, GW {}.{}.{}.{}",
-            ip[0], ip[1], ip[2], ip[3],
-            gateway[0], gateway[1], gateway[2], gateway[3]
-        );
-    }
 }
 
 static LAST_ARP_REFRESH: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);

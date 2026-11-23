@@ -355,9 +355,6 @@ pub fn sys_futex(
             uaddr2,
             val3 as u32,
         )),
-        _ => {
-            crate::serial_println!("[futex] unhandled cmd={} (op={:#x})", cmd, op);
-            (-(38i64)) as u64 // -ENOSYS
-        }
+        _ => (-(38i64)) as u64, // -ENOSYS
     }
 }

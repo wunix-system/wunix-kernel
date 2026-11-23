@@ -2,7 +2,6 @@ pub mod file;
 pub mod registry;
 
 use crate::arch::x86_64::SyscallRegisters;
-use crate::serial_println;
 pub use file::*;
 pub use registry::*;
 
@@ -233,9 +232,6 @@ pub fn win_syscall_dispatcher(
                 STATUS_SUCCESS
             }
         }
-        _ => {
-            serial_println!("[nt-syscall] unhandled NT call SSN={:#x}", nr);
-            STATUS_UNSUCCESSFUL
-        }
+        _ => STATUS_UNSUCCESSFUL,
     }
 }

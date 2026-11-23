@@ -86,10 +86,6 @@ pub fn init() {
         // FMASK — биты RFLAGS, которые процессор обнулит при входе в syscall
         wrmsr(IA32_FMASK, FMASK_VALUE);
     }
-
-    crate::serial_println!("syscall: MSR configured (STAR={:#x}, LSTAR={:#x})",
-        unsafe { rdmsr(IA32_STAR) },
-        unsafe { rdmsr(IA32_LSTAR) });
 }
 
 // Точка входа syscall — ассемблерный трамплин.

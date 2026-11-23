@@ -16,7 +16,6 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::arch::x86_64::SyscallRegisters;
-use crate::serial_println;
 
 pub use at::*;
 pub use creds::*;
@@ -584,10 +583,7 @@ pub fn linux_syscall_dispatcher(
         SYS_CLONE3 => sys_clone3(arg1, arg2, r),
         SYS_CLOSE_RANGE => sys_close_range(arg1, arg2, arg3),
         SYS_FACCESSAT2 => sys_faccessat2(arg1 as i64, arg2, arg3, arg4),
-        _ => {
-            serial_println!("[syscall-linux] unhandled syscall nr={}", nr);
-            (-(ENOSYS as i64)) as u64
-        }
+        _ => (-(ENOSYS as i64)) as u64,
     }
 }
 

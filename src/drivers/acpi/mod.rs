@@ -55,10 +55,8 @@ pub fn init() {
 
     let rsdp = unsafe { &*(rsdp_virt as *const Rsdp) };
     if !rsdp.is_valid() {
-        crate::klog!("acpi: invalid RSDP structure at {:#x}", rsdp_phys);
         return;
     }
-    crate::klog!("acpi: RSDP registered (revision {})", rsdp.revision);
 
     let mut fadt_found = false;
     let mut madt_found = false;
@@ -111,9 +109,7 @@ fn process_table(table_phys: u64, fadt_found: &mut bool, madt_found: &mut bool) 
 
     if &header.signature == b"FACP" && !*fadt_found {
         let fadt = unsafe { &*(table_virt as *const Fadt) };
-        let pm1a = fadt.pm1a_control_block;
         power::init_power_from_fadt(fadt);
-        crate::klog!("acpi: FADT registered (PM1a port: {:#x})", pm1a);
         *fadt_found = true;
     } else if &header.signature == b"APIC" && !*madt_found {
         parse_madt(table_phys, table_virt);
@@ -158,13 +154,6 @@ fn parse_madt(_madt_phys: u64, madt_virt: u64) {
 
         offset += entry_len;
     }
-
-    crate::klog!(
-        "acpi: MADT registered (Local APIC: {:#x}, IO-APICs: {}, ISOs: {})",
-        lapic_phys,
-        io_apics.len(),
-        isos.len()
-    );
 
     *MADT_INFO.lock() = Some(MadtInfo {
         local_apic_phys: lapic_phys,

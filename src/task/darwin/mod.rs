@@ -12,7 +12,6 @@ pub mod macho;
 pub use macho::{is_macho, load_macho};
 
 use crate::arch::x86_64::SyscallRegisters;
-use crate::serial_println;
 
 pub const SYSCALL_CLASS_MASK: u64 = 0xFF00_0000;
 pub const SYSCALL_CLASS_MACH: u64 = 0x0100_0000;
@@ -119,7 +118,6 @@ pub fn darwin_syscall_dispatcher(
                 crate::task::syscall::sys_nanosleep(arg1, arg2)
             }
             _ => {
-                serial_println!("[darwin-bsd] unhandled BSD syscall nr={}", call_nr);
                 (-(BSD_ENOSYS as i64)) as u64
             }
         }
@@ -138,16 +136,13 @@ pub fn darwin_syscall_dispatcher(
                 3 // Порт хоста
             }
             -31 => { // mach_msg_trap
-                serial_println!("[darwin-mach] mach_msg_trap called");
                 0 // KERN_SUCCESS
             }
             _ => {
-                serial_println!("[darwin-mach] unhandled Mach trap nr={}", call_nr as i32);
                 1 // KERN_FAILURE
             }
         }
     } else {
-        serial_println!("[darwin] unknown syscall class {:#x}, nr={:#x}", class, nr);
         (-(BSD_ENOSYS as i64)) as u64
     }
 }
