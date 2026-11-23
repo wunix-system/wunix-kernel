@@ -23,6 +23,7 @@ pub struct I2cHidDescriptor {
 
 pub struct I2cTouchpad {
     slave_addr: u8,
+    i2c_base: u64,
     desc: I2cHidDescriptor,
     x: u32,
     y: u32,
@@ -35,6 +36,7 @@ pub struct I2cTouchpad {
 impl I2cTouchpad {
     pub fn probe(
         i2c: &mut DesignwareI2c,
+        i2c_base: u64,
         slave_addr: u8,
         screen_w: u32,
         screen_h: u32,
@@ -70,6 +72,7 @@ impl I2cTouchpad {
 
         Ok(Self {
             slave_addr,
+            i2c_base,
             desc,
             x: screen_w / 2,
             y: screen_h / 2,
@@ -133,6 +136,10 @@ impl InputDevice for I2cTouchpad {
     }
 
     fn poll_event(&mut self) -> Option<InputEvent> {
+        if self.events.is_empty() && self.i2c_base != 0 {
+            let mut i2c = DesignwareI2c::new(self.i2c_base);
+            self.poll(&mut i2c);
+        }
         self.events.pop_front()
     }
 

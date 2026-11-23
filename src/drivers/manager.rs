@@ -160,6 +160,8 @@ impl DeviceManager {
                 }
             } else if super::audio::probe_pci(dev, self) {
                 // Звуковые контроллеры Intel HDA и AC'97
+            } else if super::i2c::probe_pci(dev, self) {
+                // Контроллеры шины I2C (Synopsys DesignWare / Intel LPSS) и тачпады I2C-HID
             } else if let Some(nic) = super::e1000::probe_pci(dev) {
                 dev.driver_name = Some("e1000");
                 let mac = nic.mac_address();
