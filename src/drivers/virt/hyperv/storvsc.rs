@@ -77,11 +77,44 @@ impl StorVscDevice {
         };
         self.channel.send_packet(1, raw).map_err(|_| BlockDeviceError::IoError)?;
 
+        let mut resp_buf = [0u8; 128];
+        for _ in 0..50_000 {
+            if let Ok(Some(n)) = self.channel.receive_packet(&mut resp_buf) {
+                if n >= core::mem::size_of::<VstorPacket>() + 8 {
+                    let offset = core::mem::size_of::<VstorPacket>();
+                    let last_lba = u32::from_be_bytes([
+                        resp_buf[offset],
+                        resp_buf[offset + 1],
+                        resp_buf[offset + 2],
+                        resp_buf[offset + 3],
+                    ]) as u64;
+                    let block_len = u32::from_be_bytes([
+                        resp_buf[offset + 4],
+                        resp_buf[offset + 5],
+                        resp_buf[offset + 6],
+                        resp_buf[offset + 7],
+                    ]) as usize;
+                    if last_lba > 0 {
+                        self.sector_count = last_lba + 1;
+                    }
+                    if block_len > 0 {
+                        self.sector_size = block_len;
+                    }
+                    break;
+                }
+            }
+            core::hint::spin_loop();
+        }
+
         Ok(())
     }
 }
 
 impl BlockDevice for StorVscDevice {
+    fn driver_name(&self) -> &'static str {
+        "hyperv-storvsc"
+    }
+
     fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
         let num_sectors = (buf.len() / self.sector_size) as u32;
 
@@ -104,6 +137,28 @@ impl BlockDevice for StorVscDevice {
                 core::slice::from_raw_parts(&pkt as *const _ as *const u8, core::mem::size_of::<VstorPacket>())
             };
             self.channel.send_packet(1, raw).map_err(|_| BlockDeviceError::IoError)?;
+
+            let mut resp_buf = [0u8; 1024];
+            let mut received = false;
+            for _ in 0..50_000 {
+                if let Ok(Some(n)) = self.channel.receive_packet(&mut resp_buf) {
+                    if n >= core::mem::size_of::<VstorPacket>() {
+                        let payload_offset = core::mem::size_of::<VstorPacket>();
+                        let copy_len = (n.saturating_sub(payload_offset)).min(self.sector_size);
+                        let dest = (s as usize) * self.sector_size;
+                        if copy_len > 0 {
+                            buf[dest..dest + copy_len].copy_from_slice(&resp_buf[payload_offset..payload_offset + copy_len]);
+                        }
+                        received = true;
+                        break;
+                    }
+                }
+                core::hint::spin_loop();
+            }
+
+            if !received {
+                return Err(BlockDeviceError::IoError);
+            }
         }
 
         Ok(())
@@ -111,6 +166,7 @@ impl BlockDevice for StorVscDevice {
 
     fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
         let num_sectors = (buf.len() / self.sector_size) as u32;
+        let pkt_size = core::mem::size_of::<VstorPacket>();
 
         for s in 0..num_sectors {
             let lba = (start_sector + s as u64) as u32;
@@ -127,10 +183,37 @@ impl BlockDevice for StorVscDevice {
             pkt.cdb[5] = (lba & 0xFF) as u8;
             pkt.cdb[8] = 1;
 
-            let raw = unsafe {
-                core::slice::from_raw_parts(&pkt as *const _ as *const u8, core::mem::size_of::<VstorPacket>())
-            };
-            self.channel.send_packet(1, raw).map_err(|_| BlockDeviceError::IoError)?;
+            let mut req_buf = [0u8; 1024];
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    &pkt as *const _ as *const u8,
+                    req_buf.as_mut_ptr(),
+                    pkt_size,
+                );
+            }
+
+            let src = (s as usize) * self.sector_size;
+            req_buf[pkt_size..pkt_size + self.sector_size].copy_from_slice(&buf[src..src + self.sector_size]);
+
+            self.channel
+                .send_packet(1, &req_buf[..pkt_size + self.sector_size])
+                .map_err(|_| BlockDeviceError::IoError)?;
+
+            let mut resp_buf = [0u8; 128];
+            let mut acked = false;
+            for _ in 0..50_000 {
+                if let Ok(Some(n)) = self.channel.receive_packet(&mut resp_buf) {
+                    if n >= pkt_size {
+                        acked = true;
+                        break;
+                    }
+                }
+                core::hint::spin_loop();
+            }
+
+            if !acked {
+                return Err(BlockDeviceError::IoError);
+            }
         }
 
         Ok(())
