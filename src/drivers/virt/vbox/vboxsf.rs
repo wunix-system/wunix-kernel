@@ -4,7 +4,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::RwLock;
 
+use crate::drivers::virt::vbox::hgcm::{HgcmClient, HgcmParm, SHFL_FN_QUERY_MAP_INFO};
 use crate::fs::vfs::{DirEntry, FileSystem, Inode, InodeType, Metadata, VfsError};
+use crate::serial_println;
 
 /// Индексный узел общей папки VirtualBox (VBoxSF Inode)
 pub struct VBoxSfInode {
@@ -14,10 +16,11 @@ pub struct VBoxSfInode {
     inode_id: u64,
     content: RwLock<Vec<u8>>,
     children: RwLock<BTreeMap<String, Arc<VBoxSfInode>>>,
+    hgcm: Option<Arc<HgcmClient>>,
 }
 
 impl VBoxSfInode {
-    pub fn new_dir(name: String, inode_id: u64) -> Self {
+    pub fn new_dir(name: String, inode_id: u64, hgcm: Option<Arc<HgcmClient>>) -> Self {
         Self {
             name,
             itype: InodeType::Directory,
@@ -25,10 +28,11 @@ impl VBoxSfInode {
             inode_id,
             content: RwLock::new(Vec::new()),
             children: RwLock::new(BTreeMap::new()),
+            hgcm,
         }
     }
 
-    pub fn new_file(name: String, inode_id: u64, content: Vec<u8>) -> Self {
+    pub fn new_file(name: String, inode_id: u64, content: Vec<u8>, hgcm: Option<Arc<HgcmClient>>) -> Self {
         let size = content.len();
         Self {
             name,
@@ -37,6 +41,7 @@ impl VBoxSfInode {
             inode_id,
             content: RwLock::new(content),
             children: RwLock::new(BTreeMap::new()),
+            hgcm,
         }
     }
 
@@ -141,8 +146,8 @@ impl Inode for VBoxSfInode {
 
         let new_id = (self.inode_id * 31) ^ (children.len() as u64 + 1);
         let node = match itype {
-            InodeType::Directory => Arc::new(VBoxSfInode::new_dir(name.into(), new_id)),
-            _ => Arc::new(VBoxSfInode::new_file(name.into(), new_id, Vec::new())),
+            InodeType::Directory => Arc::new(VBoxSfInode::new_dir(name.into(), new_id, self.hgcm.clone())),
+            _ => Arc::new(VBoxSfInode::new_file(name.into(), new_id, Vec::new(), self.hgcm.clone())),
         };
 
         children.insert(name.into(), node.clone());
@@ -162,19 +167,41 @@ impl Inode for VBoxSfInode {
 pub struct VBoxSfFileSystem {
     root: Arc<VBoxSfInode>,
     share_name: String,
+    hgcm: Option<Arc<HgcmClient>>,
 }
 
 impl VBoxSfFileSystem {
     pub fn new(share_name: &str) -> Self {
-        let root = Arc::new(VBoxSfInode::new_dir("/".into(), 1));
+        let hgcm_client = match HgcmClient::connect("VBoxSharedFolders") {
+            Ok(client) => {
+                let arc_c = Arc::new(client);
+                // Отправляем запрос информации о сопоставлении каталога хоста
+                let parms = [HgcmParm {
+                    parm_type: 1, // 32-bit uint
+                    val_u64: 0,
+                    val_extra: 0,
+                }];
+                let _ = arc_c.call(SHFL_FN_QUERY_MAP_INFO, &parms);
+                serial_println!("vboxsf: connected to host shared folder service for '{}'", share_name);
+                Some(arc_c)
+            }
+            Err(_) => None,
+        };
+
+        let root = Arc::new(VBoxSfInode::new_dir("/".into(), 1, hgcm_client.clone()));
         Self {
             root,
             share_name: share_name.into(),
+            hgcm: hgcm_client,
         }
     }
 
     pub fn share_name(&self) -> &str {
         &self.share_name
+    }
+
+    pub fn is_host_connected(&self) -> bool {
+        self.hgcm.is_some()
     }
 }
 
