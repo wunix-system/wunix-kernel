@@ -772,24 +772,10 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> u64 {
         envp.push(String::from("TERM=xterm-256color"));
     }
     if !envp.iter().any(|v| v.starts_with("LANG=")) {
-        match crate::i18n::current_language() {
-            crate::i18n::Language::Russian => {
-                envp.push(String::from("LANG=ru_RU.UTF-8"));
-            }
-            crate::i18n::Language::English => {
-                envp.push(String::from("LANG=en_US.UTF-8"));
-            }
-        }
+        envp.push(alloc::format!("LANG={}", crate::i18n::current_locale()));
     }
     if !envp.iter().any(|v| v.starts_with("LC_ALL=")) {
-        match crate::i18n::current_language() {
-            crate::i18n::Language::Russian => {
-                envp.push(String::from("LC_ALL=ru_RU.UTF-8"));
-            }
-            crate::i18n::Language::English => {
-                envp.push(String::from("LC_ALL=en_US.UTF-8"));
-            }
-        }
+        envp.push(alloc::format!("LC_ALL={}", crate::i18n::current_locale()));
     }
 
     let mut cur_path = path_str;

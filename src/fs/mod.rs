@@ -125,12 +125,8 @@ pub fn init(initramfs_data: Option<&[u8]>) {
     }
 
     // Сохраняем системный язык в /etc/locale и /etc/environment для пользовательских программ
-    let (lang_str, lc_all_str) = match crate::i18n::current_language() {
-        crate::i18n::Language::Russian => ("LANG=ru_RU.UTF-8\n", "LC_ALL=ru_RU.UTF-8\n"),
-        crate::i18n::Language::English => ("LANG=en_US.UTF-8\n", "LC_ALL=en_US.UTF-8\n"),
-    };
-    let mut locale_buf = alloc::string::String::from(lang_str);
-    locale_buf.push_str(lc_all_str);
+    let loc = crate::i18n::current_locale();
+    let locale_buf = alloc::format!("LANG={}\nLC_ALL={}\n", loc, loc);
     let _ = write_file("/etc/locale", locale_buf.as_bytes());
 
     let mut env_buf = read_file("/etc/environment")
@@ -141,13 +137,13 @@ pub fn init(initramfs_data: Option<&[u8]>) {
         if !env_buf.is_empty() && !env_buf.ends_with('\n') {
             env_buf.push('\n');
         }
-        env_buf.push_str(lang_str);
+        env_buf.push_str(&alloc::format!("LANG={}\n", loc));
     }
     if !env_buf.contains("LC_ALL=") {
         if !env_buf.is_empty() && !env_buf.ends_with('\n') {
             env_buf.push('\n');
         }
-        env_buf.push_str(lc_all_str);
+        env_buf.push_str(&alloc::format!("LC_ALL={}\n", loc));
     }
     let _ = write_file("/etc/environment", env_buf.as_bytes());
 
