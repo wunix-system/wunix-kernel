@@ -9,7 +9,8 @@ use crate::drivers::pci;
 use crate::drivers::traits::{AudioDevice, BlockDevice, DisplayDevice, InputDevice, NetDevice};
 use crate::drivers::virt::{self, HypervisorType};
 use crate::drivers::virtio;
-use crate::serial_println;
+use crate::i18n::{current_language, t, Language};
+use crate::kboot;
 
 /// Реестр устройств ядра Wunix (DeviceManager)
 pub struct DeviceManager {
@@ -119,10 +120,27 @@ impl DeviceManager {
         super::tpm::init();
         if let Some(mouse) = super::input::ps2_mouse::init() {
             self.register_input_device(mouse);
+            kboot!(
+                "pms0",
+                "{}",
+                t("мышь PS/2 (IRQ12)", "PS/2 mouse (IRQ12)")
+            );
         }
 
         let hv = virt::init();
+        let lang_ru = current_language() == Language::Russian;
+        kboot!(
+            "vmm0",
+            "{} — {}",
+            t("среда выполнения", "platform"),
+            hv.display_name(lang_ru)
+        );
 
+        kboot!(
+            "pci0",
+            "{}",
+            t("<шина PCI>", "<PCI bus>")
+        );
         let mut pci_list = pci::scan::scan_all_busses();
         let mut block_count = 0usize;
 
@@ -165,17 +183,35 @@ impl DeviceManager {
             } else if let Some(nic) = super::e1000::probe_pci(dev) {
                 dev.driver_name = Some("e1000");
                 let mac = nic.mac_address();
-                serial_println!(
-                    "e1000: registered eth{} (Intel PRO/1000, MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+                kboot!(
+                    "e1000",
+                    "{} eth{} (Intel PRO/1000, MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+                    t("зарегистрирован интерфейс", "registered interface"),
                     self.net_devices.len(), mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
                 );
                 self.register_net_device(Arc::new(Mutex::new(nic)));
             }
+            log_pci_device(dev);
         }
 
         self.pci_devices = pci_list;
         self.init_hypervisor_integrations(hv);
         super::audio::init_legacy(self);
+
+        kboot!(
+            "pci0",
+            "{}: {} ({}: {}, {}: {}, {}: {}, {}: {})",
+            t("обнаружено устройств", "devices found"),
+            self.pci_devices.len(),
+            t("дисков", "disks"),
+            self.block_devices.len(),
+            t("сетей", "net"),
+            self.net_devices.len(),
+            t("дисплеев", "display"),
+            self.display_devices.len(),
+            t("ввода", "input"),
+            self.input_devices.len()
+        );
     }
 
     /// Инициализация обнаруженного контроллера IDE/ATA
@@ -195,11 +231,15 @@ impl DeviceManager {
         for (port, is_slave, name) in channels {
             if let Some(ata) = super::ata::AtaDevice::probe(port, is_slave) {
                 let cap_mb = (ata.sector_count() * 512) / (1024 * 1024);
-                serial_println!(
-                    "ata: registered /dev/{} ({} MB, {} sectors)",
+                kboot!(
+                    "ata",
+                    "{} /dev/{} ({} {}, {} {})",
+                    t("обнаружен диск", "registered disk"),
                     name,
                     cap_mb,
-                    ata.sector_count()
+                    t("МБ", "MiB"),
+                    ata.sector_count(),
+                    t("секторов", "sectors")
                 );
                 self.register_block_device(String::from(name), Arc::new(Mutex::new(ata)));
             }
@@ -227,6 +267,18 @@ impl DeviceManager {
                 if let Ok(blk) = virtio::blk::VirtioBlock::new(transport) {
                     let letter = (b'a' + (*block_count as u8).min(25)) as char;
                     let name = format!("vd{}", letter);
+                    let sectors = blk.sector_count();
+                    let cap_mb = (sectors * blk.sector_size() as u64) / (1024 * 1024);
+                    kboot!(
+                        "virtio-blk",
+                        "{} /dev/{} ({} {}, {} {})",
+                        t("инициализирован диск", "initialized disk"),
+                        name,
+                        cap_mb,
+                        t("МБ", "MiB"),
+                        sectors,
+                        t("секторов", "sectors")
+                    );
                     self.register_block_device(name, Arc::new(Mutex::new(blk)));
                     *block_count += 1;
                 }
@@ -235,28 +287,61 @@ impl DeviceManager {
                 if let Ok(scsi) = virtio::scsi::VirtioScsi::new(transport) {
                     let letter = (b'a' + (*block_count as u8).min(25)) as char;
                     let name = format!("sd{}", letter);
+                    let sectors = scsi.sector_count();
+                    let cap_mb = (sectors * scsi.sector_size() as u64) / (1024 * 1024);
+                    kboot!(
+                        "virtio-scsi",
+                        "{} /dev/{} ({} {})",
+                        t("инициализирован SCSI диск", "initialized SCSI disk"),
+                        name,
+                        cap_mb,
+                        t("МБ", "MiB")
+                    );
                     self.register_block_device(name, Arc::new(Mutex::new(scsi)));
                     *block_count += 1;
                 }
             }
             virtio::VirtioDeviceType::Net => {
                 if let Ok(net) = virtio::net::VirtioNet::new(transport) {
+                    let mac = net.mac_address();
+                    kboot!(
+                        "virtio-net",
+                        "{} eth{} (MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, RX/TX)",
+                        t("сетевой адаптер", "network adapter"),
+                        self.net_devices.len(),
+                        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+                    );
                     self.register_net_device(Arc::new(Mutex::new(net)));
                 }
             }
             virtio::VirtioDeviceType::Input => {
                 if let Ok(input) = virtio::input::VirtioInput::new(transport) {
+                    kboot!(
+                        "virtio-input",
+                        "{}",
+                        t("устройство ввода зарегистрировано", "input device registered")
+                    );
                     self.register_input_device(Arc::new(Mutex::new(input)));
                 }
             }
             virtio::VirtioDeviceType::Gpu => {
                 if let Ok(gpu) = virtio::gpu::VirtioGpu::new(transport, 1024, 768) {
+                    kboot!(
+                        "virtio-gpu",
+                        "{} (1024x768)",
+                        t("графический 2D-адаптер инициализирован", "2D graphics adapter initialized")
+                    );
                     self.register_display_device(Arc::new(Mutex::new(gpu)));
                 }
             }
             virtio::VirtioDeviceType::Entropy => {
                 if let Ok(rng) = virtio::rng::VirtioRng::new(transport) {
                     *virtio::rng::VIRTIO_RNG.lock() = Some(rng);
+                    kboot!(
+                        "virtio-rng",
+                        "{}",
+                        t("активирован генератор энтропии", "hardware entropy device enabled")
+                    );
                 }
             }
             virtio::VirtioDeviceType::Console => {
@@ -293,6 +378,29 @@ impl DeviceManager {
 }
 
 pub static DEVICE_MANAGER: RwLock<Option<DeviceManager>> = RwLock::new(None);
+
+fn log_pci_device(dev: &pci::PciDevice) {
+    let vendor = crate::fs::procfs::pci_vendor_name(dev.vendor_id);
+    let dev_name = crate::fs::procfs::pci_device_name(dev.vendor_id, dev.device_id);
+    let label = if dev_name == "Generic Device" {
+        pci::PciClass::name(dev.class_code, dev.subclass)
+    } else {
+        dev_name
+    };
+    let drv = dev
+        .driver_name
+        .unwrap_or_else(|| crate::fs::procfs::pci_driver_name(dev.vendor_id, dev.device_id));
+    kboot!(
+        "",
+        "pci0:{:02x}:{:02x}.{}: {} {} ({})",
+        dev.address.bus,
+        dev.address.device,
+        dev.address.function,
+        vendor,
+        label,
+        drv
+    );
+}
 
 /// Инициализирует глобальный менеджер устройств ядра Wunix
 pub fn init() {

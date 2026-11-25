@@ -16,6 +16,14 @@ pub fn init() {
     let tpm = TpmCrb::new(mmio);
     if tpm.request_locality() {
         *TPM_INSTANCE.lock() = Some(tpm);
+        crate::kboot!(
+            "tpm0",
+            "{}",
+            crate::i18n::t(
+                "модуль безопасности TPM 2.0 (CRB)",
+                "TPM 2.0 CRB security module"
+            )
+        );
     }
 }
 

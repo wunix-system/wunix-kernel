@@ -53,7 +53,17 @@ pub struct NetInfo {
 
 /// Инициализация сетевого стека ядра поверх сетевого адаптера `NetDevice` с автонастройкой по DHCP
 pub fn init(net_dev: Arc<Mutex<dyn NetDevice>>) {
+    use crate::i18n::t;
+
+    let driver_name = net_dev.lock().driver_name();
     let mac = net_dev.lock().mac_address();
+    crate::kboot!(
+        "eth0",
+        "{} (MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+        driver_name,
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    );
+
     let mut device = NetDeviceSmolAdapter::new(net_dev.clone());
 
     // Конфигурируем L2 MAC-адрес интерфейса
@@ -67,10 +77,17 @@ pub fn init(net_dev: Arc<Mutex<dyn NetDevice>>) {
     let dhcp_handle = sockets.add(dhcp_socket);
 
     let mut ip = [0u8; 4];
+    let mut prefix_len = 24u8;
     let mut netmask = [0u8; 4];
     let mut gateway = [0u8; 4];
     let mut dns = [1, 1, 1, 1]; // Нейтральный глобальный fallback Cloudflare DNS
     let mut dhcp_ok = false;
+
+    crate::kboot!(
+        t("сеть", "net"),
+        "{}",
+        t("отправка DHCPv4 Discover (ожидание конфигурации IP)...", "sending DHCPv4 Discover (waiting for IP lease)...")
+    );
 
     // Первоначальный опрос DHCP-сервера (таймаут ~1.5 секунды / 150 тиков)
     let start_tick = crate::arch::x86_64::timer::ticks();
@@ -83,7 +100,8 @@ pub fn init(net_dev: Arc<Mutex<dyn NetDevice>>) {
         if let Some(dhcpv4::Event::Configured(cfg)) = event {
             let cidr = cfg.address;
             ip = cidr.address().0;
-            netmask = prefix_to_netmask(cidr.prefix_len());
+            prefix_len = cidr.prefix_len();
+            netmask = prefix_to_netmask(prefix_len);
 
             iface.update_ip_addrs(|addrs| {
                 addrs.clear();
@@ -106,7 +124,16 @@ pub fn init(net_dev: Arc<Mutex<dyn NetDevice>>) {
         core::hint::spin_loop();
     }
 
-    if !dhcp_ok {
+    if dhcp_ok {
+        crate::kboot!(
+            "eth0",
+            "DHCP: {}.{}.{}.{}/{}, {} {}.{}.{}.{}, DNS {}.{}.{}.{}",
+            ip[0], ip[1], ip[2], ip[3], prefix_len,
+            t("шлюз", "gateway"),
+            gateway[0], gateway[1], gateway[2], gateway[3],
+            dns[0], dns[1], dns[2], dns[3]
+        );
+    } else {
         // Если DHCP-сервер в сети не обнаружен, используем fallback
         ip = [10, 0, 2, 15];
         netmask = [255, 255, 255, 0];
@@ -121,6 +148,16 @@ pub fn init(net_dev: Arc<Mutex<dyn NetDevice>>) {
         let _ = iface.routes_mut().add_default_ipv4_route(Ipv4Address::new(
             gateway[0], gateway[1], gateway[2], gateway[3],
         ));
+
+        crate::kboot!(
+            "eth0",
+            "{} {}.{}.{}.{}/24, {} {}.{}.{}.{}, DNS {}.{}.{}.{}",
+            t("DHCP не ответил, адрес", "DHCP timeout, fallback"),
+            ip[0], ip[1], ip[2], ip[3],
+            t("шлюз", "gateway"),
+            gateway[0], gateway[1], gateway[2], gateway[3],
+            dns[0], dns[1], dns[2], dns[3]
+        );
     }
 
     // Отправляем ARP-запрос шлюзу (gateway) для немедленного прогрева кэша соседей (neighbor_cache).
@@ -170,6 +207,13 @@ pub fn init(net_dev: Arc<Mutex<dyn NetDevice>>) {
         dns[0], dns[1], dns[2], dns[3]
     );
     let _ = crate::fs::ops::write_file_ramfs("/etc/resolv.conf", resolv_content.as_bytes());
+    crate::kboot!(
+        t("сеть", "net"),
+        "{} {}.{}.{}.{}, {}",
+        t("выполнен ARP-запрос шлюза", "gateway ARP probe sent to"),
+        gateway[0], gateway[1], gateway[2], gateway[3],
+        t("обновлён /etc/resolv.conf", "updated /etc/resolv.conf")
+    );
 }
 
 static LAST_ARP_REFRESH: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);

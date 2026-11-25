@@ -28,6 +28,7 @@ macro_rules! klog {
 }
 
 pub mod arch;
+pub mod bootlog;
 pub mod drivers;
 pub mod fs;
 pub mod i18n;

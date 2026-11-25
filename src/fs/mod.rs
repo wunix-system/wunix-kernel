@@ -55,13 +55,25 @@ pub use vfs::{DirEntry, FileSystem, Inode, InodeType, Metadata, VfsError};
 /// 2. Создает гибридный скелет директорий Unix/NT.
 /// 3. Распаковывает архив initramfs (если передан загрузчиком).
 pub fn init(initramfs_data: Option<&[u8]>) {
+    use crate::i18n::t;
+
     init_stdio();
     let ramfs = Arc::new(RamFs::new());
     *ops::ROOT_FS.write() = Some(ramfs.clone());
+    crate::kboot!(
+        "ramfs0",
+        "{}",
+        t("корневая файловая система памяти смонтирована в /", "root memory filesystem mounted on /")
+    );
 
     // Инициализируем файловую систему устройств DevFS и монтируем в корень /dev
     let devfs_instance = devfs::init();
     let _ = ramfs.root().insert_child("dev", devfs_instance.root_dir());
+    crate::kboot!(
+        "devfs0",
+        "{}",
+        t("файловая система устройств смонтирована в /dev", "device filesystem mounted on /dev")
+    );
 
     // Базовый скелет гибридной операционной системы
     const SKELETON_DIRS: &[&str] = &[
@@ -96,31 +108,48 @@ pub fn init(initramfs_data: Option<&[u8]>) {
 
     // Создаем каталог для пользователей Windows:
     let _ = mkdir_p("/win/drives/c/Users");
+    crate::kboot!(
+        "vfs",
+        "{} ({} {})",
+        t("создана структура системных каталогов /proc, /sys, /etc", "created system directory layout /proc, /sys, /etc"),
+        SKELETON_DIRS.len() + 1,
+        t("узлов", "entries")
+    );
 
-    // Если Limine передал initramfs — распаковываем его поверх корня
+    // Если загрузчик передал initramfs — распаковываем его поверх корня
     let root_node = root().expect("vfs: root inode must exist");
 
     if let Some(bytes) = initramfs_data {
+        let size_kb = (bytes.len() + 1023) / 1024;
         match tar::unpack_tar(bytes, &root_node) {
             Ok(count) => {
-                crate::klog!(
-                    "  {}: RamFS смонтирована в / ({} файлов)",
-                    crate::i18n::t("VFS", "VFS"),
-                    count
+                crate::kboot!(
+                    "initramfs",
+                    "{} ({} {}, {} {})",
+                    t("архив распакован в /", "archive unpacked to /"),
+                    size_kb,
+                    t("КБ", "KiB"),
+                    count,
+                    t("объектов", "entries")
                 );
             }
             Err(e) => {
-                crate::klog!(
-                    "  {}: ошибка распаковки initramfs: {:?}",
-                    crate::i18n::t("VFS", "VFS"),
+                crate::kboot!(
+                    "initramfs",
+                    "{}: {:?}",
+                    t("ошибка распаковки", "unpack failed"),
                     e
                 );
             }
         }
     } else {
-        crate::klog!(
-            "  {}: RamFS смонтирована в / (initramfs отсутствует)",
-            crate::i18n::t("VFS", "VFS")
+        crate::kboot!(
+            "initramfs",
+            "{}",
+            t(
+                "образ не передан (прямая загрузка с дискового раздела)",
+                "not provided (direct root partition boot)"
+            )
         );
     }
 
@@ -146,10 +175,21 @@ pub fn init(initramfs_data: Option<&[u8]>) {
         env_buf.push_str(&alloc::format!("LC_ALL={}\n", loc));
     }
     let _ = write_file("/etc/environment", env_buf.as_bytes());
+    crate::kboot!(
+        t("локализация", "locale"),
+        "{} {}",
+        t("активна системная локаль", "system locale"),
+        loc
+    );
 
     // Инициализируем блочные устройства (/dev/vda, /dev/vda1, ...)
     block::init();
 
     // Заполняем системные ветки реестра Windows (HKLM, HKCU, HKCR)
     registry::populate::init_system_registry();
+    crate::kboot!(
+        t("реестр", "registry"),
+        "{}",
+        t("инициализированы системные кусты HKLM, HKCU, HKCR", "initialized system hives HKLM, HKCU, HKCR")
+    );
 }

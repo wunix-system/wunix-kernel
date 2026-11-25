@@ -28,10 +28,29 @@ pub fn probe_pci(dev: &PciDevice, dm: &mut DeviceManager) -> bool {
 
 /// Инициализирует синтетические сервисы платформы KVM / Proxmox VE / QEMU (fw_cfg, pvclock).
 pub fn init_integrations(_dm: &mut DeviceManager) {
+    use crate::i18n::t;
+
     let mut fw = QemuFwCfg::new();
-    let _ = fw.is_present();
+    if fw.is_present() {
+        crate::kboot!(
+            "fwcfg0",
+            "{}",
+            t(
+                "интерфейс конфигурации QEMU (порт 0x510)",
+                "QEMU firmware config interface (0x510)"
+            )
+        );
+    }
 
     if let Ok(pv) = KvmPvClock::new() {
         *KVM_PVCLOCK.lock() = Some(pv);
+        crate::kboot!(
+            "pvclock0",
+            "{}",
+            t(
+                "паравиртуальный таймер KVM активен",
+                "KVM paravirtual clock active"
+            )
+        );
     }
 }

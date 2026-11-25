@@ -210,18 +210,47 @@ pub fn map_kernel_mmio(phys_addr: u64, size: usize) -> Result<VirtAddr, &'static
 /// - Подключает трансляцию виртуальных адресов OffsetPageTable через окно HHDM.
 /// - Выделяет и маппит страницы под кучу ядра (1 MiB) и активирует аллокатор.
 pub fn init(memory_map: &'static [&'static limine::memmap::Entry], hhdm_offset: u64) {
+    use crate::i18n::t;
+
     HHDM_OFFSET.store(hhdm_offset, Ordering::Relaxed);
     let (cr3_frame, _) = Cr3::read();
-    KERNEL_CR3.store(cr3_frame.start_address().as_u64(), Ordering::Relaxed);
+    let cr3_phys = cr3_frame.start_address().as_u64();
+    KERNEL_CR3.store(cr3_phys, Ordering::Relaxed);
     *GLOBAL_MEMORY_STATS.lock() = Some(collect_memory_stats(memory_map));
 
     let mut mapper = unsafe { paging::init_offset_page_table(hhdm_offset) };
+    crate::kboot!(
+        "pmap0",
+        "{} {:#x}, CR3 {:#x}",
+        t("прямое отображение HHDM", "HHDM direct map at"),
+        hhdm_offset,
+        cr3_phys
+    );
+
     let frame_allocator = unsafe { frame::LimineFrameAllocator::new(memory_map) };
+    let free_mb = frame_allocator.free_bytes() / (1024 * 1024);
     *FRAME_ALLOCATOR.lock() = Some(frame_allocator);
+    crate::kboot!(
+        "uvm0",
+        "{} ({} {})",
+        t("аллокатор страниц 4 КБ", "4 KiB page allocator ready"),
+        free_mb,
+        t("МБ свободно", "MiB free")
+    );
 
     let mut locked_allocator = LockedFrameAllocator;
     heap::init_heap(&mut mapper, &mut locked_allocator)
         .expect("Failed to initialize kernel heap");
+    crate::bootlog::set_heap_ready();
+    crate::kboot!(
+        "",
+        "{} = {} ({} {}, {:#x})",
+        t("куча ядра", "kernel heap"),
+        heap::HEAP_SIZE,
+        heap::HEAP_SIZE / (1024 * 1024),
+        t("МБ", "MiB"),
+        heap::HEAP_START
+    );
 }
 
 /// Обрабатывает пользовательский Page Fault (#PF) в Ring 3:

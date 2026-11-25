@@ -25,10 +25,16 @@ fn map_table(phys: u64, size: usize) -> Option<u64> {
 
 /// Инициализирует подсистему ACPI: обнаруживает таблицы FADT и MADT
 pub fn init() {
+    use crate::i18n::t;
+
     let rsdp_raw = match *RSDP_OVERRIDE.lock() {
         Some(p) => p,
         None => {
-            crate::klog!("acpi: RSDP address not provided by bootloader");
+            crate::kboot!(
+                "acpi0",
+                "{}",
+                t("указатель RSDP не передан", "RSDP address not provided")
+            );
             return;
         }
     };
@@ -41,22 +47,44 @@ pub fn init() {
     };
 
     if rsdp_phys == 0 {
-        crate::klog!("acpi: RSDP physical address is 0");
+        crate::kboot!(
+            "acpi0",
+            "{}",
+            t("физический адрес RSDP равен 0", "RSDP physical address is 0")
+        );
         return;
     }
 
     let rsdp_virt = match map_table(rsdp_phys, 128) {
         Some(v) => v,
         None => {
-            crate::klog!("acpi: failed to map RSDP at {:#x}", rsdp_phys);
+            crate::kboot!(
+                "acpi0",
+                "{} {:#x}",
+                t("ошибка отображения RSDP по адресу", "failed to map RSDP at"),
+                rsdp_phys
+            );
             return;
         }
     };
 
     let rsdp = unsafe { &*(rsdp_virt as *const Rsdp) };
     if !rsdp.is_valid() {
+        crate::kboot!(
+            "acpi0",
+            "{}",
+            t("неверная контрольная сумма таблицы RSDP", "invalid RSDP checksum")
+        );
         return;
     }
+
+    crate::kboot!(
+        "acpi0",
+        "RSDP {:#x} ({} {})",
+        rsdp_phys,
+        t("ревизия", "rev"),
+        rsdp.revision
+    );
 
     let mut fadt_found = false;
     let mut madt_found = false;
@@ -109,7 +137,16 @@ fn process_table(table_phys: u64, fadt_found: &mut bool, madt_found: &mut bool) 
 
     if &header.signature == b"FACP" && !*fadt_found {
         let fadt = unsafe { &*(table_virt as *const Fadt) };
+        let pm1a = fadt.pm1a_control_block;
+        let pm1b = fadt.pm1b_control_block;
         power::init_power_from_fadt(fadt);
+        crate::kboot!(
+            "acpi0",
+            "{} (PM1a {:#x}, PM1b {:#x})",
+            crate::i18n::t("таблица FADT (управление питанием S5)", "FADT table (S5 power)"),
+            pm1a,
+            pm1b
+        );
         *fadt_found = true;
     } else if &header.signature == b"APIC" && !*madt_found {
         parse_madt(table_phys, table_virt);
@@ -155,11 +192,21 @@ fn parse_madt(_madt_phys: u64, madt_virt: u64) {
         offset += entry_len;
     }
 
+    let io_apic_cnt = io_apics.len();
+    let iso_cnt = isos.len();
     *MADT_INFO.lock() = Some(MadtInfo {
         local_apic_phys: lapic_phys,
         io_apics,
         interrupt_source_overrides: isos,
     });
+    crate::kboot!(
+        "acpi0",
+        "{} (Local APIC {:#x}, IO-APIC: {}, ISO: {})",
+        crate::i18n::t("таблица MADT", "MADT table"),
+        lapic_phys,
+        io_apic_cnt,
+        iso_cnt
+    );
 }
 
 pub fn get_madt_info() -> Option<MadtInfo> {

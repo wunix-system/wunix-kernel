@@ -71,7 +71,7 @@ fn populate_hardware_description() -> Result<(), super::RegError> {
     reg_set_value(&cpu, "~MHz", &RegValue::DWord(2400))?;
 
     let bios = reg_create_key(Hive::LocalMachine, "HARDWARE/DESCRIPTION/System/BIOS")?;
-    reg_set_value(&bios, "BIOSVendor", &RegValue::Sz(String::from("Limine Bootloader")))?;
+    reg_set_value(&bios, "BIOSVendor", &RegValue::Sz(String::from("Wunix Bootloader")))?;
     reg_set_value(&bios, "BIOSVersion", &RegValue::Sz(String::from("0.6.5")))?;
     reg_set_value(&bios, "SystemManufacturer", &RegValue::Sz(String::from("QEMU / Wunix Virtual Platform")))?;
 

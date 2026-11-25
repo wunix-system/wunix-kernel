@@ -44,7 +44,7 @@ pub fn append_system_drivers(list: &mut Vec<DriverInfo>) {
 
     list.push(DriverInfo {
         name: "limine_fb",
-        description: "Limine Linear Framebuffer Display Driver (VT100 Console)",
+        description: "Linear Framebuffer Display Driver (VT100 Console)",
         category: "display",
         version: "1.0.0",
         author: "Wunix Kernel Team",

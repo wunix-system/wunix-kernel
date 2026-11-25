@@ -319,9 +319,17 @@ pub fn list_block_devices() -> Vec<(String, u64, usize)> {
 /// Инициализация блочной подсистемы VFS: регистрация всех устройств из DeviceManager (/dev/vda, /dev/sda, ...),
 /// создание узлов в `/dev`, парсинг MBR и регистрация разделов.
 pub fn init() {
+    use crate::i18n::{current_language, t, Language};
+
+    let lang_ru = current_language() == Language::Russian;
     let dev_names =
         crate::drivers::with_device_manager(|dm| dm.block_device_names()).unwrap_or_default();
     if dev_names.is_empty() {
+        crate::kboot!(
+            t("блок", "blk"),
+            "{}",
+            t("блочные накопители не обнаружены", "no block devices detected")
+        );
         return;
     }
 
@@ -339,12 +347,29 @@ pub fn init() {
         }
 
         // Парсим MBR для обнаружения разделов
-        let parts = {
+        let (sectors, sector_sz, parts) = {
             let mut d = dev.lock();
-            parse_mbr(&mut *d)
+            (d.sector_count(), d.sector_size(), parse_mbr(&mut *d))
         };
+        let disk_mb = (sectors * sector_sz as u64) / (1024 * 1024);
+
+        crate::kboot!(
+            &name,
+            "{} {}, {} {} {} Б",
+            disk_mb,
+            t("МБ", "MiB"),
+            sectors,
+            t("секторов по", "sectors x"),
+            sector_sz
+        );
 
         if !parts.is_empty() {
+            crate::kboot!(
+                &name,
+                "{}: {}",
+                t("таблица разделов MBR, разделов", "MBR partition table, partitions"),
+                parts.len()
+            );
             for (i, p) in parts.iter().enumerate() {
                 let part_num = i + 1;
                 let part_name = alloc::format!("{}{}", name, part_num);
@@ -359,7 +384,33 @@ pub fn init() {
                 if let Ok(dev_dir) = crate::fs::open("/dev") {
                     let _ = dev_dir.create(&part_name, InodeType::BlockDevice);
                 }
+
+                let part_mb = ((p.sector_count as u64) * 512) / (1024 * 1024);
+                let type_name = crate::bootlog::mbr_part_type_name(p.part_type, lang_ru);
+                let boot_tag = if p.bootable {
+                    t(" [загрузочный]", " [bootable]")
+                } else {
+                    ""
+                };
+                crate::kboot!(
+                    "",
+                    "  {}: {} ({:#04x}), {} {}, {} {}{}",
+                    part_name,
+                    type_name,
+                    p.part_type,
+                    t("старт LBA", "start LBA"),
+                    p.start_lba,
+                    part_mb,
+                    t("МБ", "MiB"),
+                    boot_tag
+                );
             }
+        } else {
+            crate::kboot!(
+                &name,
+                "{}",
+                t("таблица разделов MBR отсутствует", "no MBR partition table")
+            );
         }
     }
 }
