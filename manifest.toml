@@ -1,0 +1,20 @@
+[package]
+name = "wunix-kernel"
+version = "auto"
+arch = "x86_64"
+type = "system"
+tier = "critical"
+description = "Монолитное ядро Wunix с VFS и вытесняющим планировщиком процессов"
+maintainer = "Wunix Core Team <dev@wunix.org>"
+
+[dependencies]
+required = []
+conflicts = []
+replaces = []
+
+[triggers]
+post_install = "update-bootloader"
+
+[build]
+version_source = "git:wunix/kernel"
+kind = "kernel"

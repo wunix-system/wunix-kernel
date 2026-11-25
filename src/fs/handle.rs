@@ -396,6 +396,13 @@ impl FileHandle for StdinHandle {
                 continue;
             }
 
+            // Пока оболочка ждёт ввод в Ring 0, квантовое вытеснение из таймера не работает.
+            // Уступаем управление фоновым демонам (sshd, wspd, timesyncd), иначе они зависнут в ready_queue.
+            if crate::task::has_ready_threads() {
+                crate::task::yield_now();
+                continue;
+            }
+
             x86_64::instructions::interrupts::enable();
             x86_64::instructions::hlt();
         }
