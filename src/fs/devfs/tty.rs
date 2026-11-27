@@ -222,7 +222,8 @@ fn probe_serial_winsize() {
     }
     let now = crate::arch::x86_64::timer::ticks();
     let last = LAST_SERIAL_PROBE_TICK.load(Ordering::Relaxed);
-    if last != 0 && now.saturating_sub(last) < 200 {
+    // Раз в 5 секунд максимум: частые пробы были причиной мерцания хост-терминала
+    if last != 0 && now.saturating_sub(last) < 5000 {
         return;
     }
     if crate::fs::handle::stdin_buffer_len() > 0 || crate::drivers::keyboard::key_queue_len() > 0 {
@@ -236,12 +237,15 @@ fn probe_serial_winsize() {
     }
     LAST_SERIAL_PROBE_TICK.store(now, Ordering::Relaxed);
 
-    // Запрашиваем размер хост-терминала через ANSI DSR (6n) только по COM1
-    crate::serial_print!("\x1b[s\x1b[999;999H\x1b[6n\x1b[u");
+    // \x1b[18t — xterm "Report window size in chars": терминал отвечает \x1b[8;rows;colst
+    // Не двигает курсор, поэтому не вызывает перерисовку хост-терминала.
+    // Старый метод \x1b[s\x1b[999;999H\x1b[6n\x1b[u физически прыгал курсором в угол экрана
+    // и обратно — именно это мерцало 5 раз в секунду в хост-терминале при вводе.
+    crate::serial_print!("\x1b[18t");
 
     let mut resp = [0u8; 32];
     let mut len = 0usize;
-    let deadline = now.saturating_add(20); // до ~200 мс для медленных PTY/терминалов хоста
+    let deadline = now.saturating_add(20);
 
     while crate::arch::x86_64::timer::ticks() <= deadline {
         while let Some(b) = crate::drivers::serial::try_receive() {
@@ -249,8 +253,8 @@ fn probe_serial_winsize() {
                 resp[len] = b;
                 len += 1;
             }
-            if b == b'R' {
-                if let Some((rows, cols)) = parse_dsr_response(&resp[..len]) {
+            if b == b't' {
+                if let Some((rows, cols)) = parse_xtwinops(&resp[..len]) {
                     *SERIAL_WINSIZE.lock() = Some(WinSize {
                         ws_row: rows,
                         ws_col: cols,
@@ -266,7 +270,7 @@ fn probe_serial_winsize() {
         x86_64::instructions::hlt();
     }
 
-    // Если пришёл не-DSR ввод, не теряем его
+    // Если пришёл не-xtwinops ввод, не теряем его
     for &b in &resp[..len] {
         crate::fs::handle::push_stdin_byte(b);
     }
