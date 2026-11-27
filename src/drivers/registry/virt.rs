@@ -80,13 +80,107 @@ pub fn append_virt_drivers(list: &mut Vec<DriverInfo>, dm: &DeviceManager) {
             name: "virtio_scsi",
             description: "VirtIO SCSI Paravirtual Controller (/dev/sd*)",
             category: "block",
-            version: "1.0.0",
+            version: env!("CARGO_PKG_VERSION"),
             author: "Wunix Kernel Team",
-            license: "MIT/Apache-2.0",
+            license: "MIT",
             devices_count: virtio_scsi_c,
             status: "Live",
             size: 24576,
             dependencies: "virtio_pci",
+        });
+    }
+
+    let virtio_input_c = count_pci("virtio_input");
+    if virtio_input_c > 0 {
+        list.push(DriverInfo {
+            name: "virtio_input",
+            description: "VirtIO Input Device (Tablet / Mouse / Keyboard)",
+            category: "input",
+            version: env!("CARGO_PKG_VERSION"),
+            author: "Wunix Kernel Team",
+            license: "MIT",
+            devices_count: virtio_input_c,
+            status: "Live",
+            size: 16384,
+            dependencies: "virtio_pci",
+        });
+    }
+
+    let virtio_rng_c = count_pci("virtio_rng");
+    if virtio_rng_c > 0 {
+        list.push(DriverInfo {
+            name: "virtio_rng",
+            description: "VirtIO Hardware Entropy Generator",
+            category: "security",
+            version: env!("CARGO_PKG_VERSION"),
+            author: "Wunix Kernel Team",
+            license: "MIT",
+            devices_count: virtio_rng_c,
+            status: "Live",
+            size: 12288,
+            dependencies: "virtio_pci",
+        });
+    }
+
+    let virtio_console_c = count_pci("virtio_console");
+    if virtio_console_c > 0 {
+        list.push(DriverInfo {
+            name: "virtio_console",
+            description: "VirtIO Serial Console (/dev/hvc0)",
+            category: "char",
+            version: env!("CARGO_PKG_VERSION"),
+            author: "Wunix Kernel Team",
+            license: "MIT",
+            devices_count: virtio_console_c,
+            status: "Live",
+            size: 16384,
+            dependencies: "virtio_pci",
+        });
+    }
+
+    let virtio_balloon_c = count_pci("virtio_balloon");
+    if virtio_balloon_c > 0 {
+        list.push(DriverInfo {
+            name: "virtio_balloon",
+            description: "VirtIO Dynamic Memory Balloon",
+            category: "virt",
+            version: env!("CARGO_PKG_VERSION"),
+            author: "Wunix Kernel Team",
+            license: "MIT",
+            devices_count: virtio_balloon_c,
+            status: "Live",
+            size: 16384,
+            dependencies: "virtio_pci",
+        });
+    }
+
+    if crate::drivers::virt::qemu::fw_cfg::is_present() {
+        list.push(DriverInfo {
+            name: "qemu_fwcfg",
+            description: "QEMU Firmware Configuration Interface (fw_cfg)",
+            category: "virt",
+            version: env!("CARGO_PKG_VERSION"),
+            author: "Wunix Kernel Team",
+            license: "MIT",
+            devices_count: 1,
+            status: "Live",
+            size: 8192,
+            dependencies: "-",
+        });
+    }
+
+    if crate::drivers::virt::qemu::pvclock::is_present() {
+        list.push(DriverInfo {
+            name: "kvm_pvclock",
+            description: "KVM / QEMU Paravirtual Wall & Monotonic Clock",
+            category: "virt",
+            version: env!("CARGO_PKG_VERSION"),
+            author: "Wunix Kernel Team",
+            license: "MIT",
+            devices_count: 1,
+            status: "Live",
+            size: 8192,
+            dependencies: "-",
         });
     }
 

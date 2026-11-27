@@ -341,6 +341,12 @@ impl UserAddressSpace {
             if !entry.flags().contains(PageTableFlags::PRESENT) {
                 continue;
             }
+            if entry.flags().contains(super::vma::PTE_NO_FREE) {
+                if let Ok(shared_frame) = entry.frame() {
+                    new_pt[idx].set_frame(shared_frame, entry.flags());
+                }
+                continue;
+            }
             let dst_page_frame = super::allocate_frame().ok_or("Недостаточно физической памяти для копирования страницы")?;
             let src_ptr = (hhdm + entry.addr().as_u64()) as *const u8;
             let dst_ptr = (hhdm + dst_page_frame.start_address().as_u64()) as *mut u8;
@@ -445,7 +451,9 @@ fn free_pt(pt_phys: u64, hhdm: u64) {
             continue;
         }
         if let Ok(frame) = entry.frame() {
-            if !crate::task::syslib::is_syslib_frame(frame) {
+            if !entry.flags().contains(super::vma::PTE_NO_FREE)
+                && !crate::task::syslib::is_syslib_frame(frame)
+            {
                 super::deallocate_frame(frame);
             }
         }

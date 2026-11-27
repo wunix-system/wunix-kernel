@@ -73,34 +73,35 @@ impl PciClass {
 
     pub const SUBCLASS_PCI_BRIDGE: u8 = 0x04;
 
-    /// Возвращает текстовое описание класса и подкласса
+    /// Возвращает локализованное текстовое описание класса и подкласса
     pub fn name(class: u8, subclass: u8) -> &'static str {
+        use crate::i18n::t;
         match (class, subclass) {
-            (Self::STORAGE, 0x00) => "SCSI Controller",
-            (Self::STORAGE, 0x01) => "IDE Controller",
-            (Self::STORAGE, 0x06) => "SATA Controller",
-            (Self::STORAGE, 0x08) => "Non-Volatile Memory (NVMe)",
-            (Self::STORAGE, _) => "Mass Storage Controller",
+            (Self::STORAGE, 0x00) => t("SCSI-контроллер", "SCSI Controller"),
+            (Self::STORAGE, 0x01) => t("IDE-контроллер", "IDE Controller"),
+            (Self::STORAGE, 0x06) => t("SATA-контроллер", "SATA Controller"),
+            (Self::STORAGE, 0x08) => t("Накопитель NVMe", "Non-Volatile Memory (NVMe)"),
+            (Self::STORAGE, _) => t("Контроллер накопителей", "Mass Storage Controller"),
 
-            (Self::NETWORK, 0x00) => "Ethernet Controller",
-            (Self::NETWORK, _) => "Network Controller",
+            (Self::NETWORK, 0x00) => t("Сетевой контроллер Ethernet", "Ethernet Controller"),
+            (Self::NETWORK, _) => t("Сетевой контроллер", "Network Controller"),
 
-            (Self::DISPLAY, 0x00) => "VGA Compatible Controller",
-            (Self::DISPLAY, _) => "Display Controller",
+            (Self::DISPLAY, 0x00) => t("VGA-совместимый видеоконтроллер", "VGA Compatible Controller"),
+            (Self::DISPLAY, _) => t("Графический контроллер", "Display Controller"),
 
-            (Self::BRIDGE, 0x00) => "Host Bridge",
-            (Self::BRIDGE, 0x01) => "ISA Bridge",
-            (Self::BRIDGE, Self::SUBCLASS_PCI_BRIDGE) => "PCI-to-PCI Bridge",
-            (Self::BRIDGE, _) => "Bridge Device",
+            (Self::BRIDGE, 0x00) => t("Хост-мост PCI", "Host Bridge"),
+            (Self::BRIDGE, 0x01) => t("ISA-мост", "ISA Bridge"),
+            (Self::BRIDGE, Self::SUBCLASS_PCI_BRIDGE) => t("Мост PCI-to-PCI", "PCI-to-PCI Bridge"),
+            (Self::BRIDGE, _) => t("Системный мост", "Bridge Device"),
 
-            (Self::INPUT, 0x00) => "Keyboard Controller",
-            (Self::INPUT, 0x02) => "Mouse Controller",
-            (Self::INPUT, _) => "Input Device Controller",
+            (Self::INPUT, 0x00) => t("Контроллер клавиатуры", "Keyboard Controller"),
+            (Self::INPUT, 0x02) => t("Контроллер мыши", "Mouse Controller"),
+            (Self::INPUT, _) => t("Контроллер ввода", "Input Device Controller"),
 
-            (Self::SERIAL_BUS, 0x03) => "USB Controller",
-            (Self::SERIAL_BUS, _) => "Serial Bus Controller",
+            (Self::SERIAL_BUS, 0x03) => t("USB-контроллер", "USB Controller"),
+            (Self::SERIAL_BUS, _) => t("Контроллер последовательной шины", "Serial Bus Controller"),
 
-            _ => "Generic / Unknown Device",
+            _ => t("Универсальное устройство", "Generic / Unknown Device"),
         }
     }
 }
@@ -240,6 +241,8 @@ mod tests {
 
     #[test_case]
     fn test_pci_class_names() {
+        let prev = crate::i18n::current_language();
+        crate::i18n::set_language(crate::i18n::Language::English);
         assert_eq!(
             PciClass::name(PciClass::NETWORK, 0x00),
             "Ethernet Controller"
@@ -252,5 +255,13 @@ mod tests {
             PciClass::name(PciClass::BRIDGE, PciClass::SUBCLASS_PCI_BRIDGE),
             "PCI-to-PCI Bridge"
         );
+
+        crate::i18n::set_language(crate::i18n::Language::Russian);
+        assert!(!PciClass::name(PciClass::NETWORK, 0x00).is_empty());
+        assert_ne!(
+            PciClass::name(PciClass::NETWORK, 0x00),
+            "Ethernet Controller"
+        );
+        crate::i18n::set_language(prev);
     }
 }

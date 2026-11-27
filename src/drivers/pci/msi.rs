@@ -61,8 +61,10 @@ pub fn enable_msi(dev: &PciDevice, vector: u8, dest_apic_id: u8) -> Result<(), &
     config::write_u16(dev.address, cap_offset + 2, new_ctrl);
 
     crate::klog!(
-        "pci: enabled MSI for device {:?} (vector: {}, APIC ID: {})",
+        "pci: {} {:?} ({}: {}, APIC ID: {})",
+        crate::i18n::t("включён MSI для устройства", "enabled MSI for device"),
         dev.address,
+        crate::i18n::t("вектор", "vector"),
         vector,
         dest_apic_id
     );

@@ -1,10 +1,9 @@
 use core::marker::PhantomData;
 use core::ptr::{read_volatile, write_volatile};
+use wunix_drv::BusIo;
 use x86_64::instructions::port::{PortReadOnly, PortWriteOnly};
 
 /// Базовый типаж аппаратного ввода-вывода ядра Wunix.
-/// Унифицирует доступ к регистрам железа независимо от того,
-/// сидят ли они на портах x86 (Port I/O) или отображены в физическую память (MMIO).
 pub trait Io {
     type Value: Copy;
 
@@ -105,9 +104,7 @@ impl Io for Pio<u32> {
     }
 }
 
-/// Отображаемый в память ввод-вывод (MMIO).
-/// Гарантирует volatile-доступ, чтобы компилятор не оптимизировал
-/// обращения к регистрам контроллеров оборудования.
+/// Отображаемый в память ввод-вывод (MMIO) поверх одного регистра.
 #[repr(transparent)]
 pub struct Mmio<T> {
     value: T,
@@ -136,5 +133,137 @@ impl<T: Copy> Io for Mmio<T> {
     #[inline]
     fn write(&mut self, value: T) {
         self.write(value)
+    }
+}
+
+/// Окно MMIO с проверкой границ, реализующее `wunix_drv::BusIo`.
+/// Позволяет драйверам работать по единому контракту с реальным железом и с `MockBusIo`.
+pub struct MmioRegion {
+    base: *mut u8,
+    size: usize,
+}
+
+unsafe impl Send for MmioRegion {}
+unsafe impl Sync for MmioRegion {}
+
+impl MmioRegion {
+    /// # Safety
+    /// `base` должен указывать на корректно замапленный MMIO-регион длиной `size` байт.
+    pub const unsafe fn from_raw(base: *mut u8, size: usize) -> Self {
+        Self { base, size }
+    }
+
+    pub fn base_ptr(&self) -> *mut u8 {
+        self.base
+    }
+
+    pub fn size(&self) -> usize {
+        self.size
+    }
+}
+
+impl BusIo for MmioRegion {
+    #[inline]
+    fn read_u8(&self, offset: usize) -> u8 {
+        if offset >= self.size {
+            return 0xFF;
+        }
+        unsafe { read_volatile(self.base.add(offset)) }
+    }
+
+    #[inline]
+    fn read_u16(&self, offset: usize) -> u16 {
+        if offset + 2 > self.size {
+            return 0xFFFF;
+        }
+        unsafe { read_volatile(self.base.add(offset) as *const u16) }
+    }
+
+    #[inline]
+    fn read_u32(&self, offset: usize) -> u32 {
+        if offset + 4 > self.size {
+            return 0xFFFF_FFFF;
+        }
+        unsafe { read_volatile(self.base.add(offset) as *const u32) }
+    }
+
+    #[inline]
+    fn write_u8(&mut self, offset: usize, val: u8) {
+        if offset < self.size {
+            unsafe { write_volatile(self.base.add(offset), val) }
+        }
+    }
+
+    #[inline]
+    fn write_u16(&mut self, offset: usize, val: u16) {
+        if offset + 2 <= self.size {
+            unsafe { write_volatile(self.base.add(offset) as *mut u16, val) }
+        }
+    }
+
+    #[inline]
+    fn write_u32(&mut self, offset: usize, val: u32) {
+        if offset + 4 <= self.size {
+            unsafe { write_volatile(self.base.add(offset) as *mut u32, val) }
+        }
+    }
+}
+
+/// Диапазон портов ввода-вывода x86, реализующий `wunix_drv::BusIo`.
+pub struct PioRegion {
+    base_port: u16,
+    size: u16,
+}
+
+impl PioRegion {
+    pub const fn new(base_port: u16, size: u16) -> Self {
+        Self { base_port, size }
+    }
+}
+
+impl BusIo for PioRegion {
+    #[inline]
+    fn read_u8(&self, offset: usize) -> u8 {
+        if offset >= self.size as usize {
+            return 0xFF;
+        }
+        Pio::<u8>::new(self.base_port + offset as u16).read()
+    }
+
+    #[inline]
+    fn read_u16(&self, offset: usize) -> u16 {
+        if offset + 2 > self.size as usize {
+            return 0xFFFF;
+        }
+        Pio::<u16>::new(self.base_port + offset as u16).read()
+    }
+
+    #[inline]
+    fn read_u32(&self, offset: usize) -> u32 {
+        if offset + 4 > self.size as usize {
+            return 0xFFFF_FFFF;
+        }
+        Pio::<u32>::new(self.base_port + offset as u16).read()
+    }
+
+    #[inline]
+    fn write_u8(&mut self, offset: usize, val: u8) {
+        if offset < self.size as usize {
+            Pio::<u8>::new(self.base_port + offset as u16).write(val);
+        }
+    }
+
+    #[inline]
+    fn write_u16(&mut self, offset: usize, val: u16) {
+        if offset + 2 <= self.size as usize {
+            Pio::<u16>::new(self.base_port + offset as u16).write(val);
+        }
+    }
+
+    #[inline]
+    fn write_u32(&mut self, offset: usize, val: u32) {
+        if offset + 4 <= self.size as usize {
+            Pio::<u32>::new(self.base_port + offset as u16).write(val);
+        }
     }
 }

@@ -14,9 +14,11 @@ pub mod manager;
 pub mod net;
 pub mod nvme;
 pub mod pci;
+pub mod probe;
 pub mod registry;
 pub mod rng;
 pub mod rtc;
+pub mod sdk;
 pub mod sdhci;
 pub mod serial;
 pub mod tpm;
@@ -25,8 +27,8 @@ pub mod usb;
 pub mod virt;
 pub mod virtio;
 
-pub use dma::Dma;
-pub use io::{Io, Mmio, Pio};
+pub use dma::{deallocate_contiguous_frames, Dma, DmaPages};
+pub use io::{Io, Mmio, MmioRegion, Pio, PioRegion};
 pub use manager::{
     get_audio_device, get_block_device, get_display_device, get_input_device, get_net_device, init,
     with_device_manager, DeviceManager,

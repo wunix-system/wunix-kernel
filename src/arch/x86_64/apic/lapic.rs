@@ -70,7 +70,7 @@ pub fn init(phys_addr: u64) {
 
     let apic_id = id();
     let version = unsafe { read_reg(LAPIC_VERSION) & 0xFF };
-    crate::klog!("lapic: initialized (ID: {}, version: {:#x})", apic_id, version);
+    crate::serial_println!("lapic: initialized (ID: {}, version: {:#x})", apic_id, version);
 }
 
 /// Возвращает аппаратный идентификатор Local APIC

@@ -101,9 +101,37 @@ fn panic(info: &PanicInfo) -> ! {
 }
 
 #[cfg(test)]
+#[used]
+#[unsafe(no_mangle)]
+pub static TEST_BASE_REVISION: limine::BaseRevision = limine::BaseRevision::new();
+
+#[cfg(test)]
+#[used]
+#[unsafe(no_mangle)]
+pub static TEST_HHDM_REQUEST: limine::request::HhdmRequest = limine::request::HhdmRequest::new();
+
+#[cfg(test)]
+#[used]
+#[unsafe(no_mangle)]
+pub static TEST_MEMMAP_REQUEST: limine::request::MemmapRequest =
+    limine::request::MemmapRequest::new();
+
+#[cfg(test)]
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     init();
+    if let (Some(hhdm), Some(mmap)) = (
+        TEST_HHDM_REQUEST.response(),
+        TEST_MEMMAP_REQUEST.response(),
+    ) {
+        if TEST_BASE_REVISION.actual_revision().is_some() {
+            memory::init(mmap.entries(), hhdm.offset);
+        } else {
+            serial_println!("[ktest] WARN: TEST_BASE_REVISION actual_revision is None");
+        }
+    } else {
+        serial_println!("[ktest] WARN: missing HHDM/MEMMAP response from Limine");
+    }
     test_main();
     halt_loop();
 }

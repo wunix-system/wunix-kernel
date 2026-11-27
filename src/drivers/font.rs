@@ -1495,10 +1495,12 @@ mod tests {
 
     #[test_case]
     fn test_box_drawing_continuity() {
-        // Горизонтальная линия обязана быть непрерывной по всей ширине (10 бит = 0xFFC0)
+        // Одинарная горизонтальная линия непрерывна на строке 10, жирная '━' — на 9..10 (10 бит = 0xFFC0)
         let h_line = get_glyph('─').unwrap();
-        assert_eq!(h_line[9], 0xFFC0);
         assert_eq!(h_line[10], 0xFFC0);
+        let thick_h = get_glyph('━').unwrap();
+        assert_eq!(thick_h[9], 0xFFC0);
+        assert_eq!(thick_h[10], 0xFFC0);
 
         // Полный блок обязан заполнять все знакоместо целиком
         let full_block = get_glyph('█').unwrap();

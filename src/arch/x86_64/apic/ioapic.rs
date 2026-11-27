@@ -48,7 +48,7 @@ pub fn init(phys_addr: u64) {
     let ver_reg = unsafe { read_reg(0x01) };
     let max_redir = ((ver_reg >> 16) & 0xFF) + 1;
 
-    crate::klog!("ioapic: initialized (ID: {}, lines: {})", id, max_redir);
+    crate::serial_println!("ioapic: initialized (ID: {}, lines: {})", id, max_redir);
 
     // По умолчанию маскируем все входные линии (Redirection Tables)
     for pin in 0..max_redir as u8 {

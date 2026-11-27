@@ -1,9 +1,31 @@
 use alloc::vec::Vec;
 use x86_64::registers::control::Cr3;
+use x86_64::registers::model_specific::{Efer, EferFlags};
 use x86_64::structures::paging::{
-    Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, Size4KiB, Translate,
+    Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate,
 };
-use x86_64::VirtAddr;
+use x86_64::{PhysAddr, VirtAddr};
+
+// Пометка PTE для отображений устройств (MMIO/FB) и разделяемой памяти (SHM):
+// такие фреймы не принадлежат конкретному процессу и не освобождаются при munmap/exit.
+pub const PTE_NO_FREE: PageTableFlags = PageTableFlags::BIT_10;
+
+fn prot_to_pt_flags(prot: u64, uncacheable: bool, no_free: bool) -> PageTableFlags {
+    let mut pt_flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+    if (prot & PROT_WRITE) != 0 {
+        pt_flags |= PageTableFlags::WRITABLE;
+    }
+    if (prot & PROT_EXEC) == 0 && Efer::read().contains(EferFlags::NO_EXECUTE_ENABLE) {
+        pt_flags |= PageTableFlags::NO_EXECUTE;
+    }
+    if uncacheable {
+        pt_flags |= PageTableFlags::NO_CACHE;
+    }
+    if no_free {
+        pt_flags |= PTE_NO_FREE;
+    }
+    pt_flags
+}
 
 // Права доступа к страницам памяти (POSIX / Linux ABI)
 pub const PROT_NONE: u64 = 0x0;
@@ -179,11 +201,8 @@ impl VirtualMemoryManager {
             return Ok(target_addr);
         }
 
-        // Выделение физических страниц для PROT_READ / PROT_WRITE
-        let mut pt_flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
-        if (prot & PROT_WRITE) != 0 {
-            pt_flags |= PageTableFlags::WRITABLE;
-        }
+        // Выделение физических страниц для PROT_READ / PROT_WRITE / PROT_EXEC
+        let pt_flags = prot_to_pt_flags(prot, false, false);
 
         let hhdm = super::hhdm_offset();
         let (current_pml4, _) = Cr3::read();
@@ -236,6 +255,152 @@ impl VirtualMemoryManager {
         Ok(target_addr)
     }
 
+    /// Отображает непрерывный физический диапазон (framebuffer, MMIO BAR, UIO) в Ring 3.
+    pub fn map_phys_range(
+        &mut self,
+        addr: u64,
+        len: u64,
+        prot: u64,
+        flags: u64,
+        phys_base: u64,
+        uncacheable: bool,
+    ) -> Result<u64, i64> {
+        if len == 0 || (phys_base & 0xFFF) != 0 {
+            return Err(-22);
+        }
+        let aligned_len = (len.checked_add(4095).ok_or(-12)?) & !4095;
+        let target_addr = self.select_target_addr(addr, aligned_len, flags)?;
+        let pt_flags = prot_to_pt_flags(prot, uncacheable, true);
+
+        let hhdm = super::hhdm_offset();
+        let (current_pml4, _) = Cr3::read();
+        let pml4_virt = VirtAddr::new(hhdm + current_pml4.start_address().as_u64());
+        let parent_flags =
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+
+        let pages = (aligned_len / 4096) as usize;
+        for i in 0..pages {
+            let page =
+                Page::<Size4KiB>::containing_address(VirtAddr::new(target_addr + (i as u64) * 4096));
+            let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(
+                phys_base + (i as u64) * 4096,
+            ));
+            let mut mapper =
+                unsafe { OffsetPageTable::new(&mut *pml4_virt.as_mut_ptr(), VirtAddr::new(hhdm)) };
+            if mapper.translate_addr(page.start_address()).is_some() {
+                if let Ok((_, f)) = mapper.unmap(page) {
+                    f.flush();
+                }
+            }
+            unsafe {
+                mapper
+                    .map_to_with_table_flags(
+                        page,
+                        frame,
+                        pt_flags,
+                        parent_flags,
+                        &mut super::LockedFrameAllocator,
+                    )
+                    .map_err(|_| -12)?
+                    .flush();
+                ensure_parent_tables_writable(pml4_virt, page, hhdm);
+            }
+        }
+
+        self.insert_area(VirtualArea {
+            start: target_addr,
+            end: target_addr + aligned_len,
+            flags: pt_flags,
+            is_committed: true,
+        });
+
+        Ok(target_addr)
+    }
+
+    /// Отображает общий набор физических фреймов (SHM / memfd) в адресное пространство процесса.
+    pub fn map_shared_frames(
+        &mut self,
+        addr: u64,
+        len: u64,
+        prot: u64,
+        flags: u64,
+        frames: &[PhysFrame<Size4KiB>],
+    ) -> Result<u64, i64> {
+        if len == 0 {
+            return Err(-22);
+        }
+        let aligned_len = (len.checked_add(4095).ok_or(-12)?) & !4095;
+        let needed_pages = (aligned_len / 4096) as usize;
+        if needed_pages > frames.len() {
+            return Err(-22);
+        }
+        let target_addr = self.select_target_addr(addr, aligned_len, flags)?;
+        let pt_flags = prot_to_pt_flags(prot, false, true);
+
+        let hhdm = super::hhdm_offset();
+        let (current_pml4, _) = Cr3::read();
+        let pml4_virt = VirtAddr::new(hhdm + current_pml4.start_address().as_u64());
+        let parent_flags =
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+
+        for (i, &frame) in frames.iter().take(needed_pages).enumerate() {
+            let page =
+                Page::<Size4KiB>::containing_address(VirtAddr::new(target_addr + (i as u64) * 4096));
+            let mut mapper =
+                unsafe { OffsetPageTable::new(&mut *pml4_virt.as_mut_ptr(), VirtAddr::new(hhdm)) };
+            if mapper.translate_addr(page.start_address()).is_some() {
+                if let Ok((_, f)) = mapper.unmap(page) {
+                    f.flush();
+                }
+            }
+            unsafe {
+                mapper
+                    .map_to_with_table_flags(
+                        page,
+                        frame,
+                        pt_flags,
+                        parent_flags,
+                        &mut super::LockedFrameAllocator,
+                    )
+                    .map_err(|_| -12)?
+                    .flush();
+                ensure_parent_tables_writable(pml4_virt, page, hhdm);
+            }
+        }
+
+        self.insert_area(VirtualArea {
+            start: target_addr,
+            end: target_addr + aligned_len,
+            flags: pt_flags,
+            is_committed: true,
+        });
+
+        Ok(target_addr)
+    }
+
+    fn select_target_addr(&mut self, addr: u64, aligned_len: u64, flags: u64) -> Result<u64, i64> {
+        let is_fixed = (flags & MAP_FIXED) != 0;
+        if is_fixed {
+            if addr % 4096 != 0 || addr < 0x1000 {
+                return Err(-22);
+            }
+            let end_addr = addr.checked_add(aligned_len).ok_or(-22)?;
+            if end_addr > USER_SPACE_END {
+                return Err(-22);
+            }
+            Ok(addr)
+        } else if addr != 0
+            && addr % 4096 == 0
+            && addr >= VMA_START
+            && addr.checked_add(aligned_len).map_or(false, |e| e <= VMA_END)
+            && self.is_range_free(addr, aligned_len)
+        {
+            Ok(addr)
+        } else {
+            self.find_free_range(aligned_len).ok_or(-12)
+        }
+    }
+
     /// Реализация системного вызова SYS_MUNMAP (номер 11)
     pub fn munmap(&mut self, addr: u64, len: u64) -> Result<u64, i64> {
         if addr % 4096 != 0 || len == 0 {
@@ -259,10 +424,21 @@ impl VirtualMemoryManager {
         let mut mapper = unsafe { OffsetPageTable::new(pml4_table, VirtAddr::new(hhdm)) };
 
         for page in Page::range_inclusive(start_page, end_page) {
-            if mapper.translate_page(page).is_ok() {
+            if let Ok(mapped_frame) = mapper.translate_page(page) {
+                let no_free = self
+                    .areas
+                    .iter()
+                    .any(|a| {
+                        page.start_address().as_u64() >= a.start
+                            && page.start_address().as_u64() < a.end
+                            && a.flags.contains(PTE_NO_FREE)
+                    });
                 if let Ok((phys_frame, flush)) = mapper.unmap(page) {
                     flush.flush();
-                    super::deallocate_frame(phys_frame);
+                    let _ = mapped_frame;
+                    if !no_free {
+                        super::deallocate_frame(phys_frame);
+                    }
                 }
             }
         }
@@ -308,10 +484,8 @@ impl VirtualMemoryManager {
             _ => return Err(-22),
         };
 
-        let mut pt_flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
-        if (prot & PROT_WRITE) != 0 {
-            pt_flags |= PageTableFlags::WRITABLE;
-        }
+        let mut pt_flags = prot_to_pt_flags(prot, false, false);
+        let _ = &mut pt_flags;
 
         let hhdm = super::hhdm_offset();
         let (current_pml4, _) = Cr3::read();
