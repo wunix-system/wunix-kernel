@@ -27,10 +27,32 @@ pub struct WinSize {
     pub ws_ypixel: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleInputSource {
+    Display,
+    Serial,
+}
+
 static TTY_WINSIZE_OVERRIDE: spin::Mutex<Option<WinSize>> = spin::Mutex::new(None);
 static SERIAL_WINSIZE: spin::Mutex<Option<WinSize>> = spin::Mutex::new(None);
+static ACTIVE_INPUT_SOURCE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 static LAST_SERIAL_PROBE_TICK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static SERIAL_PROBE_ACTIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn set_active_input_source(source: ConsoleInputSource) {
+    let val = match source {
+        ConsoleInputSource::Display => 0,
+        ConsoleInputSource::Serial => 1,
+    };
+    ACTIVE_INPUT_SOURCE.store(val, Ordering::Release);
+}
+
+pub fn active_input_source() -> ConsoleInputSource {
+    match ACTIVE_INPUT_SOURCE.load(Ordering::Acquire) {
+        1 => ConsoleInputSource::Serial,
+        _ => ConsoleInputSource::Display,
+    }
+}
 
 pub fn is_serial_probe_active() -> bool {
     SERIAL_PROBE_ACTIVE.load(Ordering::Acquire)
@@ -55,6 +77,7 @@ impl SerialEscFilter {
 static SERIAL_ESC_FILTER: spin::Mutex<SerialEscFilter> = spin::Mutex::new(SerialEscFilter::new());
 
 fn forward_serial_byte(b: u8) {
+    set_active_input_source(ConsoleInputSource::Serial);
     if crate::task::syscall::fs::handle_tty_isig_byte(b) {
         return;
     }
@@ -79,20 +102,19 @@ fn parse_xtwinops(buf: &[u8]) -> Option<(u16, u16)> {
     }
 }
 
-fn is_valid_xtwinops_prefix(buf: &[u8]) -> bool {
+fn is_valid_serial_ctrl_prefix(buf: &[u8]) -> bool {
     match buf.len() {
         1 => buf[0] == 0x1b,
         2 => buf[1] == b'[',
-        3 => buf[2] == b'8',
-        4 => buf[3] == b';',
         _ => {
             let last = buf[buf.len() - 1];
-            last.is_ascii_digit() || last == b';' || last == b't'
+            last.is_ascii_digit() || last == b';' || last == b't' || last == b'R'
         }
     }
 }
 
-/// Фильтрует входящие байты COM1, перехватывая XTWINOPS (\x1b[8;rows;colst) для обновления размера окна и SIGWINCH.
+/// Фильтрует входящие байты COM1, перехватывая XTWINOPS (\x1b[8;rows;colst) и DSR (\x1b[rows;colsR)
+/// для обновления размера окна и SIGWINCH.
 pub fn push_serial_rx_byte(b: u8) {
     let mut flush_buf = [0u8; 24];
     let mut flush_len = 0usize;
@@ -125,9 +147,15 @@ pub fn push_serial_rx_byte(b: u8) {
                 f.len = 0;
                 return;
             }
+        } else if b == b'R' {
+            if let Some((r, c)) = parse_dsr_response(cur) {
+                new_winsize = Some((r, c));
+                f.len = 0;
+                return;
+            }
         }
 
-        if !is_valid_xtwinops_prefix(cur) || f.len >= f.buf.len() {
+        if !is_valid_serial_ctrl_prefix(cur) || f.len >= f.buf.len() {
             flush_len = f.len;
             flush_buf[..flush_len].copy_from_slice(cur);
             f.len = 0;
@@ -213,7 +241,7 @@ fn probe_serial_winsize() {
 
     let mut resp = [0u8; 32];
     let mut len = 0usize;
-    let deadline = now.saturating_add(5); // до ~50 мс
+    let deadline = now.saturating_add(20); // до ~200 мс для медленных PTY/терминалов хоста
 
     while crate::arch::x86_64::timer::ticks() <= deadline {
         while let Some(b) = crate::drivers::serial::try_receive() {
@@ -245,40 +273,64 @@ fn probe_serial_winsize() {
     SERIAL_PROBE_ACTIVE.store(false, Ordering::Release);
 }
 
+fn valid_winsize(ws: Option<WinSize>) -> Option<WinSize> {
+    ws.filter(|w| w.ws_row > 0 && w.ws_col > 0)
+}
+
+fn display_winsize() -> Option<WinSize> {
+    let guard = crate::drivers::display::CONSOLE.lock();
+    let console = guard.as_ref()?;
+    let r = console.rows as u16;
+    let c = console.cols as u16;
+    if r == 0 || c == 0 {
+        return None;
+    }
+    Some(WinSize {
+        ws_row: r,
+        ws_col: c,
+        ws_xpixel: c.saturating_mul(crate::drivers::font::FONT_WIDTH as u16),
+        ws_ypixel: r.saturating_mul(crate::drivers::font::FONT_HEIGHT as u16),
+    })
+}
+
+fn select_winsize(
+    override_ws: Option<WinSize>,
+    input_source: ConsoleInputSource,
+    display_ws: Option<WinSize>,
+    serial_ws: Option<WinSize>,
+) -> WinSize {
+    if let Some(ws) = valid_winsize(override_ws) {
+        return ws;
+    }
+    // Выбираем размер того терминала, откуда пользователь реально вводит команды:
+    // при вводе с COM1 ориентируемся на хост-терминал (SERIAL_WINSIZE),
+    // при вводе с PS/2 — на окно QEMU (DisplayConsole), чтобы TUI не разъезжался.
+    let (primary, fallback) = match input_source {
+        ConsoleInputSource::Serial => (serial_ws, display_ws),
+        ConsoleInputSource::Display => (display_ws, serial_ws),
+    };
+    valid_winsize(primary)
+        .or_else(|| valid_winsize(fallback))
+        .unwrap_or(WinSize {
+            ws_row: 25,
+            ws_col: 80,
+            ws_xpixel: 640,
+            ws_ypixel: 400,
+        })
+}
+
 fn current_winsize() -> WinSize {
-    if let Some(ws) = *TTY_WINSIZE_OVERRIDE.lock() {
-        if ws.ws_row > 0 && ws.ws_col > 0 {
-            return ws;
-        }
+    let override_ws = *TTY_WINSIZE_OVERRIDE.lock();
+    if let Some(ws) = valid_winsize(override_ws) {
+        return ws;
     }
-    // Если активна графическая консоль DisplayConsole (Limine Framebuffer),
-    // именно её физическое разрешение экрана (rows, cols) является истинным размером дисплея.
-    // Серийный порт COM1 (SERIAL_WINSIZE) сообщает размеры терминала хоста (часто 140+ колонок),
-    // из-за чего TUI-интерфейсы на экране QEMU разъезжаются и переносят строки.
-    if let Some(console) = crate::drivers::display::CONSOLE.lock().as_ref() {
-        let r = console.rows as u16;
-        let c = console.cols as u16;
-        if r > 0 && c > 0 {
-            return WinSize {
-                ws_row: r,
-                ws_col: c,
-                ws_xpixel: c.saturating_mul(crate::drivers::font::FONT_WIDTH as u16),
-                ws_ypixel: r.saturating_mul(crate::drivers::font::FONT_HEIGHT as u16),
-            };
-        }
+    let input_source = active_input_source();
+    let display_ws = display_winsize();
+    if input_source == ConsoleInputSource::Serial || display_ws.is_none() {
+        probe_serial_winsize();
     }
-    probe_serial_winsize();
-    if let Some(ws) = *SERIAL_WINSIZE.lock() {
-        if ws.ws_row > 0 && ws.ws_col > 0 {
-            return ws;
-        }
-    }
-    WinSize {
-        ws_row: 25,
-        ws_col: 80,
-        ws_xpixel: 640,
-        ws_ypixel: 400,
-    }
+    let serial_ws = *SERIAL_WINSIZE.lock();
+    select_winsize(None, input_source, display_ws, serial_ws)
 }
 
 fn set_winsize(ws: WinSize) {
@@ -501,5 +553,67 @@ impl CharDeviceOp for PtmxDev {
             TIOCSPTLCK => Ok(0),
             _ => Err(-25),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ws(rows: u16, cols: u16) -> WinSize {
+        WinSize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        }
+    }
+
+    #[test]
+    fn select_winsize_prefers_serial_when_serial_is_active() {
+        let res = select_winsize(
+            None,
+            ConsoleInputSource::Serial,
+            Some(ws(48, 128)),
+            Some(ws(55, 190)),
+        );
+        assert_eq!(res.ws_row, 55);
+        assert_eq!(res.ws_col, 190);
+    }
+
+    #[test]
+    fn select_winsize_prefers_display_when_display_is_active() {
+        let res = select_winsize(
+            None,
+            ConsoleInputSource::Display,
+            Some(ws(48, 128)),
+            Some(ws(55, 190)),
+        );
+        assert_eq!(res.ws_row, 48);
+        assert_eq!(res.ws_col, 128);
+    }
+
+    #[test]
+    fn select_winsize_respects_override_and_falls_back_to_default() {
+        let over = select_winsize(
+            Some(ws(30, 100)),
+            ConsoleInputSource::Serial,
+            Some(ws(48, 128)),
+            Some(ws(55, 190)),
+        );
+        assert_eq!(over.ws_row, 30);
+        assert_eq!(over.ws_col, 100);
+
+        let fallback = select_winsize(None, ConsoleInputSource::Serial, None, None);
+        assert_eq!(fallback.ws_row, 25);
+        assert_eq!(fallback.ws_col, 80);
+    }
+
+    #[test]
+    fn parse_serial_winsize_responses() {
+        assert_eq!(parse_dsr_response(b"\x1b[50;180R"), Some((50, 180)));
+        assert_eq!(parse_xtwinops(b"\x1b[8;50;180t"), Some((50, 180)));
+        assert!(is_valid_serial_ctrl_prefix(b"\x1b[50;180R"));
+        assert!(is_valid_serial_ctrl_prefix(b"\x1b[8;50;180t"));
     }
 }

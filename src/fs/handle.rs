@@ -190,6 +190,9 @@ pub fn pump_stdin() -> bool {
     let icrnl = crate::task::syscall::fs::is_icrnl_enabled();
 
     while let Some(c) = crate::drivers::keyboard::pop_char() {
+        crate::fs::devfs::tty::set_active_input_source(
+            crate::fs::devfs::tty::ConsoleInputSource::Display,
+        );
         if c == '\r' && icrnl {
             push_stdin_byte(b'\n');
         } else {
