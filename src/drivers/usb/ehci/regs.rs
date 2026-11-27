@@ -14,12 +14,16 @@ pub const OP_ASYNCLISTADDR: usize = 0x18;
 pub const OP_CONFIGFLAG: usize = 0x40;
 pub const OP_PORTSC_BASE: usize = 0x44;
 
-pub const USBCMD_RS: u32 = 1 << 0;     // Run/Stop
-pub const USBCMD_HCRESET: u32 = 1 << 1;// Host Controller Reset
-pub const USBCMD_ASE: u32 = 1 << 5;    // Asynchronous Schedule Enable
+pub const USBCMD_RS: u32 = 1 << 0;
+pub const USBCMD_HCRESET: u32 = 1 << 1;
+pub const USBCMD_ASE: u32 = 1 << 5;
 
 pub const USBSTS_HCHALTED: u32 = 1 << 12;
 
 pub const PORTSC_CONNECT: u32 = 1 << 0;
 pub const PORTSC_ENABLE: u32 = 1 << 2;
+pub const PORTSC_RESET: u32 = 1 << 8;
+pub const PORTSC_LINE_MASK: u32 = 3 << 10;
+pub const PORTSC_LINE_K: u32 = 1 << 10;
 pub const PORTSC_POWER: u32 = 1 << 12;
+pub const PORTSC_OWNER: u32 = 1 << 13;

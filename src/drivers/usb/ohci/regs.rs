@@ -33,10 +33,14 @@ pub const CONTROL_HCFS_RESET: u32 = 0 << 6;
 
 /// Битовые флаги регистра CommandStatus
 pub const CMD_HCR: u32 = 1 << 0;      // Host Controller Reset
+pub const CMD_CLF: u32 = 1 << 1;      // Control List Filled
+pub const CMD_BLF: u32 = 1 << 2;      // Bulk List Filled
 
 /// Битовые флаги портов корневого концентратора (Root Hub Port Status)
 pub const RH_PORT_CCS: u32 = 1 << 0;  // Current Connect Status
 pub const RH_PORT_PES: u32 = 1 << 1;  // Port Enable Status
 pub const RH_PORT_PRS: u32 = 1 << 4;  // Port Reset Status
-pub const RH_PORT_PPS: u32 = 1 << 9;  // Port Power Status
+pub const RH_PORT_PPS: u32 = 1 << 8;  // Port Power Status (бит 8 в OHCI)
 pub const RH_PORT_LSDA: u32 = 1 << 9; // Low Speed Device Attached
+pub const RH_PORT_CSC: u32 = 1 << 16; // Connect Status Change
+pub const RH_PORT_PRSC: u32 = 1 << 20; // Port Reset Status Change

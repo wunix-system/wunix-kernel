@@ -17,7 +17,12 @@ impl TrbRing {
 
         // Последний слот в кольце резервируется под Link TRB, зацикливающий кольцо
         let last = RING_SIZE - 1;
-        dma[last] = Trb::new(phys, 0, (TRB_TYPE_LINK << 10) | TRB_TC | TRB_CYCLE);
+        unsafe {
+            core::ptr::write_volatile(
+                &mut dma[last],
+                Trb::new(phys, 0, (TRB_TYPE_LINK << 10) | TRB_TC | TRB_CYCLE),
+            );
+        }
 
         Ok(Self {
             dma,
@@ -40,21 +45,26 @@ impl TrbRing {
         } else {
             trb.control &= !TRB_CYCLE;
         }
-        self.dma[idx] = trb;
+        unsafe {
+            core::ptr::write_volatile(&mut self.dma[idx], trb);
+        }
 
         self.enqueue += 1;
         if self.enqueue == RING_SIZE - 1 {
             // Переход по Link TRB
-            let mut link = self.dma[RING_SIZE - 1];
+            let mut link = unsafe { core::ptr::read_volatile(&self.dma[RING_SIZE - 1]) };
             if self.cycle {
                 link.control |= TRB_CYCLE;
             } else {
                 link.control &= !TRB_CYCLE;
             }
-            self.dma[RING_SIZE - 1] = link;
+            unsafe {
+                core::ptr::write_volatile(&mut self.dma[RING_SIZE - 1], link);
+            }
             self.enqueue = 0;
             self.cycle = !self.cycle;
         }
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
 
         trb_phys
     }
@@ -107,7 +117,8 @@ impl EventRing {
     /// Проверяет появление нового события в очереди.
     /// Возвращает Some(trb) если событие готово, обновляя указатель dequeue.
     pub fn poll_event(&mut self) -> Option<Trb> {
-        let trb = self.dma[self.dequeue];
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+        let trb = unsafe { core::ptr::read_volatile(&self.dma[self.dequeue]) };
         let trb_cycle = (trb.control & TRB_CYCLE) != 0;
 
         if trb_cycle == self.cycle {
@@ -121,5 +132,19 @@ impl EventRing {
         } else {
             None
         }
+    }
+}
+
+/// Обновляет регистр ERDP (Event Ring Dequeue Pointer) парой 32-битных записей
+/// со сбросом флага Event Handler Busy (бит 3).
+#[inline]
+pub(super) fn advance_erdp(rt_base: *mut u8, dequeue_phys: u64) {
+    let val = dequeue_phys | (1 << 3);
+    unsafe {
+        core::ptr::write_volatile(rt_base.add(super::regs::RT_ERDP) as *mut u32, val as u32);
+        core::ptr::write_volatile(
+            rt_base.add(super::regs::RT_ERDP + 4) as *mut u32,
+            (val >> 32) as u32,
+        );
     }
 }

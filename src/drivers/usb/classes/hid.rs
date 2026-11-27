@@ -1,6 +1,11 @@
 use alloc::collections::VecDeque;
+use alloc::sync::Arc;
+use spin::Mutex;
+
+use crate::drivers::display::screen_dimensions;
 use crate::drivers::keyboard::push_char;
 use crate::drivers::traits::{InputDevice, InputEvent};
+use crate::drivers::usb::host::UsbHostController;
 
 const EV_SYN: u16 = 0x00;
 const EV_KEY: u16 = 0x01;
@@ -47,6 +52,9 @@ impl UsbKeyboardReport {
 pub struct UsbKeyboardDevice {
     prev_report: UsbKeyboardReport,
     events: VecDeque<InputEvent>,
+    host: Option<Arc<Mutex<dyn UsbHostController>>>,
+    slot_id: u8,
+    intr_in_ep: u8,
 }
 
 impl UsbKeyboardDevice {
@@ -54,7 +62,22 @@ impl UsbKeyboardDevice {
         Self {
             prev_report: UsbKeyboardReport::default(),
             events: VecDeque::with_capacity(32),
+            host: None,
+            slot_id: 0,
+            intr_in_ep: 0,
         }
+    }
+
+    pub fn with_host(
+        host: Arc<Mutex<dyn UsbHostController>>,
+        slot_id: u8,
+        intr_in_ep: u8,
+    ) -> Self {
+        let mut dev = Self::new();
+        dev.host = Some(host);
+        dev.slot_id = slot_id;
+        dev.intr_in_ep = intr_in_ep;
+        dev
     }
 
     pub fn update(&mut self, report: &UsbKeyboardReport) {
@@ -100,6 +123,26 @@ impl InputDevice for UsbKeyboardDevice {
     }
 
     fn poll_event(&mut self) -> Option<InputEvent> {
+        if self.events.is_empty() {
+            if let Some(ref host) = self.host {
+                if self.intr_in_ep != 0 {
+                    let mut buf = [0u8; 8];
+                    let res =
+                        host.lock()
+                            .interrupt_transfer(self.slot_id, self.intr_in_ep, &mut buf, 0);
+                    if let Ok(n) = res {
+                        if n >= 8 {
+                            let report = UsbKeyboardReport {
+                                modifiers: buf[0],
+                                reserved: buf[1],
+                                keycodes: [buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]],
+                            };
+                            self.update(&report);
+                        }
+                    }
+                }
+            }
+        }
         self.events.pop_front()
     }
 
@@ -174,25 +217,45 @@ pub struct UsbMouseDevice {
     cur_y: u32,
     button_mask: u32,
     events: VecDeque<InputEvent>,
+    host: Option<Arc<Mutex<dyn UsbHostController>>>,
+    slot_id: u8,
+    intr_in_ep: u8,
 }
 
 impl UsbMouseDevice {
     pub fn new() -> Self {
+        let (w, h) = screen_dimensions().unwrap_or((1024, 768));
         Self {
-            cur_x: 512,
-            cur_y: 384,
+            cur_x: w / 2,
+            cur_y: h / 2,
             button_mask: 0,
             events: VecDeque::with_capacity(32),
+            host: None,
+            slot_id: 0,
+            intr_in_ep: 0,
         }
+    }
+
+    pub fn with_host(
+        host: Arc<Mutex<dyn UsbHostController>>,
+        slot_id: u8,
+        intr_in_ep: u8,
+    ) -> Self {
+        let mut dev = Self::new();
+        dev.host = Some(host);
+        dev.slot_id = slot_id;
+        dev.intr_in_ep = intr_in_ep;
+        dev
     }
 
     pub fn update(&mut self, report: &UsbMouseReport) {
         let new_buttons = (report.buttons & 0x07) as u32;
         let dx = report.x_displacement as i32;
         let dy = report.y_displacement as i32;
+        let (max_w, max_h) = screen_dimensions().unwrap_or((1024, 768));
 
-        self.cur_x = (self.cur_x as i32 + dx).clamp(0, 1920) as u32;
-        self.cur_y = (self.cur_y as i32 + dy).clamp(0, 1080) as u32;
+        self.cur_x = (self.cur_x as i32 + dx).clamp(0, max_w.max(1) as i32) as u32;
+        self.cur_y = (self.cur_y as i32 + dy).clamp(0, max_h.max(1) as i32) as u32;
 
         let mut changed = false;
 
@@ -257,6 +320,26 @@ impl InputDevice for UsbMouseDevice {
     }
 
     fn poll_event(&mut self) -> Option<InputEvent> {
+        if self.events.is_empty() {
+            if let Some(ref host) = self.host {
+                if self.intr_in_ep != 0 {
+                    let mut buf = [0u8; 4];
+                    let res =
+                        host.lock()
+                            .interrupt_transfer(self.slot_id, self.intr_in_ep, &mut buf, 0);
+                    if let Ok(n) = res {
+                        if n >= 3 {
+                            let report = UsbMouseReport {
+                                buttons: buf[0],
+                                x_displacement: buf[1] as i8,
+                                y_displacement: buf[2] as i8,
+                            };
+                            self.update(&report);
+                        }
+                    }
+                }
+            }
+        }
         self.events.pop_front()
     }
 
