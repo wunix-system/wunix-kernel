@@ -445,12 +445,12 @@ impl FileHandle for StdoutStderrHandle {
     }
 
     fn write(&self, buf: &[u8]) -> Result<usize, i64> {
+        // Serial: пишем посимвольно (там нет курсора, мерцания нет)
         let mut start = 0;
         while start < buf.len() {
             match core::str::from_utf8(&buf[start..]) {
                 Ok(valid) => {
                     crate::serial_print!("{}", valid);
-                    crate::print!("{}", valid);
                     break;
                 }
                 Err(err) => {
@@ -458,26 +458,25 @@ impl FileHandle for StdoutStderrHandle {
                     if valid_len > 0 {
                         if let Ok(valid) = core::str::from_utf8(&buf[start..start + valid_len]) {
                             crate::serial_print!("{}", valid);
-                            crate::print!("{}", valid);
                         }
                         start += valid_len;
                     }
                     if let Some(error_len) = err.error_len() {
                         for &b in &buf[start..start + error_len] {
                             crate::serial_print!("{}", b as char);
-                            crate::print!("{}", b as char);
                         }
                         start += error_len;
                     } else {
                         for &b in &buf[start..] {
                             crate::serial_print!("{}", b as char);
-                            crate::print!("{}", b as char);
                         }
                         break;
                     }
                 }
             }
         }
+        // Display: один батч — один erase/draw курсора на весь буфер
+        crate::drivers::display::write_bytes(buf);
         Ok(buf.len())
     }
 

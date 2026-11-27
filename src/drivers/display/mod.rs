@@ -96,16 +96,57 @@ impl DisplayConsole {
 
 impl fmt::Write for DisplayConsole {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.erase_cursor();
         for c in s.chars() {
             self.write_char_raw(c);
         }
-        self.draw_cursor();
         Ok(())
     }
 }
 
 pub static CONSOLE: Mutex<Option<DisplayConsole>> = Mutex::new(None);
+
+/// Вывод сырого байтового буфера на дисплей за один батч: один erase + draw курсора на весь buf.
+/// Невалидные UTF-8 последовательности заменяются символом '?'.
+pub fn write_bytes(buf: &[u8]) {
+    use x86_64::instructions::interrupts;
+    interrupts::without_interrupts(|| {
+        if let Some(mut guard) = CONSOLE.try_lock() {
+            if let Some(console) = guard.as_mut() {
+                console.erase_cursor();
+                let mut start = 0;
+                while start < buf.len() {
+                    match core::str::from_utf8(&buf[start..]) {
+                        Ok(valid) => {
+                            for c in valid.chars() {
+                                console.write_char_raw(c);
+                            }
+                            break;
+                        }
+                        Err(err) => {
+                            let valid_len = err.valid_up_to();
+                            if valid_len > 0 {
+                                if let Ok(valid) = core::str::from_utf8(&buf[start..start + valid_len]) {
+                                    for c in valid.chars() {
+                                        console.write_char_raw(c);
+                                    }
+                                }
+                                start += valid_len;
+                            }
+                            if let Some(error_len) = err.error_len() {
+                                // Невалидная последовательность — заменяем '?' чтобы не мигать побайтово
+                                console.write_char_raw('?');
+                                start += error_len;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
+                console.draw_cursor();
+            }
+        }
+    });
+}
 
 pub fn is_present() -> bool {
     CONSOLE.lock().is_some()
@@ -151,7 +192,9 @@ pub fn _print(args: fmt::Arguments) {
     interrupts::without_interrupts(|| {
         if let Some(mut guard) = CONSOLE.try_lock() {
             if let Some(console) = guard.as_mut() {
+                console.erase_cursor();
                 let _ = console.write_fmt(args);
+                console.draw_cursor();
             }
         }
     });
