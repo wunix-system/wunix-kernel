@@ -203,13 +203,22 @@ impl AudioDevice for Sb16Device {
     }
 }
 
+static SB16_PRESENT: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+pub fn is_present() -> bool {
+    SB16_PRESENT.load(core::sync::atomic::Ordering::Acquire)
+}
+
 pub fn init() -> Option<Sb16Device> {
     if let Some(sb) = Sb16Device::probe(SB16_DEFAULT_BASE) {
+        SB16_PRESENT.store(true, core::sync::atomic::Ordering::Release);
         serial_println!(
             "sb16: registered Sound Blaster 16 at port 0x{:03x} (DSP v{}.{})",
             sb.base, sb.version_major, sb.version_minor
         );
         return Some(sb);
     }
+    SB16_PRESENT.store(false, core::sync::atomic::Ordering::Release);
     None
 }

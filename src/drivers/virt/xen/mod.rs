@@ -17,8 +17,37 @@ pub use grant_table::{GrantTable, GRANT_TABLE};
 pub use hypercall::{hypercall3, xen_console_write, xen_version, XenHypercallPage, XEN_HYPERCALL};
 pub use netfront::XenNetFront;
 
+pub fn is_xen_cpuid() -> bool {
+    let base = core::arch::x86_64::__cpuid(0x4000_0000);
+    let mut sig = [0u8; 12];
+    sig[0..4].copy_from_slice(&base.ebx.to_le_bytes());
+    sig[4..8].copy_from_slice(&base.ecx.to_le_bytes());
+    sig[8..12].copy_from_slice(&base.edx.to_le_bytes());
+    if &sig == b"XenVMMXenVMM" {
+        return true;
+    }
+    let alt = core::arch::x86_64::__cpuid(0x4000_0100);
+    sig[0..4].copy_from_slice(&alt.ebx.to_le_bytes());
+    sig[4..8].copy_from_slice(&alt.ecx.to_le_bytes());
+    sig[8..12].copy_from_slice(&alt.edx.to_le_bytes());
+    &sig == b"XenVMMXenVMM"
+}
+
 pub fn init_xen_drivers(dm: &mut DeviceManager) {
-    serial_println!("xen: initializing Xen paravirtualization stack...");
+    use crate::i18n::t;
+
+    if !is_xen_cpuid() {
+        serial_println!("xen: CPUID signature not present, skipping paravirtual drivers");
+        return;
+    }
+
+    crate::klog!(
+        "xen: {}",
+        t(
+            "инициализация паравиртуального стека Xen",
+            "initializing Xen paravirtualization stack"
+        )
+    );
 
     match XenHypercallPage::new() {
         Ok(hp) => {

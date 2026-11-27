@@ -62,7 +62,21 @@ impl NetVscDevice {
 
         self.req_id += 1;
         self.channel.send_packet(1, &raw_bytes)?;
-        Ok(())
+
+        // Ожидаем RNDIS_INITIALIZE_CMPLT (0x80000002) от VMBus-сервера хоста
+        let mut resp = [0u8; 64];
+        for _ in 0..50_000 {
+            if let Ok(Some(n)) = self.channel.receive_packet(&mut resp) {
+                if n >= 8 {
+                    let msg_type = u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]);
+                    if msg_type == 0x8000_0002 {
+                        return Ok(());
+                    }
+                }
+            }
+            core::hint::spin_loop();
+        }
+        Err("NetVSC: RNDIS initialization handshake timed out")
     }
 }
 

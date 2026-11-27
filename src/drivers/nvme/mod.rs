@@ -2,15 +2,20 @@ pub mod identify;
 pub mod queue;
 pub mod regs;
 
+use alloc::format;
 use alloc::sync::Arc;
+use core::sync::atomic::{compiler_fence, AtomicUsize, Ordering};
 use spin::Mutex;
 
+use crate::drivers::dma::Dma;
 use crate::drivers::manager::DeviceManager;
 use crate::drivers::pci::PciDevice;
-use crate::drivers::dma::Dma;
 use crate::drivers::traits::{BlockDevice, BlockDeviceError};
+use crate::i18n::t;
 use crate::memory::map_kernel_mmio;
 use crate::serial_println;
+
+static NVME_INDEX: AtomicUsize = AtomicUsize::new(0);
 
 use identify::IdentifyNamespace;
 use queue::{NvmeCmd, NvmeCqe};
@@ -54,6 +59,7 @@ impl NvmeDevice {
     }
 
     fn ring_doorbell(&self, qid: u32, is_completion: bool, val: u16) {
+        compiler_fence(Ordering::Release);
         let offset = doorbell_offset(self.dstrd, qid, is_completion);
         self.write_reg32(offset, val as u32);
     }
@@ -232,12 +238,18 @@ impl NvmeDevice {
 impl BlockDevice for NvmeDevice {
     fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
         let sec_sz = self.sector_size;
+        if sec_sz == 0 || sec_sz > self.dma_bounce.len() || buf.len() % sec_sz != 0 {
+            return Err(BlockDeviceError::IoError);
+        }
         let total_sectors = buf.len() / sec_sz;
         if total_sectors == 0 {
             return Ok(());
         }
+        if start_sector.saturating_add(total_sectors as u64) > self.sector_count {
+            return Err(BlockDeviceError::OutOfBounds);
+        }
 
-        let max_chunk = 4096 / sec_sz;
+        let max_chunk = self.dma_bounce.len() / sec_sz;
         let mut sec_done = 0;
 
         while sec_done < total_sectors {
@@ -251,7 +263,7 @@ impl BlockDevice for NvmeDevice {
             cmd.prp1 = self.dma_bounce.physical() as u64;
             cmd.cdw10 = lba as u32;
             cmd.cdw11 = (lba >> 32) as u32;
-            cmd.cdw12 = (chunk_sectors - 1) as u32; // 0-based sector count
+            cmd.cdw12 = (chunk_sectors - 1) as u32;
 
             self.submit_io_cmd(cmd)?;
             buf[sec_done * sec_sz..sec_done * sec_sz + byte_len]
@@ -264,12 +276,18 @@ impl BlockDevice for NvmeDevice {
 
     fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
         let sec_sz = self.sector_size;
+        if sec_sz == 0 || sec_sz > self.dma_bounce.len() || buf.len() % sec_sz != 0 {
+            return Err(BlockDeviceError::IoError);
+        }
         let total_sectors = buf.len() / sec_sz;
         if total_sectors == 0 {
             return Ok(());
         }
+        if start_sector.saturating_add(total_sectors as u64) > self.sector_count {
+            return Err(BlockDeviceError::OutOfBounds);
+        }
 
-        let max_chunk = 4096 / sec_sz;
+        let max_chunk = self.dma_bounce.len() / sec_sz;
         let mut sec_done = 0;
 
         while sec_done < total_sectors {
@@ -311,10 +329,16 @@ pub fn probe_pci(dev: &mut PciDevice, dm: &mut DeviceManager) -> bool {
                 dev.driver_name = Some("nvme");
                 let sec_sz = nvme.sector_size();
                 let cap_mb = (nvme.sector_count() * sec_sz as u64) / (1024 * 1024);
-                let name = alloc::string::String::from("nvme0n1");
-                serial_println!(
-                    "nvme: registered /dev/{} ({} MB, sector size {} bytes)",
-                    name, cap_mb, sec_sz
+                let idx = NVME_INDEX.fetch_add(1, Ordering::Relaxed);
+                let name = format!("nvme{}n1", idx);
+                crate::klog!(
+                    "nvme: {} /dev/{} ({} {}, {} {})",
+                    t("подключен накопитель", "registered drive"),
+                    name,
+                    cap_mb,
+                    t("МБ", "MB"),
+                    sec_sz,
+                    t("байт/сектор", "bytes/sector")
                 );
                 dm.register_block_device(name, Arc::new(Mutex::new(nvme)));
                 return true;

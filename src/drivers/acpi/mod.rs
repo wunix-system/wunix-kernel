@@ -212,3 +212,7 @@ fn parse_madt(_madt_phys: u64, madt_virt: u64) {
 pub fn get_madt_info() -> Option<MadtInfo> {
     MADT_INFO.lock().clone()
 }
+
+pub fn is_present() -> bool {
+    power::is_ready() || MADT_INFO.lock().is_some()
+}

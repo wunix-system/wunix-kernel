@@ -6,6 +6,10 @@ use spin::Mutex;
 
 static TPM_INSTANCE: Mutex<Option<TpmCrb>> = Mutex::new(None);
 
+pub fn is_present() -> bool {
+    TPM_INSTANCE.lock().is_some()
+}
+
 /// Инициализирует модуль безопасности TPM 2.0 (CRB / Intel PTT / AMD fTPM)
 pub fn init() {
     let mmio = match crate::memory::map_kernel_mmio(regs::TPM_CRB_BASE_PHYS, 4096) {

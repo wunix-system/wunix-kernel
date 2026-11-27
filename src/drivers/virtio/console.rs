@@ -7,7 +7,7 @@ use super::{
     VirtioDevice, VirtioDeviceType, VirtioError, VIRTIO_STATUS_ACKNOWLEDGE, VIRTIO_STATUS_DRIVER,
     VIRTIO_STATUS_DRIVER_OK, VIRTIO_STATUS_FEATURES_OK,
 };
-use crate::memory::{allocate_contiguous_frames, deallocate_frame, hhdm_offset};
+use crate::memory::{allocate_contiguous_frames, hhdm_offset};
 
 /// Драйвер виртуальной консоли VirtIO Console (/dev/hvc0).
 pub struct VirtioConsole {
@@ -148,6 +148,6 @@ impl VirtioDevice for VirtioConsole {
 impl Drop for VirtioConsole {
     fn drop(&mut self) {
         self.reset();
-        deallocate_frame(self.dma_frame);
+        crate::drivers::deallocate_contiguous_frames(self.dma_frame, 2);
     }
 }

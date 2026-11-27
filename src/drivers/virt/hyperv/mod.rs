@@ -43,7 +43,20 @@ pub fn probe_pci(dev: &PciDevice, dm: &mut DeviceManager) -> bool {
 }
 
 pub fn init_synthetic_drivers(dm: &mut DeviceManager) {
-    serial_println!("hyperv: initializing VMBus synthetic device clients...");
+    use crate::i18n::t;
+
+    if let Err(e) = vmbus::init_vmbus_hypercall() {
+        serial_println!("hyperv: skipping synthetic drivers ({})", e);
+        return;
+    }
+
+    crate::klog!(
+        "hyperv: {}",
+        t(
+            "инициализация VMBus синтетических драйверов",
+            "initializing VMBus synthetic device clients"
+        )
+    );
 
     match NetVscDevice::new(1) {
         Ok(net) => {

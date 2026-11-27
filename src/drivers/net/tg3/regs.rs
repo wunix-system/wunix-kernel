@@ -3,7 +3,13 @@ pub const TG3_MAC_MODE: usize = 0x0400;
 pub const TG3_MAC_STATUS: usize = 0x0404;
 pub const TG3_MAC_ADDR_0_HIGH: usize = 0x0410;
 pub const TG3_MAC_ADDR_0_LOW: usize = 0x0414;
+pub const TG3_TX_MAC_MODE: usize = 0x045C;
+pub const TG3_RX_MAC_MODE: usize = 0x0468;
+pub const TG3_BUF_MGR_MODE: usize = 0x4400;
+pub const TG3_RDMA_MODE: usize = 0x4800;
+pub const TG3_WDMA_MODE: usize = 0x4C00;
 pub const TG3_FTQ_RESET: usize = 0x5C00;
+pub const TG3_GRC_MISC_CFG: usize = 0x6804;
 
 // Очереди дескрипторов хоста (Receive Buffer Descriptor Initiator)
 pub const TG3_RCVDBDI_STD_BD: usize = 0x2450;
@@ -28,14 +34,15 @@ pub const TG3_MAILBOX_SNDHOST_PROD_IDX_0: usize = 0x0304; // 0x300 + 4
 // Адреса внутренней памяти SRAM
 pub const TG3_NIC_SRAM_RCV_RET_RCB: usize = 0x8200;
 pub const TG3_NIC_SRAM_SEND_RCB: usize = 0x8100;
-pub const TG3_NIC_SRAM_STATUS_BLK: usize = 0x8B00;
+pub const TG3_NIC_SRAM_STATUS_BLK: usize = 0x0B00;
 pub const TG3_NIC_SRAM_RX_BUFFER_DESC: usize = 0x6000;
 pub const TG3_NIC_SRAM_TX_BUFFER_DESC: usize = 0x4000;
 
 // Флаги управления MAC
 pub const TG3_MAC_MODE_ENABLE: u32 = 1 << 0;
-pub const TG3_MAC_MODE_TXEN: u32 = 1 << 1;
-pub const TG3_MAC_MODE_RXEN: u32 = 1 << 2;
+pub const TG3_TX_MAC_ENABLE: u32 = 1 << 1;
+pub const TG3_RX_MAC_ENABLE: u32 = 1 << 1;
+pub const TG3_GRC_RESET_CORE: u32 = 1 << 0;
 
 // Флаги Host Coalescing
 pub const TG3_HOSTCC_MODE_ENABLE: u32 = 1 << 1;

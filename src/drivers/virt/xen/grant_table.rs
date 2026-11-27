@@ -54,16 +54,20 @@ impl GrantTable {
         let setup = GnttabSetupTable {
             dom: 0x7FF0,
             nr_frames: 1,
-            status: 0,
+            status: -1,
             frame_list: &mut pfn as *mut _ as u64,
         };
 
-        let _ = hypercall3(
+        let rc = hypercall3(
             HYPERVISOR_GRANT_TABLE_OP,
             GNTTABOP_SETUP_TABLE,
             &setup as *const _ as usize,
             1,
         );
+        if rc < 0 || setup.status != 0 {
+            deallocate_frame(frame);
+            return Err("Xen: GNTTABOP_SETUP_TABLE rejected by hypervisor");
+        }
 
         Ok(Self {
             frame,
@@ -72,9 +76,11 @@ impl GrantTable {
         })
     }
 
+    pub const MIN_DYNAMIC_GREF: usize = 8;
+
     pub fn grant_access(&mut self, ref_idx: usize, frame_pfn: u32, readonly: bool) -> Result<(), &'static str> {
-        if ref_idx >= self.num_entries {
-            return Err("Xen grant ref out of bounds");
+        if ref_idx < Self::MIN_DYNAMIC_GREF || ref_idx >= self.num_entries {
+            return Err("Xen grant ref reserved or out of bounds");
         }
 
         let mut flags = GTF_PERMIT_ACCESS;

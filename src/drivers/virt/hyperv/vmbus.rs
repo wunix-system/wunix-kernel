@@ -1,8 +1,68 @@
 use alloc::vec::Vec;
+use core::arch::x86_64::__cpuid;
+use core::sync::atomic::{fence, Ordering};
 use spin::Mutex;
+use x86_64::registers::model_specific::Msr;
 use x86_64::structures::paging::PhysFrame;
 
-use crate::memory::{allocate_contiguous_frames, deallocate_frame, hhdm_offset};
+use crate::memory::{allocate_contiguous_frames, allocate_frame, hhdm_offset};
+
+const HV_X64_MSR_GUEST_OS_ID: u32 = 0x4000_0000;
+const HV_X64_MSR_HYPERCALL: u32 = 0x4000_0001;
+const HV_GUEST_OS_ID_LINUX: u64 = 0x8100_0000_0000_0000;
+
+static HYPERCALL_PAGE_VIRT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Проверяет CPUID `"Microsoft Hv"` и регистрирует страницу гипервызовов Hyper-V.
+pub fn init_vmbus_hypercall() -> Result<u64, &'static str> {
+    let base = __cpuid(0x4000_0000);
+    let mut sig = [0u8; 12];
+    sig[0..4].copy_from_slice(&base.ebx.to_le_bytes());
+    sig[4..8].copy_from_slice(&base.ecx.to_le_bytes());
+    sig[8..12].copy_from_slice(&base.edx.to_le_bytes());
+    if &sig != b"Microsoft Hv" {
+        return Err("Hyper-V CPUID signature not present");
+    }
+
+    let existing = HYPERCALL_PAGE_VIRT.load(Ordering::Acquire);
+    if existing != 0 {
+        return Ok(existing);
+    }
+
+    let frame = allocate_frame().ok_or("VMBus: failed to allocate hypercall page")?;
+    let phys = frame.start_address().as_u64();
+    let virt = hhdm_offset() + phys;
+    unsafe {
+        core::ptr::write_bytes(virt as *mut u8, 0, 4096);
+        Msr::new(HV_X64_MSR_GUEST_OS_ID).write(HV_GUEST_OS_ID_LINUX);
+        Msr::new(HV_X64_MSR_HYPERCALL).write(phys | 1);
+    }
+    HYPERCALL_PAGE_VIRT.store(virt, Ordering::Release);
+    Ok(virt)
+}
+
+#[inline]
+pub fn hv_signal_event(connection_id: u32) -> u64 {
+    let page = HYPERCALL_PAGE_VIRT.load(Ordering::Acquire);
+    if page == 0 {
+        return u64::MAX;
+    }
+    // Fast hypercall HvCallSignalEvent (code 0x005D, fast = bit 16)
+    let control: u64 = 0x005D | (1 << 16);
+    let status: u64;
+    unsafe {
+        core::arch::asm!(
+            "call {hc}",
+            hc = in(reg) page,
+            in("rcx") control,
+            in("rdx") connection_id as u64,
+            lateout("rax") status,
+            clobber_abi("C"),
+        );
+    }
+    status
+}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,15 +159,25 @@ impl VmbusChannel {
             transaction_id: 1,
         };
 
+        let aligned_bytes = (hdr.length8 as usize) * 8;
         let ring_data = unsafe { self.outbound_ring.add(core::mem::size_of::<VmbusRingBufferHeader>()) };
-        unsafe {
-            let hdr_ptr = ring_data.add(cur_write % data_capacity) as *mut VmbusPacketHeader;
-            core::ptr::copy_nonoverlapping(&hdr as *const _ as *const u8, hdr_ptr as *mut u8, core::mem::size_of::<VmbusPacketHeader>());
-            let payload_ptr = ring_data.add((cur_write + core::mem::size_of::<VmbusPacketHeader>()) % data_capacity);
-            core::ptr::copy_nonoverlapping(data.as_ptr(), payload_ptr, data.len());
+        let hdr_bytes = unsafe {
+            core::slice::from_raw_parts(&hdr as *const _ as *const u8, core::mem::size_of::<VmbusPacketHeader>())
+        };
+        for (i, &b) in hdr_bytes.iter().enumerate() {
+            unsafe { *ring_data.add((cur_write + i) % data_capacity) = b; }
+        }
+        let payload_off = cur_write + core::mem::size_of::<VmbusPacketHeader>();
+        for (i, &b) in data.iter().enumerate() {
+            unsafe { *ring_data.add((payload_off + i) % data_capacity) = b; }
         }
 
-        ring_header.write_index = ((cur_write + total_size) % data_capacity) as u32;
+        fence(Ordering::Release);
+        let new_write = (cur_write + aligned_bytes) % data_capacity;
+        unsafe {
+            core::ptr::write_volatile(&mut ring_header.write_index, new_write as u32);
+        }
+        let _ = hv_signal_event(self.channel_id);
         Ok(())
     }
 
@@ -115,29 +185,33 @@ impl VmbusChannel {
         let ring_header = unsafe { &mut *(self.inbound_ring as *mut VmbusRingBufferHeader) };
         let data_capacity = self.ring_size - core::mem::size_of::<VmbusRingBufferHeader>();
 
-        let cur_read = ring_header.read_index as usize;
-        let cur_write = ring_header.write_index as usize;
+        let cur_read = unsafe { core::ptr::read_volatile(&ring_header.read_index) as usize };
+        let cur_write = unsafe { core::ptr::read_volatile(&ring_header.write_index) as usize };
+        fence(Ordering::Acquire);
 
         if cur_read == cur_write {
             return Ok(None);
         }
 
         let ring_data = unsafe { self.inbound_ring.add(core::mem::size_of::<VmbusRingBufferHeader>()) };
-        let hdr_ptr = unsafe { ring_data.add(cur_read % data_capacity) as *const VmbusPacketHeader };
-        let hdr = unsafe { *hdr_ptr };
+        let mut hdr_raw = [0u8; core::mem::size_of::<VmbusPacketHeader>()];
+        for (i, slot) in hdr_raw.iter_mut().enumerate() {
+            *slot = unsafe { *ring_data.add((cur_read + i) % data_capacity) };
+        }
+        let hdr: VmbusPacketHeader = unsafe { core::ptr::read_unaligned(hdr_raw.as_ptr() as *const _) };
 
         let payload_len = (hdr.length8 as usize * 8).saturating_sub(core::mem::size_of::<VmbusPacketHeader>());
         let to_copy = payload_len.min(buf.len());
-
-        if to_copy > 0 {
-            let payload_ptr = unsafe { ring_data.add((cur_read + core::mem::size_of::<VmbusPacketHeader>()) % data_capacity) };
-            unsafe {
-                core::ptr::copy_nonoverlapping(payload_ptr, buf.as_mut_ptr(), to_copy);
-            }
+        let payload_off = cur_read + core::mem::size_of::<VmbusPacketHeader>();
+        for (i, dst) in buf[..to_copy].iter_mut().enumerate() {
+            *dst = unsafe { *ring_data.add((payload_off + i) % data_capacity) };
         }
 
-        let total_packet_bytes = hdr.length8 as usize * 8;
-        ring_header.read_index = ((cur_read + total_packet_bytes) % data_capacity) as u32;
+        let total_packet_bytes = (hdr.length8 as usize * 8).max(8);
+        fence(Ordering::Release);
+        unsafe {
+            core::ptr::write_volatile(&mut ring_header.read_index, ((cur_read + total_packet_bytes) % data_capacity) as u32);
+        }
 
         Ok(Some(to_copy))
     }
@@ -145,7 +219,7 @@ impl VmbusChannel {
 
 impl Drop for VmbusChannel {
     fn drop(&mut self) {
-        deallocate_frame(self.dma_frame);
+        crate::drivers::deallocate_contiguous_frames(self.dma_frame, 4);
     }
 }
 

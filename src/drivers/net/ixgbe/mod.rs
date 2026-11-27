@@ -7,6 +7,7 @@ use crate::drivers::dma::Dma;
 use crate::drivers::manager::DeviceManager;
 use crate::drivers::pci::PciDevice;
 use crate::drivers::traits::{NetDevice, NetDeviceError};
+use crate::i18n::t;
 
 use desc::*;
 use regs::*;
@@ -88,6 +89,19 @@ impl IxgbeDevice {
     }
 
     fn init_hw(&mut self, pci: &PciDevice) -> Result<(), &'static str> {
+        // Программный сброс MAC/DMA перед настройкой колец
+        let ctrl = self.read_reg(IXGBE_CTRL);
+        self.write_reg(IXGBE_CTRL, ctrl | IXGBE_CTRL_RST);
+        for _ in 0..50_000 {
+            if (self.read_reg(IXGBE_CTRL) & IXGBE_CTRL_RST) == 0 {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        if (self.read_reg(IXGBE_CTRL) & IXGBE_CTRL_RST) != 0 {
+            return Err("ixgbe: reset timeout");
+        }
+
         // Считываем заводской MAC-адрес из регистров фильтрации RAL/RAH
         let ral = self.read_reg(IXGBE_RAL);
         let rah = self.read_reg(IXGBE_RAH);
@@ -129,8 +143,10 @@ impl IxgbeDevice {
         self.write_reg(IXGBE_RDBAL, rx_phys as u32);
         self.write_reg(IXGBE_RDBAH, (rx_phys >> 32) as u32);
         self.write_reg(IXGBE_RDLEN, (RING_SIZE * core::mem::size_of::<IxgbeAdvRxDesc>()) as u32);
+        // Split/Receive control: 1-buffer Advanced descriptor (DESCTYPE = 1 << 25), BSIZEPACKET = 2 (2KiB)
+        self.write_reg(IXGBE_SRRCTL, (1 << 25) | 2);
         self.write_reg(IXGBE_RDH, 0);
-        self.write_reg(IXGBE_RDT, (RING_SIZE - 1) as u32);
+        self.write_reg(IXGBE_RDT, 0);
 
         // Настраиваем дескрипторы TX
         let tx_phys = self.tx_ring.physical() as u64;
@@ -140,14 +156,26 @@ impl IxgbeDevice {
         self.write_reg(IXGBE_TDH, 0);
         self.write_reg(IXGBE_TDT, 0);
 
-        // Включаем передачу и прием
+        // Включаем передачу и прием (очереди 0 и MAC)
         self.write_reg(IXGBE_DMATXCTL, IXGBE_DMATXCTL_TE);
         self.write_reg(IXGBE_FCTRL, IXGBE_FCTRL_BAM | IXGBE_FCTRL_MPE | IXGBE_FCTRL_UPE);
+        self.write_reg(IXGBE_RXDCTL, self.read_reg(IXGBE_RXDCTL) | IXGBE_QUEUE_ENABLE);
+        self.write_reg(IXGBE_TXDCTL, self.read_reg(IXGBE_TXDCTL) | IXGBE_QUEUE_ENABLE);
+        for _ in 0..10_000 {
+            if (self.read_reg(IXGBE_RXDCTL) & IXGBE_QUEUE_ENABLE) != 0 {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        self.write_reg(IXGBE_RDT, (RING_SIZE - 1) as u32);
         self.write_reg(IXGBE_RXCTRL, IXGBE_RXCTRL_RXEN);
 
+        let links_up = (self.read_reg(IXGBE_LINKS) & IXGBE_LINKS_UP) != 0;
         crate::klog!(
-            "ixgbe: 10GbE controller registered (MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
-            self.mac[0], self.mac[1], self.mac[2], self.mac[3], self.mac[4], self.mac[5]
+            "ixgbe: {} (MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, link: {})",
+            t("контроллер 10GbE активирован", "10GbE controller registered"),
+            self.mac[0], self.mac[1], self.mac[2], self.mac[3], self.mac[4], self.mac[5],
+            if links_up { "up" } else { "down" }
         );
 
         Ok(())
@@ -164,16 +192,25 @@ impl NetDevice for IxgbeDevice {
     }
 
     fn send_packet(&mut self, packet: &[u8]) -> Result<(), NetDeviceError> {
-        let len = packet.len().min(BUFFER_SIZE);
+        if packet.len() > BUFFER_SIZE {
+            return Err(NetDeviceError::PacketTooLarge);
+        }
+        let len = packet.len();
         let cur = self.tx_cur;
 
-        self.tx_buffers[cur][..len].copy_from_slice(&packet[..len]);
+        self.tx_buffers[cur][..len].copy_from_slice(packet);
         self.tx_ring[cur] = IxgbeAdvTxDesc {
             buffer_addr: self.tx_buffers[cur].physical() as u64,
-            cmd_type_len: (len as u32) | IXGBE_TXD_CMD_EOP | IXGBE_TXD_CMD_IFCS | IXGBE_TXD_CMD_RS | IXGBE_TXD_CMD_DEXT,
-            olinfo_status: (len as u32) << 20, // Packet length in PAYLEN field
+            cmd_type_len: (len as u32)
+                | IXGBE_TXD_DTYP_ADV
+                | IXGBE_TXD_CMD_EOP
+                | IXGBE_TXD_CMD_IFCS
+                | IXGBE_TXD_CMD_RS
+                | IXGBE_TXD_CMD_DEXT,
+            olinfo_status: (len as u32) << 14, // PAYLEN occupies bits 31:14
         };
 
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
         self.tx_cur = (cur + 1) % RING_SIZE;
         self.write_reg(IXGBE_TDT, self.tx_cur as u32);
 

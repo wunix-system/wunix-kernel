@@ -1,3 +1,4 @@
+use alloc::vec;
 use crate::drivers::traits::{BlockDevice, BlockDeviceError};
 use crate::drivers::virt::hyperv::vmbus::{VmbusChannel, GUID_STORVSC};
 
@@ -36,12 +37,13 @@ impl StorVscDevice {
 
         let mut dev = Self {
             channel,
-            sector_count: 1024 * 1024,
+            sector_count: 0,
             sector_size: 512,
         };
 
         dev.init_vstor()?;
-        let _ = dev.read_capacity();
+        dev.read_capacity()
+            .map_err(|_| "StorVSC: no host response to READ CAPACITY")?;
         Ok(dev)
     }
 
@@ -94,19 +96,18 @@ impl StorVscDevice {
                         resp_buf[offset + 6],
                         resp_buf[offset + 7],
                     ]) as usize;
-                    if last_lba > 0 {
+                    if last_lba > 0 && block_len > 0 && block_len <= 4096 {
                         self.sector_count = last_lba + 1;
-                    }
-                    if block_len > 0 {
                         self.sector_size = block_len;
+                        return Ok(());
                     }
-                    break;
+                    return Err(BlockDeviceError::IoError);
                 }
             }
             core::hint::spin_loop();
         }
 
-        Ok(())
+        Err(BlockDeviceError::NotReady)
     }
 }
 
@@ -117,6 +118,8 @@ impl BlockDevice for StorVscDevice {
 
     fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
         let num_sectors = (buf.len() / self.sector_size) as u32;
+        let pkt_size = core::mem::size_of::<VstorPacket>();
+        let mut resp_buf = vec![0u8; pkt_size + self.sector_size + 64];
 
         for s in 0..num_sectors {
             let lba = (start_sector + s as u64) as u32;
@@ -138,16 +141,14 @@ impl BlockDevice for StorVscDevice {
             };
             self.channel.send_packet(1, raw).map_err(|_| BlockDeviceError::IoError)?;
 
-            let mut resp_buf = [0u8; 1024];
             let mut received = false;
             for _ in 0..50_000 {
                 if let Ok(Some(n)) = self.channel.receive_packet(&mut resp_buf) {
-                    if n >= core::mem::size_of::<VstorPacket>() {
-                        let payload_offset = core::mem::size_of::<VstorPacket>();
-                        let copy_len = (n.saturating_sub(payload_offset)).min(self.sector_size);
+                    if n >= pkt_size {
+                        let copy_len = (n.saturating_sub(pkt_size)).min(self.sector_size);
                         let dest = (s as usize) * self.sector_size;
                         if copy_len > 0 {
-                            buf[dest..dest + copy_len].copy_from_slice(&resp_buf[payload_offset..payload_offset + copy_len]);
+                            buf[dest..dest + copy_len].copy_from_slice(&resp_buf[pkt_size..pkt_size + copy_len]);
                         }
                         received = true;
                         break;
@@ -167,6 +168,7 @@ impl BlockDevice for StorVscDevice {
     fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
         let num_sectors = (buf.len() / self.sector_size) as u32;
         let pkt_size = core::mem::size_of::<VstorPacket>();
+        let mut req_buf = vec![0u8; pkt_size + self.sector_size];
 
         for s in 0..num_sectors {
             let lba = (start_sector + s as u64) as u32;
@@ -183,7 +185,6 @@ impl BlockDevice for StorVscDevice {
             pkt.cdb[5] = (lba & 0xFF) as u8;
             pkt.cdb[8] = 1;
 
-            let mut req_buf = [0u8; 1024];
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     &pkt as *const _ as *const u8,

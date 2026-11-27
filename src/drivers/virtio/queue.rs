@@ -272,6 +272,12 @@ impl Virtqueue {
     }
 }
 
+impl Drop for Virtqueue {
+    fn drop(&mut self) {
+        crate::drivers::deallocate_contiguous_frames(self.phys_frame, self._page_count);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test_case]

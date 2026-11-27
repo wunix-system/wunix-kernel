@@ -57,6 +57,15 @@ impl DmaBuffer {
     }
 }
 
+impl Drop for DmaBuffer {
+    fn drop(&mut self) {
+        use x86_64::structures::paging::PhysFrame;
+        use x86_64::PhysAddr;
+        let base = PhysFrame::containing_address(PhysAddr::new(self.phys_addr));
+        crate::drivers::deallocate_contiguous_frames(base, self._page_count);
+    }
+}
+
 /// Драйвер блочного накопителя VirtIO-Block (/dev/vda)
 pub struct VirtioBlock {
     transport: Box<dyn VirtioTransport>,

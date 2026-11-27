@@ -8,7 +8,7 @@ use super::{
     VIRTIO_STATUS_DRIVER_OK, VIRTIO_STATUS_FEATURES_OK,
 };
 use crate::drivers::traits::{BlockDevice, BlockDeviceError};
-use crate::memory::{allocate_contiguous_frames, deallocate_frame, hhdm_offset};
+use crate::memory::{allocate_contiguous_frames, hhdm_offset};
 
 const SCSI_READ_10: u8 = 0x28;
 const SCSI_WRITE_10: u8 = 0x2A;
@@ -316,6 +316,7 @@ impl VirtioDevice for VirtioScsi {
 
 impl Drop for VirtioScsi {
     fn drop(&mut self) {
-        deallocate_frame(self.dma_frame);
+        self.transport.reset();
+        crate::drivers::deallocate_contiguous_frames(self.dma_frame, 2);
     }
 }

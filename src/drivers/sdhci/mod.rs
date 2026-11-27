@@ -1,12 +1,18 @@
 pub mod regs;
 
+use alloc::format;
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
+
 use crate::drivers::manager::DeviceManager;
 use crate::drivers::pci::PciDevice;
 use crate::drivers::traits::{BlockDevice, BlockDeviceError};
+use crate::i18n::t;
 
 use regs::*;
+
+static SDHCI_INDEX: AtomicUsize = AtomicUsize::new(0);
 
 pub struct SdhciDevice {
     base: u64,
@@ -52,42 +58,52 @@ impl SdhciDevice {
     pub fn new(mmio_base_virt: u64) -> Result<Self, &'static str> {
         let mut dev = Self {
             base: mmio_base_virt,
-            sector_count: 64 * 1024 * 1024 / 512, // 64 МБ дефолт
+            sector_count: 0,
             card_rca: 0,
             is_sdhc: true,
         };
 
         dev.init_controller()?;
-        let _ = dev.init_card();
+        dev.init_card()?;
         Ok(dev)
     }
 
     fn init_controller(&mut self) -> Result<(), &'static str> {
-        // Программный сброс всех блоков SDHCI
         self.write8(SDHCI_SOFTWARE_RESET, SDHCI_RESET_ALL);
-        for _ in 0..10_000 {
+        for _ in 0..50_000 {
             if (self.read8(SDHCI_SOFTWARE_RESET) & SDHCI_RESET_ALL) == 0 {
                 break;
             }
+            core::hint::spin_loop();
+        }
+        if (self.read8(SDHCI_SOFTWARE_RESET) & SDHCI_RESET_ALL) != 0 {
+            return Err("sdhci: controller reset timeout");
         }
 
-        // Включаем питание шины (3.3V)
         self.write8(SDHCI_POWER_CONTROL, 0x0E | 0x01); // 3.3V + SD Bus Power On
+        self.write8(SDHCI_TIMEOUT_CONTROL, 0x0E);
 
-        // Включаем внутренний генератор тактовой частоты и тактирование шины SD (Clock Enable)
-        self.write16(SDHCI_CLOCK_CONTROL, 0x0001); // Internal Clock Enable
-        for _ in 0..10_000 {
+        // Делитель частоты (base/256 -> ~400 кГц для инициализации) + Internal Clock Enable
+        self.write16(SDHCI_CLOCK_CONTROL, 0x8001);
+        for _ in 0..50_000 {
             if (self.read16(SDHCI_CLOCK_CONTROL) & 0x0002) != 0 {
-                break; // Internal Clock Stable
+                break;
             }
+            core::hint::spin_loop();
         }
-        self.write16(SDHCI_CLOCK_CONTROL, 0x0007); // SD Clock Enable
+        if (self.read16(SDHCI_CLOCK_CONTROL) & 0x0002) == 0 {
+            return Err("sdhci: internal clock unstable");
+        }
+        self.write16(SDHCI_CLOCK_CONTROL, 0x8007); // SD Clock Enable
 
-        // Разрешаем прерывания
+        // Работаем в режиме опроса регистров статуса (без генерации линий IRQ)
         self.write32(SDHCI_INT_ENABLE, 0xFFFF_FFFF);
-        self.write32(SDHCI_SIGNAL_ENABLE, 0xFFFF_FFFF);
+        self.write32(SDHCI_SIGNAL_ENABLE, 0);
 
-        crate::klog!("sdhci: controller initialized (PCI Class 08:05 SD/eMMC)");
+        crate::klog!(
+            "sdhci: {} (PCI 08:05 SD/eMMC)",
+            t("контроллер инициализирован", "controller initialized")
+        );
         Ok(())
     }
 
@@ -138,17 +154,36 @@ impl SdhciDevice {
             self.card_rca = (resp >> 16) as u16;
         }
 
-        // CMD9: чтение CSD для емкости
-        if let Ok(_) = self.send_command(0x0909, (self.card_rca as u32) << 16) {
+        // CMD9: чтение CSD (R2 128 бит без CRC7 в RESP_0..RESP_3)
+        if self
+            .send_command(0x0909, (self.card_rca as u32) << 16)
+            .is_ok()
+        {
             let r1 = self.read32(SDHCI_RESPONSE_1);
             let r2 = self.read32(SDHCI_RESPONSE_2);
-            if self.is_sdhc {
-                let c_size = ((r1 >> 16) | ((r2 & 0x3F) << 16)) as u64;
+            let r3 = self.read32(SDHCI_RESPONSE_3);
+            let csd_struct = (r3 >> 22) & 0x03;
+            if self.is_sdhc || csd_struct == 1 {
+                // CSD v2.0: C_SIZE занимает биты CSD[69:48] -> в R2 ответе со сдвигом -8 это RESP_1[29:8]
+                let c_size = ((r1 >> 8) & 0x3F_FFFF) as u64;
                 if c_size > 0 {
                     self.sector_count = (c_size + 1) * 1024;
                 }
+            } else {
+                // CSD v1.0 (SDSC)
+                let read_bl_len = ((r2 >> 8) & 0x0F) as u32;
+                let c_size = (((r2 & 0x03) << 10) | ((r1 >> 22) & 0x03FF)) as u64;
+                let c_size_mult = ((r1 >> 7) & 0x07) as u32;
+                let bytes = (c_size + 1) << (c_size_mult + 2 + read_bl_len);
+                self.sector_count = bytes / 512;
             }
         }
+        if self.sector_count == 0 {
+            return Err("sdhci: failed to read valid card capacity from CSD");
+        }
+
+        // Переключаем тактовую частоту на рабочий режим (делитель 2) после инициализации
+        self.write16(SDHCI_CLOCK_CONTROL, 0x0107);
 
         // CMD7: выбор карточки и перевод в состояние TRAN
         self.send_command(0x071A, (self.card_rca as u32) << 16)
@@ -161,19 +196,33 @@ impl SdhciDevice {
     }
 
     fn send_command(&mut self, cmd: u16, arg: u32) -> Result<u32, BlockDeviceError> {
-        // Ждем готовности линии команд
+        let mut ready = false;
         for _ in 0..100_000 {
-            if (self.read32(SDHCI_PRESENT_STATE) & SDHCI_CMD_INHIBIT) == 0 {
+            if (self.read32(SDHCI_PRESENT_STATE) & (SDHCI_CMD_INHIBIT | SDHCI_DATA_INHIBIT)) == 0 {
+                ready = true;
                 break;
             }
             core::hint::spin_loop();
+        }
+        if !ready {
+            return Err(BlockDeviceError::NotReady);
+        }
+
+        // Очищаем залипшие флаги статуса перед новой командой
+        let prev = self.read32(SDHCI_INT_STATUS);
+        if prev != 0 {
+            self.write32(SDHCI_INT_STATUS, prev);
         }
 
         self.write32(SDHCI_ARGUMENT, arg);
         self.write16(SDHCI_COMMAND, cmd);
 
-        for _ in 0..100_000 {
+        for _ in 0..200_000 {
             let int_stat = self.read32(SDHCI_INT_STATUS);
+            if (int_stat & 0x8000) != 0 {
+                self.write32(SDHCI_INT_STATUS, int_stat);
+                return Err(BlockDeviceError::IoError);
+            }
             if (int_stat & SDHCI_INT_CMD_COMPLETE) != 0 {
                 self.write32(SDHCI_INT_STATUS, SDHCI_INT_CMD_COMPLETE);
                 return Ok(self.read32(SDHCI_RESPONSE_0));
@@ -194,6 +243,9 @@ impl BlockDevice for SdhciDevice {
         let count = buf.len() / 512;
         if count == 0 {
             return Ok(());
+        }
+        if start_sector.saturating_add(count as u64) > self.sector_count {
+            return Err(BlockDeviceError::OutOfBounds);
         }
 
         for s in 0..count {
@@ -240,6 +292,9 @@ impl BlockDevice for SdhciDevice {
         let count = buf.len() / 512;
         if count == 0 {
             return Ok(());
+        }
+        if start_sector.saturating_add(count as u64) > self.sector_count {
+            return Err(BlockDeviceError::OutOfBounds);
         }
 
         for s in 0..count {
@@ -313,7 +368,13 @@ pub fn probe(pci: &PciDevice, dm: &mut DeviceManager) -> Result<(), &'static str
         .map_err(|_| "sdhci: failed to map BAR0 MMIO")?;
 
     let dev = SdhciDevice::new(mmio.as_u64())?;
-    dm.register_block_device(alloc::string::String::from("mmcblk0"), Arc::new(Mutex::new(dev)));
-    crate::klog!("sdhci: registered block device /dev/mmcblk0 (SD/eMMC)");
+    let idx = SDHCI_INDEX.fetch_add(1, Ordering::Relaxed);
+    let dev_name = format!("mmcblk{}", idx);
+    dm.register_block_device(dev_name.clone(), Arc::new(Mutex::new(dev)));
+    crate::klog!(
+        "sdhci: {} /dev/{} (SD/eMMC)",
+        t("зарегистрировано блочное устройство", "registered block device"),
+        dev_name
+    );
     Ok(())
 }

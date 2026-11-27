@@ -4,10 +4,11 @@ use alloc::sync::Arc;
 use spin::Mutex;
 use x86_64::instructions::port::{PortReadOnly, PortWriteOnly};
 
+use crate::drivers::dma::Dma;
 use crate::drivers::manager::DeviceManager;
 use crate::drivers::pci::PciDevice;
-use crate::drivers::dma::Dma;
 use crate::drivers::traits::{NetDevice, NetDeviceError};
+use crate::i18n::t;
 use crate::serial_println;
 
 use regs::*;
@@ -23,6 +24,10 @@ pub struct Rtl8139Device {
     tx_buffers: [Dma<[u8; TX_BUFFER_SIZE]>; 4],
     tx_cur: usize,
     rx_offset: usize,
+    rx_bytes: usize,
+    rx_packets: usize,
+    tx_bytes: usize,
+    tx_packets: usize,
 }
 
 unsafe impl Send for Rtl8139Device {}
@@ -63,21 +68,35 @@ impl Rtl8139Device {
         pci.enable_io_space();
         pci.enable_bus_mastering();
 
-        let bar0 = pci.bar(0).ok_or("rtl8139: BAR0 not found")?;
-        let io_base = bar0.address as u16;
+        let io_bar = pci.first_io_bar().ok_or("rtl8139: I/O BAR not found")?;
+        let io_base = io_bar.address as u16;
 
-        let tx0 = Dma::zeroed()?;
-        let tx1 = Dma::zeroed()?;
-        let tx2 = Dma::zeroed()?;
-        let tx3 = Dma::zeroed()?;
+        let rx_buffer: Dma<[u8; RX_BUFFER_SIZE]> = Dma::zeroed()?;
+        let tx0: Dma<[u8; TX_BUFFER_SIZE]> = Dma::zeroed()?;
+        let tx1: Dma<[u8; TX_BUFFER_SIZE]> = Dma::zeroed()?;
+        let tx2: Dma<[u8; TX_BUFFER_SIZE]> = Dma::zeroed()?;
+        let tx3: Dma<[u8; TX_BUFFER_SIZE]> = Dma::zeroed()?;
+
+        if rx_buffer.physical() > u32::MAX as usize
+            || tx0.physical() > u32::MAX as usize
+            || tx1.physical() > u32::MAX as usize
+            || tx2.physical() > u32::MAX as usize
+            || tx3.physical() > u32::MAX as usize
+        {
+            return Err("rtl8139: DMA buffer exceeds 32-bit address limit");
+        }
 
         let mut dev = Self {
             io_base,
             mac: [0; 6],
-            rx_buffer: Dma::zeroed()?,
+            rx_buffer,
             tx_buffers: [tx0, tx1, tx2, tx3],
             tx_cur: 0,
             rx_offset: 0,
+            rx_bytes: 0,
+            rx_packets: 0,
+            tx_bytes: 0,
+            tx_packets: 0,
         };
 
         dev.init_hw()?;
@@ -90,11 +109,14 @@ impl Rtl8139Device {
 
         // Программный сброс контроллера (RST)
         self.out8(REG_CR, CR_RST);
-        for _ in 0..10_000 {
+        for _ in 0..50_000 {
             if (self.in8(REG_CR) & CR_RST) == 0 {
                 break;
             }
             core::hint::spin_loop();
+        }
+        if (self.in8(REG_CR) & CR_RST) != 0 {
+            return Err("rtl8139: reset timeout");
         }
 
         // Читаем аппаратный MAC-адрес чипа из IDR-портов
@@ -117,8 +139,8 @@ impl Rtl8139Device {
         // Включаем приемник и передатчик
         self.out8(REG_CR, CR_RE | CR_TE);
 
-        // Сбрасываем указатель чтения CAPR
-        self.out16(REG_CAPR, 0);
+        // По спецификации RTL8139 CAPR отстает на 16 байт (0xFFF0 при offset=0)
+        self.out16(REG_CAPR, 0xFFF0);
 
         Ok(())
     }
@@ -150,9 +172,12 @@ impl NetDevice for Rtl8139Device {
         self.tx_buffers[desc_idx][..packet.len()].copy_from_slice(packet);
 
         // Запись размера пакета в TSD запускает передачу пакета по DMA
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
         self.out32(tsd_reg, packet.len() as u32 & 0x1FFF);
 
         self.tx_cur = (self.tx_cur + 1) % 4;
+        self.tx_packets += 1;
+        self.tx_bytes += packet.len();
         Ok(())
     }
 
@@ -169,10 +194,18 @@ impl NetDevice for Rtl8139Device {
             return Ok(None);
         }
 
-        // В буфере RTL8139 каждый пакет начинается с 4-байтного заголовка:
-        // [статус: u16, размер_с_CRC: u16, полезная_нагрузка...]
-        let status = u16::from_le_bytes([self.rx_buffer[offset], self.rx_buffer[offset + 1]]);
-        let len_with_crc = u16::from_le_bytes([self.rx_buffer[offset + 2], self.rx_buffer[offset + 3]]) as usize;
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Acquire);
+        let hdr_ptr = self.rx_buffer.as_ptr();
+        let status = unsafe {
+            let b0 = core::ptr::read_volatile(hdr_ptr.add(offset));
+            let b1 = core::ptr::read_volatile(hdr_ptr.add(offset + 1));
+            u16::from_le_bytes([b0, b1])
+        };
+        let len_with_crc = unsafe {
+            let b2 = core::ptr::read_volatile(hdr_ptr.add(offset + 2));
+            let b3 = core::ptr::read_volatile(hdr_ptr.add(offset + 3));
+            u16::from_le_bytes([b2, b3]) as usize
+        };
 
         // Бит 0 в статусе: ROK (Receive OK)
         if (status & 1) == 0 || len_with_crc < 4 || len_with_crc > 1536 {
@@ -198,8 +231,15 @@ impl NetDevice for Rtl8139Device {
         let capr_val = ((self.rx_offset as u16).wrapping_sub(16)) & 0xFFFF;
         self.out16(REG_CAPR, capr_val);
 
+        self.rx_packets += 1;
+        self.rx_bytes += packet_len;
         Ok(Some(packet_len))
     }
+
+    fn rx_bytes(&self) -> usize { self.rx_bytes }
+    fn rx_packets(&self) -> usize { self.rx_packets }
+    fn tx_bytes(&self) -> usize { self.tx_bytes }
+    fn tx_packets(&self) -> usize { self.tx_packets }
 }
 
 /// Поиск и регистрация сетевых контроллеров Realtek RTL8139 (Vendor 0x10EC, Device 0x8139)
@@ -210,8 +250,9 @@ pub fn probe_pci(dev: &mut PciDevice, dm: &mut DeviceManager) -> bool {
                 dev.driver_name = Some("rtl8139");
                 let mac = nic.mac_address();
                 let name = alloc::format!("eth{}", dm.net_device_count());
-                serial_println!(
-                    "rtl8139: registered {} (Realtek RTL8139 10/100, MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+                crate::klog!(
+                    "rtl8139: {} {} (MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+                    t("подключен адаптер", "registered NIC"),
                     name, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
                 );
                 dm.register_net_device(Arc::new(Mutex::new(nic)));

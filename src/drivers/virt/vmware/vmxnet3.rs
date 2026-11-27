@@ -2,7 +2,7 @@ use x86_64::structures::paging::PhysFrame;
 
 use crate::drivers::pci::PciDevice;
 use crate::drivers::traits::{NetDevice, NetDeviceError};
-use crate::memory::{allocate_contiguous_frames, deallocate_frame, hhdm_offset, map_kernel_mmio};
+use crate::memory::{allocate_contiguous_frames, hhdm_offset, map_kernel_mmio};
 
 pub const VMXNET3_DEVICE_ID: u16 = 0x07B0;
 
@@ -240,6 +240,6 @@ impl Drop for Vmxnet3Device {
     fn drop(&mut self) {
         self.write_reg(VMXNET3_REG_CMD, VMXNET3_CMD_QUIESCE);
         self.write_reg(VMXNET3_REG_CMD, VMXNET3_CMD_RESET);
-        deallocate_frame(self.dma_frame);
+        crate::drivers::deallocate_contiguous_frames(self.dma_frame, 4);
     }
 }

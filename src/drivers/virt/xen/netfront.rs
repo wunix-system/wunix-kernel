@@ -1,8 +1,8 @@
 use x86_64::structures::paging::PhysFrame;
 
-use super::grant_table::GRANT_TABLE;
+use super::grant_table::{GrantTable, GRANT_TABLE};
 use crate::drivers::traits::{NetDevice, NetDeviceError};
-use crate::memory::{allocate_contiguous_frames, deallocate_frame, hhdm_offset};
+use crate::memory::{allocate_contiguous_frames, hhdm_offset};
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -45,17 +45,23 @@ impl XenNetFront {
             core::ptr::write_bytes(dma_virt, 0, 2 * 4096);
         }
 
-        if let Some(gt) = GRANT_TABLE.lock().as_mut() {
+        let granted = if let Some(gt) = GRANT_TABLE.lock().as_mut() {
             let pfn = (dma_phys / 4096) as u32;
-            let _ = gt.grant_access(2, pfn, false);
+            gt.grant_access(GrantTable::MIN_DYNAMIC_GREF + 1, pfn, false).is_ok()
+        } else {
+            false
+        };
+        if !granted {
+            crate::drivers::deallocate_contiguous_frames(dma_frame, 2);
+            return Err("Xen NetFront: active grant table required");
         }
 
-        Ok(Self {
-            mac: [0x00, 0x16, 0x3E, 0x11, 0x22, 0x33],
-            dma_frame,
-            dma_virt,
-            tx_id: 1,
-        })
+        if super::hypercall::xen_version().is_none() {
+            crate::drivers::deallocate_contiguous_frames(dma_frame, 2);
+            return Err("Xen NetFront: backend xenstore/evtchn not bound");
+        }
+
+        Err("Xen NetFront: XenStore vif device path not negotiated")
     }
 }
 
@@ -79,7 +85,7 @@ impl NetDevice for XenNetFront {
         unsafe {
             core::ptr::copy_nonoverlapping(packet.as_ptr(), tx_data_ptr, packet.len());
             let req = &mut *tx_req_ptr;
-            req.gref = 2;
+            req.gref = (GrantTable::MIN_DYNAMIC_GREF + 1) as u32;
             req.offset = 2048;
             req.flags = 0;
             req.id = self.tx_id;
@@ -110,8 +116,8 @@ impl NetDevice for XenNetFront {
 impl Drop for XenNetFront {
     fn drop(&mut self) {
         if let Some(gt) = GRANT_TABLE.lock().as_mut() {
-            gt.end_access(2);
+            gt.end_access(GrantTable::MIN_DYNAMIC_GREF + 1);
         }
-        deallocate_frame(self.dma_frame);
+        crate::drivers::deallocate_contiguous_frames(self.dma_frame, 2);
     }
 }

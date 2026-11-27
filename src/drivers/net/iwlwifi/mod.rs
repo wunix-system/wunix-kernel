@@ -7,6 +7,7 @@ use crate::drivers::dma::Dma;
 use crate::drivers::manager::DeviceManager;
 use crate::drivers::pci::PciDevice;
 use crate::drivers::traits::{NetDevice, NetDeviceError};
+use crate::i18n::t;
 
 use desc::*;
 use regs::*;
@@ -27,6 +28,7 @@ pub struct IwlDevice {
     rx_packets: usize,
     tx_bytes: usize,
     tx_packets: usize,
+    firmware_ready: bool,
 }
 
 unsafe impl Send for IwlDevice {}
@@ -65,9 +67,9 @@ impl IwlDevice {
     }
 
     pub fn new(pci: &PciDevice, mmio_base_virt: u64) -> Result<Self, &'static str> {
-        // Формируем уникальный аппаратный MAC на основе OUI Intel (34:13:E8)
-        // и аппаратной PCI-топологии (шина, устройство, функция, subsystem),
-        // исключая коллизии между несколькими беспроводными адаптерами.
+        pci.enable_memory_space();
+        pci.enable_bus_mastering();
+
         let mac = [
             0x34,
             0x13,
@@ -90,6 +92,7 @@ impl IwlDevice {
             rx_packets: 0,
             tx_bytes: 0,
             tx_packets: 0,
+            firmware_ready: false,
         };
 
         dev.init_hw(pci)?;
@@ -105,10 +108,21 @@ impl IwlDevice {
                 ready = true;
                 break;
             }
+            core::hint::spin_loop();
         }
         if !ready {
-            crate::klog!("iwlwifi: waiting for MAC clock, continuing in standalone mode");
+            crate::klog!(
+                "iwlwifi: {}",
+                t(
+                    "тактовый генератор MAC не ответил, требуется прошивка ucode",
+                    "MAC clock not ready, firmware ucode required"
+                )
+            );
         }
+
+        // Проверяем наличие файла микрокода ucode в VFS (PCI-этап может запускаться до initramfs)
+        self.firmware_ready = ready
+            && crate::fs::resolve_path("/lib/firmware/iwlwifi.ucode", true).is_ok();
 
         // Настраиваем дескрипторы RX
         for (i, buf) in self.rx_buffers.iter().enumerate() {
@@ -128,8 +142,10 @@ impl IwlDevice {
         self.write_reg(FH_TX_CONFIG, 1);
 
         crate::klog!(
-            "iwlwifi: Intel Wireless Wi-Fi 6/6E adapter registered (MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
-            self.mac[0], self.mac[1], self.mac[2], self.mac[3], self.mac[4], self.mac[5]
+            "iwlwifi: {} Intel Wi-Fi 6/6E (MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, firmware: {})",
+            t("адаптер", "adapter"),
+            self.mac[0], self.mac[1], self.mac[2], self.mac[3], self.mac[4], self.mac[5],
+            if self.firmware_ready { t("загружена", "loaded") } else { t("нет /lib/firmware/iwlwifi.ucode", "missing ucode") }
         );
 
         Ok(())
@@ -146,33 +162,47 @@ impl NetDevice for IwlDevice {
     }
 
     fn send_packet(&mut self, packet: &[u8]) -> Result<(), NetDeviceError> {
-        let len = packet.len().min(BUFFER_SIZE);
+        if !self.firmware_ready {
+            return Err(NetDeviceError::NotReady);
+        }
+        if packet.len() > BUFFER_SIZE {
+            return Err(NetDeviceError::PacketTooLarge);
+        }
+        let len = packet.len();
         let cur = self.tx_cur;
 
-        self.tx_buffers[cur][..len].copy_from_slice(&packet[..len]);
+        self.tx_buffers[cur][..len].copy_from_slice(packet);
         self.tx_ring[cur] = IwlTxDesc {
             dma_addr: self.tx_buffers[cur].physical() as u64,
             length: len as u32,
             flags: 1, // Ready
         };
 
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
         self.tx_cur = (cur + 1) % RING_SIZE;
+        self.write_reg(HBUS_TARG_WRPTR, self.tx_cur as u32);
         self.tx_packets += 1;
         self.tx_bytes += len;
         Ok(())
     }
 
     fn receive_packet(&mut self, buf: &mut [u8]) -> Result<Option<usize>, NetDeviceError> {
+        if !self.firmware_ready {
+            return Ok(None);
+        }
         let cur = self.rx_cur;
-        let desc = self.rx_ring[cur];
+        let desc = unsafe { core::ptr::read_volatile(&self.rx_ring[cur]) };
         let len = (desc.length as usize).min(BUFFER_SIZE);
 
         if desc.status == 0 {
             return Ok(None);
         }
+        if buf.len() < len {
+            return Err(NetDeviceError::BufferTooSmall);
+        }
 
-        let copy_len = len.min(buf.len());
-        buf[..copy_len].copy_from_slice(&self.rx_buffers[cur][..copy_len]);
+        buf[..len].copy_from_slice(&self.rx_buffers[cur][..len]);
+        let copy_len = len;
 
         self.rx_ring[cur].status = 0;
         self.rx_cur = (cur + 1) % RING_SIZE;

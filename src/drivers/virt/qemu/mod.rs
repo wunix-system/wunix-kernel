@@ -17,7 +17,8 @@ pub static KVM_PVCLOCK: Mutex<Option<KvmPvClock>> = Mutex::new(None);
 /// Проверяет принадлежность PCI устройства адаптерам QEMU/Bochs (например, standard VGA).
 pub fn probe_pci(dev: &PciDevice, dm: &mut DeviceManager) -> bool {
     if dev.vendor_id == BOCHS_PCI_VENDOR_ID && dev.device_id == BOCHS_VGA_DEVICE_ID {
-        if let Ok(disp) = BochsVgaDevice::new(dev, 1024, 768) {
+        let (w, h) = crate::drivers::display::screen_dimensions().unwrap_or((1024, 768));
+        if let Ok(disp) = BochsVgaDevice::new(dev, w, h) {
             dm.register_display_device(Arc::new(Mutex::new(disp)));
         }
         return true;
@@ -32,13 +33,19 @@ pub fn init_integrations(_dm: &mut DeviceManager) {
 
     let mut fw = QemuFwCfg::new();
     if fw.is_present() {
+        fw_cfg::mark_present(true);
+        let cpus = fw.cpu_count().unwrap_or(1);
+        let ram_mb = fw.ram_size().unwrap_or(0) / (1024 * 1024);
         crate::kboot!(
             "fwcfg0",
-            "{}",
+            "{} (vCPU: {}, RAM: {} {})",
             t(
                 "интерфейс конфигурации QEMU (порт 0x510)",
                 "QEMU firmware config interface (0x510)"
-            )
+            ),
+            cpus,
+            ram_mb,
+            t("МБ", "MiB")
         );
     }
 

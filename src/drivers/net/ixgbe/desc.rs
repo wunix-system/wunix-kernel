@@ -7,6 +7,7 @@ pub struct IxgbeAdvTxDesc {
     pub olinfo_status: u32,
 }
 
+pub const IXGBE_TXD_DTYP_ADV: u32 = 0x3 << 20; // Advanced Data Descriptor type
 pub const IXGBE_TXD_CMD_EOP: u32 = 1 << 24;  // End of Packet
 pub const IXGBE_TXD_CMD_IFCS: u32 = 1 << 25; // Insert FCS / CRC
 pub const IXGBE_TXD_CMD_RS: u32 = 1 << 27;   // Report Status
@@ -27,14 +28,14 @@ pub const IXGBE_RXD_STAT_EOP: u32 = 1 << 1; // End of Packet
 impl IxgbeAdvRxDesc {
     #[inline]
     pub fn is_done(&self) -> bool {
-        let status = unsafe { (core::ptr::read_volatile(&self.pkt_addr) >> 32) as u32 };
-        (status & IXGBE_RXD_STAT_DD) != 0
+        let status_error = unsafe { (core::ptr::read_volatile(&self.hdr_addr) & 0xFFFF_FFFF) as u32 };
+        (status_error & IXGBE_RXD_STAT_DD) != 0
     }
 
     #[inline]
     pub fn packet_length(&self) -> usize {
         let hdr = unsafe { core::ptr::read_volatile(&self.hdr_addr) };
-        (hdr & 0xFFFF) as usize
+        ((hdr >> 32) & 0xFFFF) as usize
     }
 
     #[inline]

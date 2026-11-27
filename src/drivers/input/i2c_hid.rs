@@ -1,6 +1,7 @@
 use alloc::collections::VecDeque;
 use crate::drivers::i2c::DesignwareI2c;
 use crate::drivers::traits::{InputDevice, InputEvent};
+use crate::i18n::t;
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C, packed)]
@@ -59,15 +60,20 @@ impl I2cTouchpad {
         let cmd_reg_val = desc.command_register;
 
         crate::klog!(
-            "i2c_hid: detected touchpad VID:{:#06x} PID:{:#06x} (max_input: {} bytes)",
+            "i2c_hid: {} VID:{:#06x} PID:{:#06x} ({}: {} {})",
+            t("обнаружен тачпад", "detected touchpad"),
             vid,
             pid,
-            max_input_len
+            t("макс. ввод", "max input"),
+            max_input_len,
+            t("байт", "bytes")
         );
 
-        // Отправляем команду Reset (0x01) в Command Register
+        // Включаем питание (SET_POWER = 0x08, PowerState=ON=0x00) и отправляем Reset (0x01)
         let cmd_reg = cmd_reg_val.to_le_bytes();
-        let reset_cmd = [cmd_reg[0], cmd_reg[1], 0x00, 0x01]; // Opcode 0x01 = Reset
+        let power_on = [cmd_reg[0], cmd_reg[1], 0x00, 0x08];
+        let _ = i2c.write(slave_addr, &power_on);
+        let reset_cmd = [cmd_reg[0], cmd_reg[1], 0x00, 0x01];
         let _ = i2c.write(slave_addr, &reset_cmd);
 
         Ok(Self {
@@ -92,6 +98,9 @@ impl I2cTouchpad {
             return;
         }
 
+        let in_reg_val = self.desc.input_register;
+        let in_reg = in_reg_val.to_le_bytes();
+        let _ = i2c.write(self.slave_addr, &in_reg);
         if i2c.read(self.slave_addr, &mut report_buf[..len]).is_err() {
             return;
         }
@@ -105,27 +114,47 @@ impl I2cTouchpad {
         let tip_switch = (report_buf[2] & 0x01) != 0;
         let raw_x = u16::from_le_bytes([report_buf[3], report_buf[4]]) as u32;
         let raw_y = u16::from_le_bytes([report_buf[5], report_buf[6]]) as u32;
+        let new_mask = u32::from(tip_switch);
+
+        let max_w = self.screen_width.max(1);
+        let max_h = self.screen_height.max(1);
 
         if tip_switch {
-            self.button_mask = 1; // Left button click / touch
-            // Масштабируем абсолютные координаты тачпада (0..4095) на разрешение экрана
-            self.x = (raw_x * self.screen_width) / 4096;
-            self.y = (raw_y * self.screen_height) / 4096;
+            self.x = ((raw_x * max_w) / 4096).min(max_w - 1);
+            self.y = ((raw_y * max_h) / 4096).min(max_h - 1);
 
-            if self.events.len() < 64 {
+            if self.events.len() < 60 {
                 self.events.push_back(InputEvent {
                     type_: 3, // EV_ABS
-                    code: 0, // ABS_X
+                    code: 0,  // ABS_X
                     value: self.x,
                 });
                 self.events.push_back(InputEvent {
                     type_: 3, // EV_ABS
-                    code: 1, // ABS_Y
+                    code: 1,  // ABS_Y
                     value: self.y,
                 });
             }
-        } else {
-            self.button_mask = 0;
+        }
+
+        if new_mask != self.button_mask && self.events.len() < 62 {
+            self.button_mask = new_mask;
+            self.events.push_back(InputEvent {
+                type_: 1,     // EV_KEY
+                code: 0x110,  // BTN_LEFT
+                value: new_mask,
+            });
+            self.events.push_back(InputEvent {
+                type_: 0, // EV_SYN
+                code: 0,
+                value: 0,
+            });
+        } else if tip_switch && self.events.len() < 64 {
+            self.events.push_back(InputEvent {
+                type_: 0, // EV_SYN
+                code: 0,
+                value: 0,
+            });
         }
     }
 }

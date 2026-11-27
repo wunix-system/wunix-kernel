@@ -1,17 +1,20 @@
+use alloc::vec;
+use core::sync::atomic::{fence, Ordering};
 use x86_64::structures::paging::PhysFrame;
 
 use crate::drivers::pci::PciDevice;
 use crate::drivers::traits::{BlockDevice, BlockDeviceError};
-use crate::memory::{allocate_contiguous_frames, deallocate_frame, hhdm_offset, map_kernel_mmio};
+use crate::memory::{allocate_contiguous_frames, hhdm_offset, map_kernel_mmio};
 
 pub const VMWARE_PVSCSI_DEVICE_ID: u16 = 0x07C0;
 
 const PVSCSI_REG_COMMAND: usize = 0x00;
 const PVSCSI_REG_DATA: usize = 0x04;
-const PVSCSI_REG_REQ_RING_NUM_PAGES: usize = 0x200;
-const PVSCSI_REG_CMP_RING_NUM_PAGES: usize = 0x204;
-const PVSCSI_REG_KICK_NON_RW_IO: usize = 0x208;
-const PVSCSI_REG_KICK_RW_IO: usize = 0x20C;
+const PVSCSI_REG_COMMAND_STATUS: usize = 0x08;
+const PVSCSI_REG_REQ_RING_NUM_PAGES: usize = 0x100;
+const PVSCSI_REG_CMP_RING_NUM_PAGES: usize = 0x104;
+const PVSCSI_REG_KICK_NON_RW_IO: usize = 0x3014;
+const PVSCSI_REG_KICK_RW_IO: usize = 0x3018;
 
 const PVSCSI_CMD_ADAPTER_RESET: u32 = 1;
 const PVSCSI_CMD_SETUP_RINGS: u32 = 3;
@@ -31,28 +34,50 @@ struct PvscsiRingsState {
     cmp_prod_idx: u32,
     cmp_cons_idx: u32,
     cmp_num_entries_log2: u32,
-    pad: [u8; 104],
+    req_call_threshold: u32,
+    pad: [u8; 100],
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct PvscsiRingReqDesc {
     context: u64,
     data_addr: u64,
     data_len: u64,
     sense_addr: u64,
     sense_len: u32,
-    cdb_len: u8,
+    cdb_len: u32,
     cdb: [u8; 16],
+    vcpu_hint: u8,
     flags: u8,
     tag: u8,
     bus: u8,
     target: u8,
     lun: [u8; 8],
-    pad: [u8; 26],
+    pad: [u8; 59],
 }
 
-/// Паравиртуальный SCSI дисковый контроллер VMware PVSCSI.
+impl Default for PvscsiRingReqDesc {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<PvscsiRingReqDesc>() == 128);
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct PvscsiRingCmpDesc {
+    context: u64,
+    data_len: u64,
+    sense_len: u32,
+    host_status: u16,
+    scsi_status: u16,
+    pad: [u32; 2],
+}
+
+const _: () = assert!(core::mem::size_of::<PvscsiRingCmpDesc>() == 32);
+
 pub struct PvscsiDevice {
     mmio_base: *mut u8,
     dma_frame: PhysFrame,
@@ -60,16 +85,19 @@ pub struct PvscsiDevice {
     sector_count: u64,
     sector_size: usize,
     req_idx: u32,
+    cmp_idx: u32,
 }
 
 unsafe impl Send for PvscsiDevice {}
 unsafe impl Sync for PvscsiDevice {}
 
 impl PvscsiDevice {
+    fn read_reg(&self, offset: usize) -> u32 {
+        unsafe { core::ptr::read_volatile(self.mmio_base.add(offset) as *const u32) }
+    }
+
     fn write_reg(&self, offset: usize, val: u32) {
-        unsafe {
-            core::ptr::write_volatile(self.mmio_base.add(offset) as *mut u32, val);
-        }
+        unsafe { core::ptr::write_volatile(self.mmio_base.add(offset) as *mut u32, val) }
     }
 
     fn write_cmd(&self, cmd: u32, args: &[u32]) {
@@ -77,6 +105,7 @@ impl PvscsiDevice {
         for &arg in args {
             self.write_reg(PVSCSI_REG_DATA, arg);
         }
+        let _ = self.read_reg(PVSCSI_REG_COMMAND_STATUS);
     }
 
     pub fn new(pci: &PciDevice) -> Result<Self, &'static str> {
@@ -104,6 +133,7 @@ impl PvscsiDevice {
             sector_count: 0,
             sector_size: 512,
             req_idx: 0,
+            cmp_idx: 0,
         };
 
         dev.write_cmd(PVSCSI_CMD_ADAPTER_RESET, &[]);
@@ -132,7 +162,8 @@ impl PvscsiDevice {
             ],
         );
 
-        let _ = dev.read_capacity();
+        dev.read_capacity()
+            .map_err(|_| "PVSCSI: target not ready or failed READ CAPACITY")?;
         Ok(dev)
     }
 
@@ -146,20 +177,29 @@ impl PvscsiDevice {
         let max_lba = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as u64;
         let block_len = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
 
-        if block_len == 512 || block_len == 4096 {
-            self.sector_size = block_len;
-            self.sector_count = max_lba + 1;
-        } else {
-            self.sector_size = 512;
-            self.sector_count = 1024 * 1024;
+        if block_len == 0 || block_len > 4096 || max_lba == 0 {
+            return Err(BlockDeviceError::IoError);
         }
-
+        self.sector_size = block_len;
+        self.sector_count = max_lba + 1;
         Ok(())
     }
 
-    fn execute_scsi_cmd(&mut self, cdb: &[u8; 16], cdb_len: u8, data: &mut [u8], flags: u8) -> Result<(), BlockDeviceError> {
+    fn execute_scsi_cmd(
+        &mut self,
+        cdb: &[u8; 16],
+        cdb_len: u8,
+        data: &mut [u8],
+        flags: u8,
+    ) -> Result<(), BlockDeviceError> {
+        if data.len() > 4096 {
+            return Err(BlockDeviceError::IoError);
+        }
         let req_ring = unsafe {
-            core::slice::from_raw_parts_mut((self.dma_virt as usize + 0x1000) as *mut PvscsiRingReqDesc, 32)
+            core::slice::from_raw_parts_mut(
+                (self.dma_virt as usize + 0x1000) as *mut PvscsiRingReqDesc,
+                32,
+            )
         };
 
         let idx = (self.req_idx % 32) as usize;
@@ -168,23 +208,25 @@ impl PvscsiDevice {
 
         if (flags & PVSCSI_FLAG_CMD_DIR_TO_DEV) != 0 && !data.is_empty() {
             unsafe {
-                core::ptr::copy_nonoverlapping(data.as_ptr(), data_virt, data.len().min(4096));
+                core::ptr::copy_nonoverlapping(data.as_ptr(), data_virt, data.len());
             }
         }
 
-        let desc = &mut req_ring[idx];
+        let mut desc = PvscsiRingReqDesc::default();
         desc.context = self.req_idx as u64;
         desc.data_addr = data_phys;
         desc.data_len = data.len() as u64;
-        desc.cdb_len = cdb_len;
+        desc.cdb_len = cdb_len as u32;
         desc.cdb = *cdb;
         desc.flags = flags;
-        desc.bus = 0;
-        desc.target = 0;
+        req_ring[idx] = desc;
 
         let rings_state = unsafe { &mut *(self.dma_virt as *mut PvscsiRingsState) };
         self.req_idx = self.req_idx.wrapping_add(1);
-        rings_state.req_prod_idx = self.req_idx;
+        fence(Ordering::Release);
+        unsafe {
+            core::ptr::write_volatile(&mut rings_state.req_prod_idx, self.req_idx);
+        }
 
         if (flags & (PVSCSI_FLAG_CMD_DIR_TO_DEV | PVSCSI_FLAG_CMD_DIR_FROM_DEV)) != 0 {
             self.write_reg(PVSCSI_REG_KICK_RW_IO, 0);
@@ -192,9 +234,39 @@ impl PvscsiDevice {
             self.write_reg(PVSCSI_REG_KICK_NON_RW_IO, 0);
         }
 
+        let cmp_ring = unsafe {
+            core::slice::from_raw_parts(
+                (self.dma_virt as usize + 0x2000) as *const PvscsiRingCmpDesc,
+                128,
+            )
+        };
+        let mut completed = false;
+        for _ in 0..500_000 {
+            let cmp_prod = unsafe { core::ptr::read_volatile(&rings_state.cmp_prod_idx) };
+            if cmp_prod != self.cmp_idx {
+                let cmp = unsafe {
+                    core::ptr::read_volatile(&cmp_ring[(self.cmp_idx % 128) as usize])
+                };
+                self.cmp_idx = self.cmp_idx.wrapping_add(1);
+                unsafe {
+                    core::ptr::write_volatile(&mut rings_state.cmp_cons_idx, self.cmp_idx);
+                }
+                if cmp.host_status != 0 || cmp.scsi_status != 0 {
+                    return Err(BlockDeviceError::IoError);
+                }
+                completed = true;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        if !completed {
+            return Err(BlockDeviceError::IoError);
+        }
+
+        fence(Ordering::Acquire);
         if (flags & PVSCSI_FLAG_CMD_DIR_FROM_DEV) != 0 && !data.is_empty() {
             unsafe {
-                core::ptr::copy_nonoverlapping(data_virt, data.as_mut_ptr(), data.len().min(4096));
+                core::ptr::copy_nonoverlapping(data_virt, data.as_mut_ptr(), data.len());
             }
         }
 
@@ -204,17 +276,20 @@ impl PvscsiDevice {
 
 impl BlockDevice for PvscsiDevice {
     fn read_sectors(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
-        let num_sectors = (buf.len() / self.sector_size) as u32;
+        let num_sectors = buf.len() / self.sector_size;
+        if num_sectors == 0 || buf.len() % self.sector_size != 0 {
+            return Err(BlockDeviceError::IoError);
+        }
+        if start_sector.saturating_add(num_sectors as u64) > self.sector_count {
+            return Err(BlockDeviceError::OutOfBounds);
+        }
         let mut offset = 0;
 
         for s in 0..num_sectors {
             let sector_lba = (start_sector + s as u64) as u32;
             let mut cdb = [0u8; 16];
             cdb[0] = SCSI_READ_10;
-            cdb[2] = ((sector_lba >> 24) & 0xFF) as u8;
-            cdb[3] = ((sector_lba >> 16) & 0xFF) as u8;
-            cdb[4] = ((sector_lba >> 8) & 0xFF) as u8;
-            cdb[5] = (sector_lba & 0xFF) as u8;
+            cdb[2..6].copy_from_slice(&sector_lba.to_be_bytes());
             cdb[8] = 1;
 
             self.execute_scsi_cmd(
@@ -230,28 +305,25 @@ impl BlockDevice for PvscsiDevice {
     }
 
     fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
-        let num_sectors = (buf.len() / self.sector_size) as u32;
+        let num_sectors = buf.len() / self.sector_size;
+        if num_sectors == 0 || buf.len() % self.sector_size != 0 {
+            return Err(BlockDeviceError::IoError);
+        }
+        if start_sector.saturating_add(num_sectors as u64) > self.sector_count {
+            return Err(BlockDeviceError::OutOfBounds);
+        }
         let mut offset = 0;
+        let mut sec_buf = vec![0u8; self.sector_size];
 
         for s in 0..num_sectors {
             let sector_lba = (start_sector + s as u64) as u32;
             let mut cdb = [0u8; 16];
             cdb[0] = SCSI_WRITE_10;
-            cdb[2] = ((sector_lba >> 24) & 0xFF) as u8;
-            cdb[3] = ((sector_lba >> 16) & 0xFF) as u8;
-            cdb[4] = ((sector_lba >> 8) & 0xFF) as u8;
-            cdb[5] = (sector_lba & 0xFF) as u8;
+            cdb[2..6].copy_from_slice(&sector_lba.to_be_bytes());
             cdb[8] = 1;
 
-            let mut sec_buf = [0u8; 512];
             sec_buf.copy_from_slice(&buf[offset..offset + self.sector_size]);
-
-            self.execute_scsi_cmd(
-                &cdb,
-                10,
-                &mut sec_buf,
-                PVSCSI_FLAG_CMD_DIR_TO_DEV,
-            )?;
+            self.execute_scsi_cmd(&cdb, 10, &mut sec_buf, PVSCSI_FLAG_CMD_DIR_TO_DEV)?;
             offset += self.sector_size;
         }
 
@@ -269,6 +341,6 @@ impl BlockDevice for PvscsiDevice {
 
 impl Drop for PvscsiDevice {
     fn drop(&mut self) {
-        deallocate_frame(self.dma_frame);
+        crate::drivers::deallocate_contiguous_frames(self.dma_frame, 4);
     }
 }

@@ -5,10 +5,11 @@ use alloc::sync::Arc;
 use spin::Mutex;
 use x86_64::instructions::port::{PortReadOnly, PortWriteOnly};
 
+use crate::drivers::dma::Dma;
 use crate::drivers::manager::DeviceManager;
 use crate::drivers::pci::PciDevice;
-use crate::drivers::dma::Dma;
 use crate::drivers::traits::{NetDevice, NetDeviceError};
+use crate::i18n::t;
 use crate::serial_println;
 
 use desc::{RtlDesc, DESC_EOR, DESC_FS, DESC_LS, DESC_OWN};
@@ -27,6 +28,10 @@ pub struct Rtl8168Device {
     tx_buffers: [Dma<[u8; BUFFER_SIZE]>; RING_SIZE],
     rx_cur: usize,
     tx_cur: usize,
+    rx_bytes: usize,
+    rx_packets: usize,
+    tx_bytes: usize,
+    tx_packets: usize,
 }
 
 unsafe impl Send for Rtl8168Device {}
@@ -57,8 +62,8 @@ impl Rtl8168Device {
         pci.enable_io_space();
         pci.enable_bus_mastering();
 
-        let bar0 = pci.bar(0).ok_or("rtl8168: BAR0 not found")?;
-        let io_base = bar0.address as u16;
+        let bar = pci.first_io_bar().ok_or("rtl8168: I/O BAR not found")?;
+        let io_base = bar.address as u16;
 
         let rx_ring = Dma::zeroed()?;
         let tx_ring = Dma::zeroed()?;
@@ -86,6 +91,10 @@ impl Rtl8168Device {
             tx_buffers,
             rx_cur: 0,
             tx_cur: 0,
+            rx_bytes: 0,
+            rx_packets: 0,
+            tx_bytes: 0,
+            tx_packets: 0,
         };
 
         dev.init_hw()?;
@@ -95,12 +104,18 @@ impl Rtl8168Device {
     fn init_hw(&mut self) -> Result<(), &'static str> {
         // Программный сброс контроллера
         self.out8(REG_COMMAND, CMD_RST);
-        for _ in 0..10_000 {
+        for _ in 0..50_000 {
             if (self.in8(REG_COMMAND) & CMD_RST) == 0 {
                 break;
             }
             core::hint::spin_loop();
         }
+        if (self.in8(REG_COMMAND) & CMD_RST) != 0 {
+            return Err("rtl8168: reset timeout");
+        }
+
+        // Разблокируем конфигурационные регистры чипа (Config0-5, RMS, Desc addresses)
+        self.out8(REG_9346CR, 0xC0);
 
         // Читаем MAC-адрес
         for i in 0..6 {
@@ -138,15 +153,15 @@ impl Rtl8168Device {
         self.out32(REG_TX_DESC_LO, tx_phys as u32);
         self.out32(REG_TX_DESC_HI, (tx_phys >> 32) as u32);
 
-        // Устанавливаем максимальный размер пакета
+        self.out16(REG_CPLUS_CMD, 0x0020); // Rx/Tx checksum off + C+ mode
         self.out16(REG_RMS, 1536);
-        self.out8(REG_MTPS, 0x3F); // 0x3F = No early transmit (TxPacketMax)
-
-        // Фильтр пакетов
+        self.out8(REG_MTPS, 0x3F); // TxPacketMax
+        self.out32(REG_TCR, 0x0300_0700); // IFG + Max DMA burst
         self.out32(REG_RCR, RCR_AAP | RCR_APM | RCR_AM | RCR_AB | RCR_MXDMA_UNLIM);
 
-        // Включаем приемник и передатчик
+        // Включаем приемник и передатчик, затем снова блокируем config регистры
         self.out8(REG_COMMAND, CMD_RE | CMD_TE);
+        self.out8(REG_9346CR, 0x00);
 
         Ok(())
     }
@@ -167,10 +182,9 @@ impl NetDevice for Rtl8168Device {
         }
 
         let idx = self.tx_cur;
-        let desc = &self.tx_ring[idx];
+        let opts1 = unsafe { core::ptr::read_volatile(&self.tx_ring[idx].opts1) };
 
-        // Если бит OWN всё ещё установлен, контроллер ещё не завершил отправку этого дескриптора
-        if (desc.opts1 & DESC_OWN) != 0 {
+        if (opts1 & DESC_OWN) != 0 {
             return Err(NetDeviceError::NotReady);
         }
 
@@ -181,46 +195,68 @@ impl NetDevice for Rtl8168Device {
             opts |= DESC_EOR;
         }
 
-        self.tx_ring[idx].opts2 = 0;
-        self.tx_ring[idx].opts1 = opts;
-
-        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
+        unsafe {
+            core::ptr::write_volatile(&mut self.tx_ring[idx].opts2, 0);
+            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
+            core::ptr::write_volatile(&mut self.tx_ring[idx].opts1, opts);
+        }
 
         // Пингуем очередь передачи (бит 6 регистра 0x38)
         self.out8(REG_TX_POLL, 0x40);
 
         self.tx_cur = (self.tx_cur + 1) % RING_SIZE;
+        self.tx_packets += 1;
+        self.tx_bytes += packet.len();
         Ok(())
     }
 
     fn receive_packet(&mut self, buf: &mut [u8]) -> Result<Option<usize>, NetDeviceError> {
         let idx = self.rx_cur;
-        let desc = self.rx_ring[idx];
+        let desc = unsafe { core::ptr::read_volatile(&self.rx_ring[idx]) };
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Acquire);
 
-        // Если OWN равен 1, пакет ещё не прибыл от контроллера
         if (desc.opts1 & DESC_OWN) != 0 {
             return Ok(None);
         }
 
+        // RES (bit 21) = ошибка кадра CRC/RUNT/FIFO; возвращаем дескриптор без выдачи мусора
+        let has_err = (desc.opts1 & (1 << 21)) != 0 || (desc.opts1 & (DESC_FS | DESC_LS)) != (DESC_FS | DESC_LS);
         let len = (desc.opts1 & 0x3FFF) as usize;
-        let packet_len = if len > 4 { len - 4 } else { len }; // Убираем CRC
+        let packet_len = if !has_err && len > 4 && len <= BUFFER_SIZE {
+            len - 4
+        } else {
+            0
+        };
 
-        if buf.len() < packet_len {
-            return Err(NetDeviceError::BufferTooSmall);
+        if packet_len > 0 {
+            if buf.len() < packet_len {
+                return Err(NetDeviceError::BufferTooSmall);
+            }
+            buf[..packet_len].copy_from_slice(&self.rx_buffers[idx][..packet_len]);
+            self.rx_packets += 1;
+            self.rx_bytes += packet_len;
         }
 
-        buf[..packet_len].copy_from_slice(&self.rx_buffers[idx][..packet_len]);
-
-        // Возвращаем владение дескриптором контроллеру
         let mut opts = DESC_OWN | (BUFFER_SIZE as u32);
         if idx == RING_SIZE - 1 {
             opts |= DESC_EOR;
         }
-        self.rx_ring[idx].opts1 = opts;
+        unsafe {
+            core::ptr::write_volatile(&mut self.rx_ring[idx].opts1, opts);
+        }
 
         self.rx_cur = (self.rx_cur + 1) % RING_SIZE;
-        Ok(Some(packet_len))
+        if packet_len > 0 {
+            Ok(Some(packet_len))
+        } else {
+            Ok(None)
+        }
     }
+
+    fn rx_bytes(&self) -> usize { self.rx_bytes }
+    fn rx_packets(&self) -> usize { self.rx_packets }
+    fn tx_bytes(&self) -> usize { self.tx_bytes }
+    fn tx_packets(&self) -> usize { self.tx_packets }
 }
 
 /// Поиск сетевых контроллеров Realtek RTL8168/8111/8169 (Vendor 0x10EC)
@@ -234,8 +270,9 @@ pub fn probe_pci(dev: &mut PciDevice, dm: &mut DeviceManager) -> bool {
                 dev.driver_name = Some("rtl8168");
                 let mac = nic.mac_address();
                 let name = alloc::format!("eth{}", dm.net_device_count());
-                serial_println!(
-                    "rtl8168: registered {} (Realtek PCIe Gigabit, MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+                crate::klog!(
+                    "rtl8168: {} {} (MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+                    t("подключен гигабитный адаптер", "registered Gigabit NIC"),
                     name, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
                 );
                 dm.register_net_device(Arc::new(Mutex::new(nic)));

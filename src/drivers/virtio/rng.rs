@@ -121,6 +121,10 @@ impl Drop for VirtioRng {
 
 pub static VIRTIO_RNG: Mutex<Option<VirtioRng>> = Mutex::new(None);
 
+pub fn is_present() -> bool {
+    VIRTIO_RNG.lock().is_some()
+}
+
 pub fn fill_entropy(buf: &mut [u8]) -> bool {
     if let Some(rng) = VIRTIO_RNG.lock().as_mut() {
         rng.get_random_bytes(buf).is_ok()

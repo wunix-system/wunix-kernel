@@ -415,6 +415,18 @@ impl DisplayDevice for VirtioGpu {
     }
 }
 
+impl Drop for VirtioGpu {
+    fn drop(&mut self) {
+        use x86_64::structures::paging::PhysFrame;
+        use x86_64::PhysAddr;
+        self.transport.reset();
+        let fb_base = PhysFrame::containing_address(PhysAddr::new(self.fb_phys));
+        let cmd_base = PhysFrame::containing_address(PhysAddr::new(self.cmd_phys));
+        crate::drivers::deallocate_contiguous_frames(fb_base, self._fb_pages);
+        crate::drivers::deallocate_contiguous_frames(cmd_base, 1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -240,6 +240,18 @@ impl NetDevice for VirtioNet {
     }
 }
 
+impl Drop for VirtioNet {
+    fn drop(&mut self) {
+        use x86_64::structures::paging::PhysFrame;
+        use x86_64::PhysAddr;
+        self.transport.reset();
+        let rx_base = PhysFrame::containing_address(PhysAddr::new(self.rx_dma_phys));
+        let tx_base = PhysFrame::containing_address(PhysAddr::new(self.tx_dma_phys));
+        crate::drivers::deallocate_contiguous_frames(rx_base, 8);
+        crate::drivers::deallocate_contiguous_frames(tx_base, 1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

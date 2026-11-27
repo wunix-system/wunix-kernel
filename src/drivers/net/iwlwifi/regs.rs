@@ -17,3 +17,4 @@ pub const FH_RX_CONFIG: usize = 0x1C40;
 pub const FH_RX_BASE_ADDR: usize = 0x1C44;
 pub const FH_RX_WPTR: usize = 0x1C48;
 pub const FH_RX_STATUS: usize = 0x1C4C;
+pub const HBUS_TARG_WRPTR: usize = 0x0460;

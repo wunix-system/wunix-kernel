@@ -9,11 +9,20 @@ pub const SHFL_FN_CREATE: u32 = 3;
 pub const SHFL_FN_CLOSE: u32 = 4;
 pub const SHFL_FN_READ: u32 = 5;
 pub const SHFL_FN_WRITE: u32 = 6;
+pub const SHFL_FN_MAP_FOLDER: u32 = 12;
 pub const SHFL_FN_LIST: u32 = 8;
 pub const SHFL_FN_INFORMATION: u32 = 9;
+pub const SHFL_FN_REMOVE: u32 = 10;
+
+pub const VMMDEV_HGCM_PARM_TYPE_32BIT: u32 = 1;
+pub const VMMDEV_HGCM_PARM_TYPE_64BIT: u32 = 2;
+pub const VMMDEV_HGCM_PARM_TYPE_LINADDR: u32 = 4;
+
+pub const VMMDEV_HGCM_REQ_DONE: u32 = 1 << 0;
+pub const VINF_HGCM_ASYNC_EXECUTE: i32 = 2903;
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct HgcmParm {
     pub parm_type: u32,
     pub val_u64: u64,
@@ -22,8 +31,16 @@ pub struct HgcmParm {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct VmmDevHgcmConnect {
+pub struct VmmDevHgcmRequestHeader {
     pub header: VmmDevRequestHeader,
+    pub flags: u32,
+    pub result: i32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct VmmDevHgcmConnect {
+    pub hgcm_header: VmmDevHgcmRequestHeader,
     pub loc_type: u32,
     pub service_name: [u8; 128],
     pub client_id: u32,
@@ -32,21 +49,28 @@ pub struct VmmDevHgcmConnect {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct VmmDevHgcmDisconnect {
-    pub header: VmmDevRequestHeader,
+    pub hgcm_header: VmmDevHgcmRequestHeader,
     pub client_id: u32,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct VmmDevHgcmCall {
-    pub header: VmmDevRequestHeader,
+    pub hgcm_header: VmmDevHgcmRequestHeader,
     pub client_id: u32,
     pub function: u32,
     pub c_parms: u32,
     pub parms: [HgcmParm; 6],
 }
 
-/// Клиент Host-Guest Communication Manager (HGCM) для обмена RPC с хостом.
+fn hgcm_hdr(size: u32, req_type: u32) -> VmmDevHgcmRequestHeader {
+    VmmDevHgcmRequestHeader {
+        header: VmmDevRequestHeader::new(size, req_type),
+        flags: 0,
+        result: 0,
+    }
+}
+
 pub struct HgcmClient {
     client_id: u32,
 }
@@ -64,42 +88,47 @@ impl HgcmClient {
         unsafe {
             let req = guest.dma_ptr::<VmmDevHgcmConnect>();
             *req = VmmDevHgcmConnect {
-                header: VmmDevRequestHeader::new(
+                hgcm_header: hgcm_hdr(
                     core::mem::size_of::<VmmDevHgcmConnect>() as u32,
                     VMMDEV_REQ_HGCM_CONNECT,
                 ),
-                loc_type: 1,
+                loc_type: 2, // VMMDevHGCMLoc_LocalHost_Existing
                 service_name: name_buf,
                 client_id: 0,
             };
 
             let rc = guest.execute_request()?;
-            if rc >= 0 && (*req).client_id != 0 {
-                Ok(Self {
-                    client_id: (*req).client_id,
-                })
+            if rc == VINF_HGCM_ASYNC_EXECUTE {
+                for _ in 0..100_000 {
+                    let fl = core::ptr::read_volatile(&(*req).hgcm_header.flags);
+                    if (fl & VMMDEV_HGCM_REQ_DONE) != 0 {
+                        break;
+                    }
+                    core::hint::spin_loop();
+                }
+            }
+            let res = core::ptr::read_volatile(&(*req).hgcm_header.result);
+            let cid = core::ptr::read_volatile(&(*req).client_id);
+            if rc >= 0 && res >= 0 && cid != 0 {
+                Ok(Self { client_id: cid })
             } else {
                 Err("HGCM connect failed")
             }
         }
     }
 
-    pub fn call(&self, function: u32, parms: &[HgcmParm]) -> Result<i32, &'static str> {
+    pub fn call(&self, function: u32, parms: &mut [HgcmParm]) -> Result<i32, &'static str> {
         let mut guest_guard = VBOX_GUEST.lock();
         let guest = guest_guard.as_mut().ok_or("VBox VMMDev not initialized")?;
 
-        let mut parm_array = [HgcmParm {
-            parm_type: 0,
-            val_u64: 0,
-            val_extra: 0,
-        }; 6];
+        let mut parm_array = [HgcmParm::default(); 6];
         let count = parms.len().min(6);
         parm_array[..count].copy_from_slice(&parms[..count]);
 
         unsafe {
             let req = guest.dma_ptr::<VmmDevHgcmCall>();
             *req = VmmDevHgcmCall {
-                header: VmmDevRequestHeader::new(
+                hgcm_header: hgcm_hdr(
                     core::mem::size_of::<VmmDevHgcmCall>() as u32,
                     VMMDEV_REQ_HGCM_CALL,
                 ),
@@ -109,7 +138,21 @@ impl HgcmClient {
                 parms: parm_array,
             };
 
-            guest.execute_request()
+            let rc = guest.execute_request()?;
+            if rc == VINF_HGCM_ASYNC_EXECUTE {
+                for _ in 0..200_000 {
+                    let fl = core::ptr::read_volatile(&(*req).hgcm_header.flags);
+                    if (fl & VMMDEV_HGCM_REQ_DONE) != 0 {
+                        break;
+                    }
+                    core::hint::spin_loop();
+                }
+            }
+            for i in 0..count {
+                parms[i] = core::ptr::read_volatile(&(*req).parms[i]);
+            }
+            let result = core::ptr::read_volatile(&(*req).hgcm_header.result);
+            Ok(result)
         }
     }
 
@@ -124,7 +167,7 @@ impl Drop for HgcmClient {
             unsafe {
                 let req = guest.dma_ptr::<VmmDevHgcmDisconnect>();
                 *req = VmmDevHgcmDisconnect {
-                    header: VmmDevRequestHeader::new(
+                    hgcm_header: hgcm_hdr(
                         core::mem::size_of::<VmmDevHgcmDisconnect>() as u32,
                         VMMDEV_REQ_HGCM_DISCONNECT,
                     ),

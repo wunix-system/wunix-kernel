@@ -20,10 +20,15 @@ pub const IXGBE_RDBAL: usize = 0x01000;
 pub const IXGBE_RDBAH: usize = 0x01004;
 pub const IXGBE_RDLEN: usize = 0x01008;
 pub const IXGBE_RDH: usize = 0x01010;
+pub const IXGBE_SRRCTL: usize = 0x01014;
 pub const IXGBE_RDT: usize = 0x01018;
+pub const IXGBE_RXDCTL: usize = 0x01028;
 pub const IXGBE_RXCTRL: usize = 0x03000;
-pub const IXGBE_FCTRL: usize = 0x05008;
+pub const IXGBE_LINKS: usize = 0x042A4;
+pub const IXGBE_FCTRL: usize = 0x05080;
 
+pub const IXGBE_QUEUE_ENABLE: u32 = 1 << 25;
+pub const IXGBE_LINKS_UP: u32 = 1 << 30;
 pub const IXGBE_RXCTRL_RXEN: u32 = 1 << 0;
 pub const IXGBE_FCTRL_BAM: u32 = 1 << 10; // Broadcast Accept Mode
 pub const IXGBE_FCTRL_MPE: u32 = 1 << 8;  // Multicast Promiscuous Enable
@@ -35,6 +40,7 @@ pub const IXGBE_TDBAH: usize = 0x06004;
 pub const IXGBE_TDLEN: usize = 0x06008;
 pub const IXGBE_TDH: usize = 0x06010;
 pub const IXGBE_TDT: usize = 0x06018;
+pub const IXGBE_TXDCTL: usize = 0x06028;
 pub const IXGBE_DMATXCTL: usize = 0x04A80;
 pub const IXGBE_DMATXCTL_TE: u32 = 1 << 0; // Transmit Enable
 

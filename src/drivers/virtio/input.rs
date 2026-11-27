@@ -232,6 +232,16 @@ impl InputDevice for VirtioInput {
     }
 }
 
+impl Drop for VirtioInput {
+    fn drop(&mut self) {
+        use x86_64::structures::paging::PhysFrame;
+        use x86_64::PhysAddr;
+        self.transport.reset();
+        let base = PhysFrame::containing_address(PhysAddr::new(self.dma_phys));
+        crate::drivers::deallocate_contiguous_frames(base, 1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

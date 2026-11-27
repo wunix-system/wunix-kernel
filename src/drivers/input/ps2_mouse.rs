@@ -171,12 +171,23 @@ unsafe fn send_mouse_cmd(cmd: u8) -> u8 {
     }
 }
 
+pub fn is_present() -> bool {
+    MOUSE_INSTANCE.lock().is_some()
+}
+
 pub fn init() -> Option<Arc<Mutex<Ps2Mouse>>> {
-    let mut mouse = Ps2Mouse::new(1024, 768);
+    let (screen_w, screen_h) =
+        crate::drivers::display::screen_dimensions().unwrap_or((1024, 768));
+    let mut mouse = Ps2Mouse::new(screen_w, screen_h);
 
     unsafe {
         let mut cmd_port = Port::<u8>::new(PS2_CMD_PORT);
         let mut data_port = Port::<u8>::new(PS2_DATA_PORT);
+
+        // При отсутствии контроллера i8042 порт статуса 0x64 читается как 0xFF
+        if cmd_port.read() == 0xFF {
+            return None;
+        }
 
         wait_write();
         cmd_port.write(0xA8);
@@ -192,30 +203,39 @@ pub fn init() -> Option<Arc<Mutex<Ps2Mouse>>> {
         wait_write();
         data_port.write(config);
 
-        send_mouse_cmd(MOUSE_CMD_RESET);
+        let reset_ack = send_mouse_cmd(MOUSE_CMD_RESET);
+        if reset_ack != 0xFA {
+            return None;
+        }
         wait_read();
-        let _ = data_port.read();
+        let bat = data_port.read();
         wait_read();
-        let _ = data_port.read();
-
-        send_mouse_cmd(MOUSE_CMD_SET_SAMPLE_RATE);
-        send_mouse_cmd(200);
-        send_mouse_cmd(MOUSE_CMD_SET_SAMPLE_RATE);
-        send_mouse_cmd(100);
-        send_mouse_cmd(MOUSE_CMD_SET_SAMPLE_RATE);
-        send_mouse_cmd(80);
-
-        send_mouse_cmd(MOUSE_CMD_GET_DEVICE_ID);
-        wait_read();
-        let dev_id = data_port.read();
-        if dev_id == 0x03 || dev_id == 0x04 {
-            mouse.is_intellimouse = true;
+        let _id = data_port.read();
+        if bat != 0xAA {
+            return None;
         }
 
-        send_mouse_cmd(MOUSE_CMD_SET_RESOLUTION);
-        send_mouse_cmd(0x02);
+        let _ = send_mouse_cmd(MOUSE_CMD_SET_SAMPLE_RATE);
+        let _ = send_mouse_cmd(200);
+        let _ = send_mouse_cmd(MOUSE_CMD_SET_SAMPLE_RATE);
+        let _ = send_mouse_cmd(100);
+        let _ = send_mouse_cmd(MOUSE_CMD_SET_SAMPLE_RATE);
+        let _ = send_mouse_cmd(80);
 
-        send_mouse_cmd(MOUSE_CMD_ENABLE_DATA);
+        if send_mouse_cmd(MOUSE_CMD_GET_DEVICE_ID) == 0xFA {
+            wait_read();
+            let dev_id = data_port.read();
+            if dev_id == 0x03 || dev_id == 0x04 {
+                mouse.is_intellimouse = true;
+            }
+        }
+
+        let _ = send_mouse_cmd(MOUSE_CMD_SET_RESOLUTION);
+        let _ = send_mouse_cmd(0x02);
+
+        if send_mouse_cmd(MOUSE_CMD_ENABLE_DATA) != 0xFA {
+            return None;
+        }
     }
 
     let mouse_arc = Arc::new(Mutex::new(mouse));

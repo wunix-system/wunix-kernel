@@ -49,9 +49,12 @@ pub fn probe_pci(dev: &mut PciDevice, dm: &mut DeviceManager) -> bool {
     );
 
     // Опрашиваем стандартные I2C адреса тачпадов ноутбуков (Synaptics, Elan, ALPS)
+    let (screen_w, screen_h) = crate::drivers::display::screen_dimensions().unwrap_or((1024, 768));
     let probe_addrs = [0x15, 0x20, 0x2C, 0x30, 0x40, 0x4A, 0x4C];
     for &addr in &probe_addrs {
-        if let Ok(touchpad) = crate::drivers::input::i2c_hid::I2cTouchpad::probe(&mut i2c, mmio, addr, 1024, 768) {
+        if let Ok(touchpad) =
+            crate::drivers::input::i2c_hid::I2cTouchpad::probe(&mut i2c, mmio, addr, screen_w, screen_h)
+        {
             dm.register_input_device(Arc::new(Mutex::new(touchpad)));
             serial_println!("i2c: attached I2C-HID Touchpad at 7-bit addr {:#04x}", addr);
             break;

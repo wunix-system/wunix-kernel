@@ -26,8 +26,12 @@ pub static SCAN_RESULTS: Mutex<Vec<WirelessNetwork>> = Mutex::new(Vec::new());
 pub fn register_scanned_network(net: WirelessNetwork) {
     let mut list = SCAN_RESULTS.lock();
     if let Some(existing) = list.iter_mut().find(|n| n.bssid == net.bssid) {
+        if !net.ssid.is_empty() {
+            existing.ssid = net.ssid;
+        }
         existing.rssi = net.rssi;
         existing.channel = net.channel;
+        existing.security = net.security;
     } else {
         list.push(net);
     }

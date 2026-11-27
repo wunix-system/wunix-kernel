@@ -1,8 +1,9 @@
+use alloc::vec;
 use x86_64::structures::paging::PhysFrame;
 
-use super::grant_table::GRANT_TABLE;
+use super::grant_table::{GrantTable, GRANT_TABLE};
 use crate::drivers::traits::{BlockDevice, BlockDeviceError};
-use crate::memory::{allocate_contiguous_frames, deallocate_frame, hhdm_offset};
+use crate::memory::{allocate_contiguous_frames, hhdm_offset};
 
 const BLKIF_OP_READ: u8 = 0;
 const BLKIF_OP_WRITE: u8 = 1;
@@ -51,18 +52,25 @@ impl XenBlkFront {
             core::ptr::write_bytes(dma_virt, 0, 2 * 4096);
         }
 
-        if let Some(gt) = GRANT_TABLE.lock().as_mut() {
+        let granted = if let Some(gt) = GRANT_TABLE.lock().as_mut() {
             let pfn = (dma_phys / 4096) as u32;
-            let _ = gt.grant_access(1, pfn, false);
+            gt.grant_access(GrantTable::MIN_DYNAMIC_GREF, pfn, false).is_ok()
+        } else {
+            false
+        };
+        if !granted {
+            crate::drivers::deallocate_contiguous_frames(dma_frame, 2);
+            return Err("Xen BlkFront: active grant table required");
         }
 
-        Ok(Self {
-            dma_frame,
-            dma_virt,
-            sector_count: 2 * 1024 * 1024,
-            sector_size: 512,
-            req_id: 1,
-        })
+        // Проверяем отклик XenStore / evtchn перед регистрацией диска (не регистрируем фиктивный 1ГБ том)
+        let ver = super::hypercall::xen_version();
+        if ver.is_none() {
+            crate::drivers::deallocate_contiguous_frames(dma_frame, 2);
+            return Err("Xen BlkFront: backend xenstore/evtchn not bound");
+        }
+
+        Err("Xen BlkFront: XenStore vbd device path not negotiated")
     }
 
     fn execute_io(&mut self, is_write: bool, sector: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
@@ -83,9 +91,9 @@ impl XenBlkFront {
             req.handle = 0;
             req.id = self.req_id;
             req.sector_number = sector;
-            req.seg[0].gref = 1;
+            req.seg[0].gref = GrantTable::MIN_DYNAMIC_GREF as u32;
             req.seg[0].first_sect = 0;
-            req.seg[0].last_sect = ((buf.len() / 512) - 1).min(7) as u8;
+            req.seg[0].last_sect = ((buf.len() / self.sector_size.max(512)) - 1).min(7) as u8;
         }
 
         self.req_id = self.req_id.wrapping_add(1);
@@ -112,9 +120,9 @@ impl BlockDevice for XenBlkFront {
 
     fn write_sectors(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
         let num_sectors = buf.len() / self.sector_size;
+        let mut sec_buf = vec![0u8; self.sector_size];
         for s in 0..num_sectors {
             let offset = s * self.sector_size;
-            let mut sec_buf = [0u8; 512];
             sec_buf.copy_from_slice(&buf[offset..offset + self.sector_size]);
             self.execute_io(true, start_sector + s as u64, &mut sec_buf)?;
         }
@@ -133,8 +141,8 @@ impl BlockDevice for XenBlkFront {
 impl Drop for XenBlkFront {
     fn drop(&mut self) {
         if let Some(gt) = GRANT_TABLE.lock().as_mut() {
-            gt.end_access(1);
+            gt.end_access(GrantTable::MIN_DYNAMIC_GREF);
         }
-        deallocate_frame(self.dma_frame);
+        crate::drivers::deallocate_contiguous_frames(self.dma_frame, 2);
     }
 }

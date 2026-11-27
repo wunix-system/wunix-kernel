@@ -7,6 +7,7 @@ use crate::drivers::dma::Dma;
 use crate::drivers::manager::DeviceManager;
 use crate::drivers::pci::PciDevice;
 use crate::drivers::traits::{NetDevice, NetDeviceError};
+use crate::i18n::t;
 
 use desc::*;
 use regs::*;
@@ -68,6 +69,9 @@ impl Tg3Device {
     }
 
     pub fn new(pci: &PciDevice, mmio_base_virt: u64) -> Result<Self, &'static str> {
+        pci.enable_memory_space();
+        pci.enable_bus_mastering();
+
         let mut dev = Self {
             base: mmio_base_virt,
             mac: [0; 6],
@@ -113,6 +117,20 @@ impl Tg3Device {
             ];
         }
 
+        // Сброс и базовая инициализация GRC / FTQ / DMA / Buffer Manager
+        self.write_reg(TG3_GRC_MISC_CFG, TG3_GRC_RESET_CORE);
+        for _ in 0..10_000 {
+            if (self.read_reg(TG3_GRC_MISC_CFG) & TG3_GRC_RESET_CORE) == 0 {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        self.write_reg(TG3_FTQ_RESET, 0xFFFF_FFFF);
+        self.write_reg(TG3_FTQ_RESET, 0);
+        self.write_reg(TG3_BUF_MGR_MODE, 1 << 1);
+        self.write_reg(TG3_RDMA_MODE, 1 << 1);
+        self.write_reg(TG3_WDMA_MODE, 1 << 1);
+
         // 1. Инициализируем дескрипторы RX Producer Ring
         for (i, buf) in self.rx_buffers.iter().enumerate() {
             let phys = buf.physical() as u64;
@@ -138,9 +156,9 @@ impl Tg3Device {
         // Отключаем Mini Ring
         self.write_reg(TG3_RCVDBDI_MINI_BD + 8, TG3_BDINFO_FLAGS_DISABLED);
 
-        // Уведомляем контроллер о доступных буферах приема
-        self.rx_std_prod_idx = RING_SIZE;
-        self.write_reg(TG3_MAILBOX_RCV_STD_PROD_IDX, (RING_SIZE as u32) & 0xFFFF);
+        // Уведомляем контроллер о доступных буферах приема (индекс последнего продюсера)
+        self.rx_std_prod_idx = RING_SIZE - 1;
+        self.write_reg(TG3_MAILBOX_RCV_STD_PROD_IDX, self.rx_std_prod_idx as u32);
 
         // 3. Инициализируем RX Return Ring 0 в NIC_SRAM_RCV_RET_RCB (0x8200)
         let rx_rcb_phys = self.rx_rcb_ring.physical() as u64;
@@ -168,11 +186,14 @@ impl Tg3Device {
         self.write_reg(TG3_HOSTCC_STATUS_BLK_NIC_ADDR, TG3_NIC_SRAM_STATUS_BLK as u32);
         self.write_reg(TG3_HOSTCC_MODE, TG3_HOSTCC_MODE_ENABLE | TG3_HOSTCC_MODE_NOW);
 
-        // 6. Включаем MAC приемопередатчик
-        self.write_reg(TG3_MAC_MODE, TG3_MAC_MODE_ENABLE | TG3_MAC_MODE_TXEN | TG3_MAC_MODE_RXEN);
+        // 6. Включаем MAC приемопередатчик через раздельные регистры RX/TX MAC Mode
+        self.write_reg(TG3_MAC_MODE, TG3_MAC_MODE_ENABLE);
+        self.write_reg(TG3_TX_MAC_MODE, TG3_TX_MAC_ENABLE);
+        self.write_reg(TG3_RX_MAC_MODE, TG3_RX_MAC_ENABLE);
 
         crate::klog!(
-            "tg3: Broadcom NetXtreme Gigabit Ethernet registered (MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+            "tg3: {} Broadcom NetXtreme (MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+            t("активирован адаптер", "registered NIC"),
             self.mac[0], self.mac[1], self.mac[2], self.mac[3], self.mac[4], self.mac[5]
         );
 
@@ -190,16 +211,19 @@ impl NetDevice for Tg3Device {
     }
 
     fn send_packet(&mut self, packet: &[u8]) -> Result<(), NetDeviceError> {
-        let len = packet.len().min(BUFFER_SIZE);
+        if packet.len() > BUFFER_SIZE {
+            return Err(NetDeviceError::PacketTooLarge);
+        }
+        let len = packet.len();
         let cur = self.tx_cur;
 
-        self.tx_buffers[cur][..len].copy_from_slice(&packet[..len]);
+        self.tx_buffers[cur][..len].copy_from_slice(packet);
         let phys = self.tx_buffers[cur].physical() as u64;
 
         self.tx_ring[cur] = Tg3TxDesc {
             addr_hi: (phys >> 32) as u32,
             addr_lo: phys as u32,
-            len_flags: (len as u32) | TG3_TX_FLAG_END,
+            len_flags: ((len as u32) << 16) | TG3_TX_FLAG_END,
             vlan_tag: 0,
         };
 
@@ -243,8 +267,11 @@ impl NetDevice for Tg3Device {
             return Ok(None);
         }
 
-        let copy_len = len.min(buf.len());
-        buf[..copy_len].copy_from_slice(&self.rx_buffers[buf_idx][..copy_len]);
+        if buf.len() < len {
+            return Err(NetDeviceError::BufferTooSmall);
+        }
+        buf[..len].copy_from_slice(&self.rx_buffers[buf_idx][..len]);
+        let copy_len = len;
 
         // Возвращаем буфер в Standard RX Ring
         let phys = self.rx_buffers[buf_idx].physical() as u64;

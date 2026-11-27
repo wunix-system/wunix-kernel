@@ -1,4 +1,15 @@
+use core::sync::atomic::{AtomicBool, Ordering};
 use x86_64::instructions::port::Port;
+
+static FW_CFG_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn is_present() -> bool {
+    FW_CFG_ACTIVE.load(Ordering::Acquire)
+}
+
+pub(super) fn mark_present(val: bool) {
+    FW_CFG_ACTIVE.store(val, Ordering::Release);
+}
 
 // Порты I/O для управления и передачи данных через шлюз QEMU fw_cfg
 const FW_CFG_PORT_SEL: u16 = 0x0510;
