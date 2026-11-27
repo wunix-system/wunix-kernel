@@ -1,4 +1,3 @@
-use alloc::format;
 use alloc::sync::Arc;
 use spin::Mutex;
 
@@ -6,7 +5,7 @@ use crate::fs::{
     get_file_handle, insert_file_handle, remove_file_handle, InodeType, RegularFileHandle,
 };
 use super::{
-    read_user_cstr, validate_user_buffer, EACCES, EBADF, EFAULT, EINVAL, ENOENT, EOPNOTSUPP,
+    read_user_cstr, validate_user_buffer, EBADF, EFAULT, EINVAL, ENOENT, EOPNOTSUPP,
 };
 use super::at::{resolve_at_path, AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW};
 
@@ -255,34 +254,11 @@ pub fn sys_close_range(first: u64, last: u64, _flags: u64) -> u64 {
     0
 }
 
-static NEXT_MEMFD_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
-
-pub fn sys_memfd_create(name_ptr: u64, _flags: u64) -> u64 {
-    let name = read_user_cstr(name_ptr, 256).unwrap_or_else(|_| alloc::string::String::from("memfd"));
-    let id = NEXT_MEMFD_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    let tmp_path = format!("/tmp/.memfd_{}_{}", id, name);
-
-    let (parent_path, leaf) = match tmp_path.rfind('/') {
-        Some(0) => ("/", &tmp_path[1..]),
-        Some(idx) => (&tmp_path[..idx], &tmp_path[idx + 1..]),
-        None => (".", tmp_path.as_str()),
-    };
-
-    let parent_node = match crate::fs::resolve_path(parent_path, true) {
-        Ok(p) => p,
-        Err(_) => return (-(ENOENT as i64)) as u64,
-    };
-
-    let new_file = match parent_node.create(leaf, InodeType::File) {
-        Ok(f) => f,
-        Err(_) => return (-(EACCES as i64)) as u64,
-    };
-
-    // Анонимный memfd: отвязываем имя от родительского каталога
-    let _ = parent_node.unlink(leaf);
-
+pub fn sys_memfd_create(_name_ptr: u64, _flags: u64) -> u64 {
+    let shm_inode: Arc<dyn crate::fs::Inode> =
+        Arc::new(crate::fs::devfs::shm::ShmInode::new());
     let handle = Arc::new(RegularFileHandle {
-        inode: new_file,
+        inode: shm_inode,
         offset: Mutex::new(0),
         flags: core::sync::atomic::AtomicU32::new(crate::fs::O_RDWR),
         path: None,

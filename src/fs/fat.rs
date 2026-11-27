@@ -1288,13 +1288,17 @@ impl FileSystem for Fat32FileSystem {
     fn name(&self) -> &'static str {
         "fat32"
     }
+
+    fn sync(&self) -> Result<(), VfsError> {
+        self.inner.flush_fat_cache()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_lfn_checksum() {
         let name = *b"LIMINE  ";
         let ext = *b"SYS";
@@ -1302,14 +1306,14 @@ mod tests {
         assert_eq!(cs, lfn_checksum(&name, &ext));
     }
 
-    #[test]
+    #[test_case]
     fn test_to_dos_83_truncation() {
         let (name, ext) = to_dos_83("limine-bios.sys").unwrap();
         assert_eq!(&name, b"LIMINE-B");
         assert_eq!(&ext, b"SYS");
     }
 
-    #[test]
+    #[test_case]
     fn test_generate_unique_dos_83_collision() {
         let existing = alloc::vec::Vec::new();
         let (n1, e1) = generate_unique_dos_83("ssh_host_ed25519_key", &existing).unwrap();
@@ -1343,7 +1347,7 @@ mod tests {
         assert_ne!(n1, n2);
     }
 
-    #[test]
+    #[test_case]
     fn test_lfn_entry_size() {
         assert_eq!(core::mem::size_of::<LfnEntry>(), 32);
         assert_eq!(core::mem::size_of::<RawDirEntry>(), 32);

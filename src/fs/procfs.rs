@@ -287,25 +287,61 @@ pub fn refresh_proc_files(path: &str) {
             ));
         }
         let _ = write_file_ramfs("/proc/modules", text.as_bytes());
+    } else if path == "/proc/bus/usb/devices" {
+        let mut text = String::new();
+        for reg in crate::drivers::usb::host::list_usb_devices() {
+            let d = &reg.info;
+            let spd = match d.speed {
+                1 => "12",
+                2 => "1.5",
+                3 => "480",
+                4 | 5 => "5000",
+                _ => "12",
+            };
+            text.push_str(&alloc::format!(
+                "T:  Bus={:02} Lev=01 Prnt=01 Port=00 Cnt=01 Dev#={:3} Spd={} MxCh= 0\n\
+                 D:  Ver= 2.00 Cls={:02x} Sub={:02x} Prot={:02x} MxPS={:2} #Cfgs=  1\n\
+                 P:  Vendor={:04x} ProdID={:04x} Rev=01.00\n",
+                d.bus, d.devnum, spd, d.dev_class, d.dev_subclass, d.dev_protocol, d.max_packet_size, d.vendor_id, d.product_id
+            ));
+            for iface in &d.interfaces {
+                text.push_str(&alloc::format!(
+                    "I:* If#={:2} Alt={:2} #EPs={:2} Cls={:02x} Sub={:02x} Prot={:02x} Driver=usbfs\n",
+                    iface.iface_num,
+                    iface.alt_setting,
+                    iface.endpoints.len(),
+                    iface.class,
+                    iface.subclass,
+                    iface.protocol
+                ));
+            }
+        }
+        let _ = write_file_ramfs("/proc/bus/usb/devices", text.as_bytes());
     } else if path == "/proc/devices" {
         let text = "Character devices:\n \
              1 mem\n \
              4 tty\n \
              4 ttyS\n \
+             5 ptmx\n \
             10 misc\n \
+            10 fuse\n \
             13 input\n \
-            29 fb\n\
+            14 sound\n \
+            29 fb\n \
+           189 usb_device\n \
+           229 hvc\n \
+           244 uio\n \
            254 rtc\n\n\
-           Block devices:\n\
+           Block devices:\n \
+             7 loop\n \
+             8 sd\n \
            254 virtblk\n";
         let _ = write_file_ramfs("/proc/devices", text.as_bytes());
     } else if path == "/proc/interrupts" {
-        let text = "           CPU0\n \
-             0:         timer0 (pit)\n \
-             1:         i8042 (keyboard)\n \
-             4:         ttyS0 (serial)\n \
-             8:         rtc0 (cmos)\n \
-            11:         pci-virtio\n";
+        let mut text = String::from("           CPU0\n");
+        for (irq, name, count) in crate::arch::x86_64::interrupts::irq_stats() {
+            text.push_str(&alloc::format!("{:>3}: {:>10}  {}\n", irq, count, name));
+        }
         let _ = write_file_ramfs("/proc/interrupts", text.as_bytes());
     } else if path == "/proc/ioports" {
         let mut text = String::from(
@@ -394,18 +430,40 @@ pub fn refresh_proc_files(path: &str) {
             "MemTotal:       {:8} kB\n\
              MemFree:        {:8} kB\n\
              MemAvailable:   {:8} kB\n\
-             Buffers:           16384 kB\n\
-             Cached:            32768 kB\n\
+             Buffers:               0 kB\n\
+             Cached:                0 kB\n\
              SwapTotal:             0 kB\n\
              SwapFree:              0 kB\n",
             total_kb, free_kb, free_kb
         );
         let _ = write_file_ramfs("/proc/meminfo", text.as_bytes());
     } else if path == "/proc/stat" {
-        let text = "cpu  100 0 100 1000 0 0 0 0 0 0\nintr 1\nctxt 1\nbtime 0\nprocesses 1\nprocs_running 1\nprocs_blocked 0\n";
+        let uptime_ticks = crate::arch::x86_64::timer::ticks();
+        let total_irqs: u64 = crate::arch::x86_64::interrupts::irq_stats()
+            .iter()
+            .map(|e| e.2)
+            .sum();
+        let procs = crate::task::scheduler::active_process_count();
+        let text = alloc::format!(
+            "cpu  {} 0 0 0 0 0 0 0 0 0\n\
+             intr {}\n\
+             ctxt {}\n\
+             btime 0\n\
+             processes {}\n\
+             procs_running {}\n\
+             procs_blocked 0\n",
+            uptime_ticks,
+            total_irqs.max(uptime_ticks),
+            uptime_ticks,
+            procs.max(1),
+            1
+        );
         let _ = write_file_ramfs("/proc/stat", text.as_bytes());
     } else if path == "/proc/version" {
-        let text = "Linux version 6.6.0-wunix (root@wunix) (gcc 12.2.0) #1 SMP PREEMPT\n";
+        let text = alloc::format!(
+            "Wunix kernel {} (x86_64) #1 SMP PREEMPT\n",
+            env!("WUNIX_PKG_VERSION")
+        );
         let _ = write_file_ramfs("/proc/version", text.as_bytes());
     } else if path == "/proc/driver/rtc" {
         let dt = crate::drivers::rtc::read_datetime();
@@ -480,7 +538,22 @@ pub fn refresh_proc_files(path: &str) {
         let _ = write_file_ramfs("/sys/class/power_supply/BAT0/present", if pwr.battery_present { b"1\n" } else { b"0\n" });
         let _ = write_file_ramfs("/sys/class/power_supply/BAT0/type", b"Battery\n");
     } else if path == "/proc/net/wireless" {
-        let text = "Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE\n face | tus | link level noise |  nwid  crypt   frag  retry   misc | beacon | 22\nwlan0: 0000   65.  -45.  -256        0      0      0      0      0        0\n";
+        let mut text = String::from("Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE\n face | tus | link level noise |  nwid  crypt   frag  retry   misc | beacon | 22\n");
+        let mut wlan_idx = 0usize;
+        crate::drivers::with_device_manager(|dm| {
+            for i in 0..dm.net_device_count() {
+                if let Some(dev) = dm.get_net_device(i) {
+                    let drv = dev.lock().driver_name();
+                    if drv.contains("iwlwifi") || drv.contains("wifi") || drv.contains("wlan") {
+                        text.push_str(&alloc::format!(
+                            "wlan{}: 0000    0.   -99.  -256        0      0      0      0      0        0\n",
+                            wlan_idx
+                        ));
+                        wlan_idx += 1;
+                    }
+                }
+            }
+        });
         let _ = write_file_ramfs("/proc/net/wireless", text.as_bytes());
     }
 }

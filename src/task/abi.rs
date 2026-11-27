@@ -45,7 +45,7 @@ impl core::fmt::Display for AbiPersonality {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_abi_personalities() {
         assert_ne!(AbiPersonality::Linux, AbiPersonality::WindowsNt);
         assert_ne!(AbiPersonality::Linux, AbiPersonality::Darwin);

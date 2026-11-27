@@ -35,11 +35,35 @@ pub fn remove_process_vma(tgid: u64) {
 pub fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64) -> u64 {
     const MAP_ANONYMOUS: u64 = 0x20;
     let is_file_backed = (flags & MAP_ANONYMOUS) == 0 && (fd as i64) >= 0;
-    let file_inode = if is_file_backed {
-        crate::fs::get_file_handle(fd).and_then(|h| h.as_inode())
+    let file_handle = if is_file_backed {
+        crate::fs::get_file_handle(fd)
     } else {
         None
     };
+
+    if let Some(ref handle) = file_handle {
+        if let Some(backing) = handle.mmap_backing(offset as usize, len as usize) {
+            let res = match backing {
+                crate::fs::vfs::MmapBacking::PhysRange {
+                    phys_base,
+                    byte_len: _,
+                    uncacheable,
+                } => with_current_vma_mut(|vma| {
+                    vma.map_phys_range(addr, len, prot, flags, phys_base, uncacheable)
+                }),
+                crate::fs::vfs::MmapBacking::Shared(shm) => {
+                    let frames = shm.frames.lock();
+                    with_current_vma_mut(|vma| vma.map_shared_frames(addr, len, prot, flags, &frames))
+                }
+            };
+            return match res {
+                Ok(vaddr) => vaddr,
+                Err(err) => (-(err.abs())) as u64,
+            };
+        }
+    }
+
+    let file_inode = file_handle.and_then(|h| h.as_inode());
 
     let target_addr = match with_current_vma_mut(|vma| vma.mmap(addr, len, prot, flags, fd, offset)) {
         Ok(vaddr) => vaddr,
@@ -142,7 +166,7 @@ pub fn sys_arch_prctl(code: u64, addr: u64) -> u64 {
 }
 
 pub fn fill_random_bytes(slice: &mut [u8]) {
-    crate::arch::x86_64::cpu::get_random_bytes(slice);
+    crate::drivers::rng::fill_random(slice);
 }
 
 pub fn sys_mincore(addr: u64, len: u64, vec_ptr: u64) -> u64 {

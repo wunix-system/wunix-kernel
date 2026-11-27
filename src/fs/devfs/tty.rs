@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::Ordering;
 use x86_64::instructions::port::Port;
 
 use super::types::CharDeviceOp;
@@ -520,42 +520,6 @@ impl CharDeviceOp for TtySDev {
     }
 }
 
-static NEXT_PTS_ID: AtomicU32 = AtomicU32::new(0);
-
-/// /dev/ptmx: мультиплексор псевдотерминалов (POSIX Pseudo-Terminal Master Multiplexer)
-pub struct PtmxDev;
-
-impl CharDeviceOp for PtmxDev {
-    fn read(&self, _offset: usize, _buf: &mut [u8]) -> Result<usize, VfsError> {
-        Ok(0)
-    }
-
-    fn write(&self, _offset: usize, buf: &[u8]) -> Result<usize, VfsError> {
-        Ok(buf.len())
-    }
-
-    fn is_tty(&self) -> bool {
-        true
-    }
-
-    fn ioctl(&self, cmd: u32, arg: u64) -> Result<u64, i64> {
-        match cmd {
-            TIOCGPTN => {
-                if !crate::task::syscall::validate_user_buffer(arg, 4) {
-                    return Err(-14);
-                }
-                let pts_id = NEXT_PTS_ID.fetch_add(1, Ordering::Relaxed);
-                unsafe {
-                    core::ptr::write_unaligned(arg as *mut u32, pts_id);
-                }
-                Ok(0)
-            }
-            TIOCSPTLCK => Ok(0),
-            _ => Err(-25),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,7 +533,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_case]
     fn select_winsize_prefers_serial_when_serial_is_active() {
         let res = select_winsize(
             None,
@@ -581,7 +545,7 @@ mod tests {
         assert_eq!(res.ws_col, 190);
     }
 
-    #[test]
+    #[test_case]
     fn select_winsize_prefers_display_when_display_is_active() {
         let res = select_winsize(
             None,
@@ -593,7 +557,7 @@ mod tests {
         assert_eq!(res.ws_col, 128);
     }
 
-    #[test]
+    #[test_case]
     fn select_winsize_respects_override_and_falls_back_to_default() {
         let over = select_winsize(
             Some(ws(30, 100)),
@@ -609,7 +573,7 @@ mod tests {
         assert_eq!(fallback.ws_col, 80);
     }
 
-    #[test]
+    #[test_case]
     fn parse_serial_winsize_responses() {
         assert_eq!(parse_dsr_response(b"\x1b[50;180R"), Some((50, 180)));
         assert_eq!(parse_xtwinops(b"\x1b[8;50;180t"), Some((50, 180)));

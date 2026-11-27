@@ -309,6 +309,10 @@ impl FileSystem for UfsFileSystem {
     fn name(&self) -> &'static str {
         "ufs"
     }
+
+    fn sync(&self) -> Result<(), VfsError> {
+        self.inner.flush_bmap_cache()
+    }
 }
 
 pub struct UfsInode {

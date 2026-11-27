@@ -25,6 +25,11 @@ pub const SCSI_DISK_MAJOR: u32 = 8;
 pub const MISC_MAJOR: u32 = 10;
 pub const INPUT_MAJOR: u32 = 13;
 pub const FB_MAJOR: u32 = 29;
+pub const SND_MAJOR: u32 = 14;
+pub const USB_DEVICE_MAJOR: u32 = 189;
+pub const HVC_MAJOR: u32 = 229;
+pub const UIO_MAJOR: u32 = 244;
+pub const FUSE_MINOR: u32 = 229;
 pub const RTC_MAJOR: u32 = 254;
 pub const VIRTBLK_MAJOR: u32 = 254;
 
@@ -49,5 +54,9 @@ pub trait CharDeviceOp: Send + Sync {
 
     fn size(&self) -> usize {
         0
+    }
+
+    fn mmap_backing(&self, _offset: usize, _len: usize) -> Option<crate::fs::vfs::MmapBacking> {
+        None
     }
 }

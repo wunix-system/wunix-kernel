@@ -202,7 +202,8 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
             handle.set_flags(((arg as u32) & !3) | accmode);
             0
         }
-        _ => 0,
+        1032 => 65536, // F_GETPIPE_SZ
+        _ => (-(EINVAL as i64)) as u64,
     }
 }
 
@@ -807,7 +808,9 @@ pub fn sys_fchown(fd: u64, uid: u64, gid: u64) -> u64 {
 }
 
 pub fn sys_sync() -> u64 {
-    // В Wunix файловые операции RAMFS атомарны, а изменения на дисках FAT32 сбрасываются.
+    for entry in crate::fs::list_mounts() {
+        let _ = entry.fs.sync();
+    }
     0
 }
 

@@ -1,4 +1,11 @@
-use super::{validate_user_buffer, EFAULT, EPERM, ESRCH};
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+use spin::Mutex;
+
+use super::{validate_user_buffer, EFAULT, EINVAL, EPERM, ESRCH};
+
+static PROCESS_RLIMITS: Mutex<BTreeMap<(u64, u64), RLimit>> = Mutex::new(BTreeMap::new());
+static PROCESS_GROUPS: Mutex<BTreeMap<u64, Vec<u32>>> = Mutex::new(BTreeMap::new());
 
 pub const RLIMIT_CPU: u64 = 0;
 pub const RLIMIT_FSIZE: u64 = 1;
@@ -112,12 +119,17 @@ pub fn sys_prlimit64(
         },
     };
 
+    let current = {
+        let map = PROCESS_RLIMITS.lock();
+        map.get(&(cur_tgid, resource)).copied().unwrap_or(default_limit)
+    };
+
     if old_limit_ptr != 0 {
         if !validate_user_buffer(old_limit_ptr, core::mem::size_of::<RLimit>() as u64) {
             return (-(EFAULT as i64)) as u64;
         }
         unsafe {
-            core::ptr::write_unaligned(old_limit_ptr as *mut RLimit, default_limit);
+            core::ptr::write_unaligned(old_limit_ptr as *mut RLimit, current);
         }
     }
 
@@ -125,35 +137,60 @@ pub fn sys_prlimit64(
         if !validate_user_buffer(new_limit_ptr, core::mem::size_of::<RLimit>() as u64) {
             return (-(EFAULT as i64)) as u64;
         }
-        let _new = unsafe {
+        let new = unsafe {
             core::ptr::read_unaligned(new_limit_ptr as *const RLimit)
         };
+        if new.rlim_cur > new.rlim_max {
+            return (-(EINVAL as i64)) as u64;
+        }
+        PROCESS_RLIMITS.lock().insert((cur_tgid, resource), new);
     }
 
     0
 }
 
 pub fn sys_getgroups(size: u64, list_ptr: u64) -> u64 {
-    let gid = sys_getgid() as u32;
+    let tgid = crate::task::current_thread_tgid();
+    let groups = {
+        let map = PROCESS_GROUPS.lock();
+        map.get(&tgid)
+            .cloned()
+            .unwrap_or_else(|| alloc::vec![sys_getgid() as u32])
+    };
     if size == 0 {
-        return 1;
+        return groups.len() as u64;
     }
-    if !validate_user_buffer(list_ptr, 4) {
+    if (size as usize) < groups.len() {
+        return (-(EINVAL as i64)) as u64;
+    }
+    if !validate_user_buffer(list_ptr, (groups.len() * 4) as u64) {
         return (-(EFAULT as i64)) as u64;
     }
-    unsafe {
-        core::ptr::write_unaligned(list_ptr as *mut u32, gid);
+    for (i, &g) in groups.iter().enumerate() {
+        unsafe {
+            core::ptr::write_unaligned((list_ptr as *mut u32).add(i), g);
+        }
     }
-    1
+    groups.len() as u64
 }
 
 pub fn sys_setgroups(size: u64, list_ptr: u64) -> u64 {
     if sys_geteuid() != 0 {
         return (-(EPERM as i64)) as u64;
     }
+    if size > 65536 {
+        return (-(EINVAL as i64)) as u64;
+    }
     if size > 0 && !validate_user_buffer(list_ptr, size * 4) {
         return (-(EFAULT as i64)) as u64;
     }
+    let mut list = Vec::with_capacity(size as usize);
+    for i in 0..size as usize {
+        let g = unsafe { core::ptr::read_unaligned((list_ptr as *const u32).add(i)) };
+        list.push(g);
+    }
+    let tgid = crate::task::current_thread_tgid();
+    PROCESS_GROUPS.lock().insert(tgid, list);
     0
 }
 

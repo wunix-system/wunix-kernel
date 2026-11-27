@@ -466,6 +466,7 @@ pub fn linux_syscall_dispatcher(
         SYS_TGKILL => sys_tgkill(arg1 as i64, arg2 as i64, arg3),
         SYS_TKILL => sys_tkill(arg1 as i64, arg2),
         SYS_UNAME => sys_uname(arg1),
+        SYS_SYSLOG => sys_syslog(arg1 as i32, arg2, arg3),
         SYS_FCNTL => sys_fcntl(arg1, arg2, arg3),
         SYS_FLOCK => sys_flock(arg1, arg2),
         SYS_FSYNC => sys_fsync(arg1),
@@ -620,6 +621,26 @@ pub extern "C" fn syscall_dispatcher(
     }
 
     crate::task::signal::deliver_pending_signals(regs, res)
+}
+
+pub fn sys_syslog(action: i32, buf_ptr: u64, len: u64) -> u64 {
+    let mut tmp = alloc::vec![0u8; (len as usize).min(65536)];
+    if matches!(action, 2 | 3 | 4) && len > 0 {
+        if !validate_user_buffer(buf_ptr, len) {
+            return (-(EFAULT as i64)) as u64;
+        }
+    }
+    match crate::fs::devfs::mem::syslog_action(action, &mut tmp) {
+        Ok(n) => {
+            if matches!(action, 2 | 3 | 4) && n > 0 && buf_ptr != 0 {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf_ptr as *mut u8, n);
+                }
+            }
+            n as u64
+        }
+        Err(e) => e as u64,
+    }
 }
 
 pub fn alloc_kernel_stack() -> (alloc::boxed::Box<[u8]>, u64) {

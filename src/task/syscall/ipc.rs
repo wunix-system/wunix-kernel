@@ -74,7 +74,7 @@ pub fn sys_eventfd2(initval: u32, flags: u32) -> u64 {
 }
 
 
-pub fn sys_mount(source_ptr: u64, target_ptr: u64, fstype_ptr: u64, flags: u64, _data_ptr: u64) -> u64 {
+pub fn sys_mount(source_ptr: u64, target_ptr: u64, fstype_ptr: u64, flags: u64, data_ptr: u64) -> u64 {
     let source = match read_user_cstr(source_ptr, 256) {
         Ok(s) => s,
         Err(_) => return (-(EFAULT as i64)) as u64,
@@ -88,8 +88,13 @@ pub fn sys_mount(source_ptr: u64, target_ptr: u64, fstype_ptr: u64, flags: u64, 
     } else {
         alloc::string::String::new()
     };
+    let data = if data_ptr != 0 {
+        read_user_cstr(data_ptr, 256).unwrap_or_default()
+    } else {
+        alloc::string::String::new()
+    };
 
-    match crate::fs::mount(&source, &target, &fstype, flags) {
+    match crate::fs::mount_with_data(&source, &target, &fstype, flags, &data) {
         Ok(()) => 0,
         Err(e) => match e {
             crate::fs::VfsError::NotFound => (-(ENOENT as i64)) as u64,

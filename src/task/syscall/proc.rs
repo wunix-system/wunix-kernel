@@ -304,7 +304,7 @@ pub fn sys_setpgid(pid: u64, pgid: u64) -> u64 {
 }
 
 
-pub fn sys_nanosleep(req_ptr: u64, _rem_ptr: u64) -> u64 {
+pub fn sys_nanosleep(req_ptr: u64, rem_ptr: u64) -> u64 {
     if !validate_user_buffer(req_ptr, 16) {
         return (-(EFAULT as i64)) as u64;
     }
@@ -316,6 +316,17 @@ pub fn sys_nanosleep(req_ptr: u64, _rem_ptr: u64) -> u64 {
     let deadline = crate::arch::x86_64::timer::ticks().saturating_add(delta);
     crate::task::block_current(Some(deadline));
     if crate::task::signal::is_sigint_pending_for_current() {
+        if rem_ptr != 0 && validate_user_buffer(rem_ptr, 16) {
+            let now = crate::arch::x86_64::timer::ticks();
+            let rem_ticks = deadline.saturating_sub(now);
+            let rem = crate::task::futex::Timespec {
+                tv_sec: (rem_ticks / 100) as i64,
+                tv_nsec: ((rem_ticks % 100) * 10_000_000) as i64,
+            };
+            unsafe {
+                core::ptr::write_unaligned(rem_ptr as *mut crate::task::futex::Timespec, rem);
+            }
+        }
         return (-(EINTR as i64)) as u64;
     }
     0

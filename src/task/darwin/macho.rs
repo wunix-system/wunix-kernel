@@ -196,7 +196,7 @@ pub fn load_macho(bytes: &[u8]) -> Result<(UserAddressSpace, ElfLoadInfo), ElfEr
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_is_macho_detection() {
         let macho_64_magic = MH_MAGIC_64.to_ne_bytes();
         assert!(is_macho(&macho_64_magic));

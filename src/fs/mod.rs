@@ -5,6 +5,7 @@ pub mod eventfd;
 pub mod ext4;
 pub mod fat;
 pub mod fd;
+pub mod fuse;
 pub mod ufs;
 pub mod handle;
 pub mod mount;
@@ -33,7 +34,7 @@ pub use handle::{
     EPOLLIN, EPOLLOUT, EPOLLPRI, EPOLLRDHUP, O_CLOEXEC, O_CREAT, O_NONBLOCK, O_RDONLY, O_RDWR,
     O_WRONLY,
 };
-pub use mount::{list_mounts, mount, umount, MountEntry};
+pub use mount::{list_mounts, mount, mount_with_data, umount, MountEntry};
 pub use ops::{
     check_permission, create_symlink, mkdir_p, open, read_file, rename, resolve_path, root, unlink,
     write_file,
@@ -86,6 +87,7 @@ pub fn init(initramfs_data: Option<&[u8]>) {
         "/mnt",
         "/proc",
         "/proc/bus/pci",
+        "/proc/bus/usb",
         "/proc/driver",
         "/proc/net",
         "/sys",

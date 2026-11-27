@@ -2,7 +2,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use super::{FileHandle, EPOLLERR, EPOLLHUP};
+use super::{FileHandle, EPOLLERR, EPOLLET, EPOLLHUP, EPOLLIN};
 use crate::task::scheduler;
 
 pub const SYS_EPOLL_CREATE: u64 = 213;
@@ -28,6 +28,7 @@ pub struct EpollEvent {
 pub struct EpollWatch {
     pub events: u32,
     pub data: u64,
+    pub last_active: u32,
 }
 
 pub struct EpollInstance {
@@ -56,6 +57,7 @@ impl EpollInstance {
                 watches.insert(fd, EpollWatch {
                     events: ev.events,
                     data: ev.data,
+                    last_active: 0,
                 });
                 Ok(0)
             }
@@ -74,6 +76,7 @@ impl EpollInstance {
                 if let Some(w) = watches.get_mut(&fd) {
                     w.events = ev.events;
                     w.data = ev.data;
+                    w.last_active = 0;
                     Ok(0)
                 } else {
                     Err(-2) // -ENOENT
@@ -105,14 +108,25 @@ impl EpollInstance {
             let mut ready = Vec::new();
 
             {
-                let watches = self.watches.lock();
-                for (&fd, watch) in watches.iter() {
+                let mut watches = self.watches.lock();
+                for (&fd, watch) in watches.iter_mut() {
                     if let Some(handle) = crate::fs::get_file_handle(fd) {
                         let active = handle.poll_events();
-                        let matched = active & (watch.events | EPOLLERR | EPOLLHUP);
-                        if matched != 0 {
+                        let interest = (watch.events & !EPOLLET) | EPOLLERR | EPOLLHUP;
+                        let matched = active & interest;
+                        let is_edge = (watch.events & EPOLLET) != 0;
+                        let trigger = if is_edge {
+                            // В edge-triggered режиме сигнализируем только о новом фронте готовности
+                            let newly_active = matched & !watch.last_active;
+                            watch.last_active = matched;
+                            newly_active
+                        } else {
+                            watch.last_active = matched;
+                            matched
+                        };
+                        if trigger != 0 {
                             ready.push(EpollEvent {
-                                events: matched,
+                                events: trigger,
                                 data: watch.data,
                             });
                             if ready.len() >= maxevents as usize {
@@ -161,6 +175,15 @@ impl FileHandle for EpollInstance {
     }
 
     fn poll_events(&self) -> u32 {
+        let watches = self.watches.lock();
+        for (&fd, watch) in watches.iter() {
+            if let Some(handle) = crate::fs::get_file_handle(fd) {
+                let active = handle.poll_events();
+                if (active & ((watch.events & !EPOLLET) | EPOLLERR | EPOLLHUP)) != 0 {
+                    return EPOLLIN;
+                }
+            }
+        }
         0
     }
 

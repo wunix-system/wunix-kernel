@@ -42,6 +42,17 @@ pub struct DirEntry {
 }
 
 // Базовый интерфейс индексного узла VFS.
+/// Источник физической памяти для zero-copy отображения `mmap` (устройства, SHM, memfd).
+#[derive(Clone)]
+pub enum MmapBacking {
+    PhysRange {
+        phys_base: u64,
+        byte_len: usize,
+        uncacheable: bool,
+    },
+    Shared(Arc<crate::fs::devfs::shm::ShmBacking>),
+}
+
 // Реализации узлов (RamFS, DevFS, ProcFS) переопределяют методы,
 // релевантные для своего типа, а для остальных получают дефолтные ошибки.
 pub trait Inode: Send + Sync {
@@ -119,6 +130,14 @@ pub trait Inode: Send + Sync {
     fn open_handle(&self, _flags: u32, _path: Option<alloc::string::String>) -> Option<Arc<dyn crate::fs::handle::FileHandle>> {
         None
     }
+
+    fn mmap_backing(&self, _offset: usize, _len: usize) -> Option<MmapBacking> {
+        None
+    }
+
+    fn poll_events(&self) -> u32 {
+        crate::fs::EPOLLIN | crate::fs::EPOLLOUT
+    }
 }
 
 // Корневой контракт конкретной файловой системы.
@@ -126,4 +145,8 @@ pub trait Inode: Send + Sync {
 pub trait FileSystem: Send + Sync {
     fn root(&self) -> Arc<dyn Inode>;
     fn name(&self) -> &'static str;
+
+    fn sync(&self) -> Result<(), VfsError> {
+        Ok(())
+    }
 }

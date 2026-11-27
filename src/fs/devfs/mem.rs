@@ -161,6 +161,43 @@ pub fn push_kmsg(line: &str) {
     q.push(String::from(line));
 }
 
+/// Чтение и управление буфером сообщений ядра для системного вызова syslog(2).
+pub fn syslog_action(action: i32, buf: &mut [u8]) -> Result<usize, i64> {
+    let mut q = KMSG_LOG_QUEUE.lock();
+    let format_all = |items: &Vec<String>| -> String {
+        let mut s = String::new();
+        for msg in items.iter() {
+            s.push_str("<6>");
+            s.push_str(msg);
+            if !msg.ends_with('\n') {
+                s.push('\n');
+            }
+        }
+        s
+    };
+
+    match action {
+        2 | 3 | 4 => {
+            let text = format_all(&q);
+            let bytes = text.as_bytes();
+            let to_copy = buf.len().min(bytes.len());
+            buf[..to_copy].copy_from_slice(&bytes[..to_copy]);
+            if action == 4 || action == 2 {
+                q.clear();
+            }
+            Ok(to_copy)
+        }
+        5 => {
+            q.clear();
+            Ok(0)
+        }
+        9 => Ok(format_all(&q).len()),
+        10 => Ok(65536),
+        0 | 1 | 6 | 7 | 8 => Ok(0),
+        _ => Err(-22), // -EINVAL
+    }
+}
+
 /// /dev/kmsg: интерфейс кольцевого буфера сообщений ядра Linux printk
 pub struct KmsgDev;
 

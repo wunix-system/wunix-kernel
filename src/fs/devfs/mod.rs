@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod dir;
 pub mod fb;
 pub mod handle;
@@ -5,9 +6,13 @@ pub mod inode;
 pub mod input;
 pub mod loopdev;
 pub mod mem;
+pub mod pty;
 pub mod rtc;
+pub mod shm;
 pub mod tty;
 pub mod types;
+pub mod uio;
+pub mod usbfs;
 
 use alloc::format;
 use alloc::string::String;
@@ -33,6 +38,8 @@ pub struct DevFs {
     input_dir: Arc<DevDirInode>,
     pts_dir: Arc<DevDirInode>,
     shm_dir: Arc<DevDirInode>,
+    snd_dir: Arc<DevDirInode>,
+    pub(crate) usb_bus_dir: Arc<DevDirInode>,
 }
 
 impl DevFs {
@@ -40,17 +47,25 @@ impl DevFs {
         let root = Arc::new(DevDirInode::new());
         let input_dir = Arc::new(DevDirInode::new());
         let pts_dir = Arc::new(DevDirInode::new());
-        let shm_dir = Arc::new(DevDirInode::new());
+        let shm_dir = Arc::new(DevDirInode::new_shm());
+        let snd_dir = Arc::new(DevDirInode::new());
+        let bus_dir = Arc::new(DevDirInode::new());
+        let usb_bus_dir = Arc::new(DevDirInode::new());
 
+        bus_dir.insert("usb", usb_bus_dir.clone());
         root.insert("input", input_dir.clone());
         root.insert("pts", pts_dir.clone());
         root.insert("shm", shm_dir.clone());
+        root.insert("snd", snd_dir.clone());
+        root.insert("bus", bus_dir.clone());
 
         Self {
             root,
             input_dir,
             pts_dir,
             shm_dir,
+            snd_dir,
+            usb_bus_dir,
         }
     }
 
@@ -70,6 +85,8 @@ impl DevFs {
             self.input_dir.insert(sub, node);
         } else if let Some(sub) = path.strip_prefix("pts/") {
             self.pts_dir.insert(sub, node);
+        } else if let Some(sub) = path.strip_prefix("snd/") {
+            self.snd_dir.insert(sub, node);
         } else {
             self.root.insert(path, node);
         }
@@ -110,7 +127,7 @@ pub fn init() -> Arc<DevFs> {
     // 2. Терминалы и консоли (Major 4 и 5)
     devfs.register_char("tty", TTYAUX_MAJOR, 0, Arc::new(tty::TtyDev), 0o666);
     devfs.register_char("console", TTYAUX_MAJOR, 1, Arc::new(tty::ConsoleDev), 0o620);
-    devfs.register_char("ptmx", TTYAUX_MAJOR, 2, Arc::new(tty::PtmxDev), 0o666);
+    devfs.root.insert("ptmx", Arc::new(pty::PtmxInode));
     devfs.register_char("tty0", TTY_MAJOR, 0, Arc::new(tty::ConsoleDev), 0o620);
     for i in 1..=4 {
         let name = format!("tty{}", i);
@@ -126,10 +143,11 @@ pub fn init() -> Arc<DevFs> {
     devfs.register_char("rtc0", RTC_MAJOR, 0, Arc::new(rtc::RtcDev), 0o660);
     devfs.root.insert("rtc", Arc::new(RamInode::new_symlink("rtc0")));
 
-    // 5. Устройства ввода (Major 13)
+    // 5. Устройства ввода (Major 13) и FUSE (Major 10, Minor 229)
     devfs.register_char("input/mice", INPUT_MAJOR, 63, Arc::new(input::MiceDev), 0o660);
     devfs.register_char("input/mouse0", INPUT_MAJOR, 32, Arc::new(input::MiceDev), 0o660);
-    devfs.register_char("input/event0", INPUT_MAJOR, 64, Arc::new(input::EventDev), 0o660);
+    devfs.register_char("input/event0", INPUT_MAJOR, 64, Arc::new(input::EventDev::new(0)), 0o660);
+    devfs.root.insert("fuse", Arc::new(crate::fs::fuse::FuseDevInode));
 
     // 6. Псевдотерминалы PTS
     devfs.pts_dir.insert("ptmx", Arc::new(RamInode::new_symlink("../ptmx")));
@@ -151,7 +169,45 @@ pub fn init() -> Arc<DevFs> {
     devfs.root.insert("core", Arc::new(RamInode::new_symlink("/proc/kcore")));
 
     *DEVFS_INSTANCE.write() = Some(devfs.clone());
+    sync_hardware_devices(&devfs);
     devfs
+}
+
+/// Синхронизирует узлы устройств ядра в `/dev` после сканирования оборудования:
+/// `/dev/snd/pcm*`, `/dev/dsp`, `/dev/input/event*`, `/dev/hvc*`, `/dev/bus/usb/*`.
+pub fn sync_hardware_devices(devfs: &DevFs) {
+    let (audio_cnt, console_cnt) = crate::drivers::with_device_manager(|dm| {
+        (dm.audio_device_count(), dm.console_device_count())
+    })
+    .unwrap_or((0, 0));
+
+    for i in 0..audio_cnt {
+        let pcm_path = format!("snd/pcm{}", i);
+        devfs.register_char(
+            &pcm_path,
+            SND_MAJOR,
+            i as u32,
+            Arc::new(audio::AudioPcmDev::new(i)),
+            0o660,
+        );
+    }
+    if audio_cnt > 0 {
+        devfs.root.insert("dsp", Arc::new(RamInode::new_symlink("snd/pcm0")));
+    }
+
+    for i in 0..console_cnt {
+        let hvc_path = format!("hvc{}", i);
+        devfs.register_char(
+            &hvc_path,
+            HVC_MAJOR,
+            i as u32,
+            Arc::new(pty::HvcConsoleDev::new(i)),
+            0o620,
+        );
+    }
+
+    input::sync_input_nodes();
+    usbfs::sync_all_usb_nodes();
 }
 
 pub fn get_devfs() -> Option<Arc<DevFs>> {
@@ -190,6 +246,9 @@ pub fn register_block_device(name: &str, dev: Arc<Mutex<dyn BlockDevice>>) {
 
 /// Проверяет, является ли узел устройством (CharDevice или BlockDevice), и создает дескриптор открытого файла DevFileHandle
 pub fn open_device_node(node: &Arc<dyn Inode>, flags: u32, path: Option<String>) -> Option<Arc<dyn crate::fs::handle::FileHandle>> {
+    if let Some(custom) = node.open_handle(flags, path.clone()) {
+        return Some(custom);
+    }
     let meta = node.metadata();
     if meta.itype == crate::fs::InodeType::CharDevice || meta.itype == crate::fs::InodeType::BlockDevice {
         return Some(Arc::new(DevFileHandle::new(node.clone(), flags, path)));

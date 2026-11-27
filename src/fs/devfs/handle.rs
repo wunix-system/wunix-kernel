@@ -45,7 +45,7 @@ impl FileHandle for DevFileHandle {
         if self.is_tty() {
             crate::fs::handle::StdinHandle.poll_events() | crate::fs::handle::StdoutStderrHandle.poll_events()
         } else {
-            crate::fs::EPOLLIN | crate::fs::EPOLLOUT
+            self.inode.poll_events()
         }
     }
 

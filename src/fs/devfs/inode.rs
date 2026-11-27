@@ -225,4 +225,16 @@ impl Inode for DevInode {
 
         Err(-25)
     }
+
+    fn mmap_backing(&self, offset: usize, len: usize) -> Option<crate::fs::vfs::MmapBacking> {
+        self.op.as_ref()?.mmap_backing(offset, len)
+    }
+
+    fn poll_events(&self) -> u32 {
+        if let Some(op) = &self.op {
+            op.poll_events()
+        } else {
+            crate::fs::EPOLLIN | crate::fs::EPOLLOUT
+        }
+    }
 }

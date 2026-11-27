@@ -145,6 +145,20 @@ impl CharDeviceOp for FbDev {
                 if !crate::task::syscall::validate_user_buffer(arg, sz) {
                     return Err(-14);
                 }
+                let vinfo = unsafe { core::ptr::read_unaligned(arg as *const FbVarScreeninfo) };
+                if vinfo.xres > width as u32 || vinfo.yres > height as u32 {
+                    return Err(-22);
+                }
+                Ok(0)
+            }
+            wunix_drv::abi::display::FBIO_FLUSH => {
+                crate::drivers::with_device_manager(|dm| {
+                    for i in 0..dm.display_device_count() {
+                        if let Some(disp) = dm.get_display_device(i) {
+                            let _ = disp.lock().flush();
+                        }
+                    }
+                });
                 Ok(0)
             }
             FBIOGET_FSCREENINFO => {
@@ -155,7 +169,8 @@ impl CharDeviceOp for FbDev {
                 let mut finfo = FbFixScreeninfo::default();
                 let name = b"Wunix FB\0";
                 finfo.id[..name.len()].copy_from_slice(name);
-                finfo.smem_start = addr as u64;
+                let phys_start = (addr as u64).saturating_sub(crate::memory::hhdm_offset());
+                finfo.smem_start = phys_start;
                 finfo.smem_len = (height * pitch) as u32;
                 finfo.type_ = 0; // FB_TYPE_PACKED_PIXELS
                 finfo.visual = 2; // FB_VISUAL_TRUECOLOR
@@ -167,5 +182,24 @@ impl CharDeviceOp for FbDev {
             }
             _ => Err(-25),
         }
+    }
+
+    fn mmap_backing(&self, offset: usize, len: usize) -> Option<crate::fs::vfs::MmapBacking> {
+        let (_, height, pitch, _, addr) = self.fb_info()?;
+        let total = height * pitch;
+        if total == 0 || len == 0 {
+            return None;
+        }
+        let end = offset.checked_add(len)?;
+        let aligned_total = (total + 4095) & !4095;
+        if end > aligned_total || (offset & 0xFFF) != 0 {
+            return None;
+        }
+        let phys_start = (addr as u64).checked_sub(crate::memory::hhdm_offset())?;
+        Some(crate::fs::vfs::MmapBacking::PhysRange {
+            phys_base: phys_start + offset as u64,
+            byte_len: len,
+            uncacheable: true,
+        })
     }
 }

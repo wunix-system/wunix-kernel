@@ -17,6 +17,26 @@ pub const SIGTSTP: u64 = 20;
 pub const SIGWINCH: u64 = 28;
 
 static ALARM_DEADLINE: AtomicU64 = AtomicU64::new(0);
+static ALARM_TGID: AtomicU64 = AtomicU64::new(0);
+
+/// Проверяет срабатывание `alarm` / `ITIMER_REAL` из обработчика таймера и доставляет `SIGALRM`.
+pub fn check_alarms() {
+    let dl = ALARM_DEADLINE.load(Ordering::Acquire);
+    if dl == 0 {
+        return;
+    }
+    let now = crate::arch::x86_64::timer::ticks();
+    if now >= dl
+        && ALARM_DEADLINE
+            .compare_exchange(dl, 0, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+    {
+        let tgid = ALARM_TGID.load(Ordering::Relaxed);
+        if tgid != 0 {
+            crate::task::signal::raise_signal(tgid, SIGALRM);
+        }
+    }
+}
 
 pub fn sys_kill(pid: i64, sig: u64) -> u64 {
     if sig > 64 {
@@ -104,10 +124,11 @@ pub fn sys_alarm(seconds: u64) -> u64 {
     };
 
     if seconds == 0 {
-        ALARM_DEADLINE.store(0, Ordering::Relaxed);
+        ALARM_DEADLINE.store(0, Ordering::Release);
     } else {
+        ALARM_TGID.store(crate::task::current_thread_tgid(), Ordering::Relaxed);
         let new_dl = now.saturating_add(seconds.saturating_mul(100));
-        ALARM_DEADLINE.store(new_dl, Ordering::Relaxed);
+        ALARM_DEADLINE.store(new_dl, Ordering::Release);
     }
 
     rem
@@ -172,8 +193,9 @@ pub fn sys_setitimer(which: u64, new_value_ptr: u64, old_value_ptr: u64) -> u64 
                 let sec_ticks = (new_it.it_value.tv_sec.max(0) as u64).saturating_mul(100);
                 let usec_ticks = (new_it.it_value.tv_usec.max(0) as u64) / 10_000;
                 let delta = sec_ticks.saturating_add(usec_ticks).max(1);
+                ALARM_TGID.store(crate::task::current_thread_tgid(), Ordering::Relaxed);
                 let new_dl = now.saturating_add(delta);
-                ALARM_DEADLINE.store(new_dl, Ordering::Relaxed);
+                ALARM_DEADLINE.store(new_dl, Ordering::Release);
             }
         }
     }

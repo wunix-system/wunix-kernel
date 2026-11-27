@@ -18,6 +18,7 @@ fn next_dir_inode_id() -> u64 {
 pub struct DevDirInode {
     pub(crate) inode_id: u64,
     pub(crate) children: RwLock<BTreeMap<String, Arc<dyn Inode>>>,
+    pub(crate) is_shm: bool,
 }
 
 impl DevDirInode {
@@ -25,6 +26,15 @@ impl DevDirInode {
         Self {
             inode_id: next_dir_inode_id(),
             children: RwLock::new(BTreeMap::new()),
+            is_shm: false,
+        }
+    }
+
+    pub fn new_shm() -> Self {
+        Self {
+            inode_id: next_dir_inode_id(),
+            children: RwLock::new(BTreeMap::new()),
+            is_shm: true,
         }
     }
 
@@ -89,7 +99,13 @@ impl Inode for DevDirInode {
         let new_node: Arc<dyn Inode> = match itype {
             InodeType::Directory => Arc::new(DevDirInode::new()),
             InodeType::Symlink => Arc::new(crate::fs::RamInode::new_symlink("")),
-            InodeType::File => Arc::new(crate::fs::RamInode::new_file()),
+            InodeType::File => {
+                if self.is_shm {
+                    Arc::new(super::shm::ShmInode::new())
+                } else {
+                    Arc::new(crate::fs::RamInode::new_file())
+                }
+            }
             _ => return Err(VfsError::NotSupported),
         };
 

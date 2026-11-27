@@ -20,12 +20,48 @@ pub struct MountEntry {
 static MOUNT_TABLE: RwLock<Vec<MountEntry>> = RwLock::new(Vec::new());
 
 /// Монтирует файловую систему раздела в указанную точку монтирования VFS
-pub fn mount(source: &str, target: &str, fstype: &str, _flags: u64) -> Result<(), VfsError> {
+pub fn mount(source: &str, target: &str, fstype: &str, flags: u64) -> Result<(), VfsError> {
+    mount_with_data(source, target, fstype, flags, "")
+}
+
+fn parse_fuse_fd(source: &str, data: &str) -> Option<u64> {
+    for part in data.split(',') {
+        if let Some(val) = part.trim().strip_prefix("fd=") {
+            if let Ok(fd) = val.parse::<u64>() {
+                return Some(fd);
+            }
+        }
+    }
+    if let Some(val) = source.strip_prefix("fd=") {
+        if let Ok(fd) = val.parse::<u64>() {
+            return Some(fd);
+        }
+    }
+    if let Some(val) = source.strip_prefix("/dev/fuse:") {
+        if let Ok(fd) = val.parse::<u64>() {
+            return Some(fd);
+        }
+    }
+    None
+}
+
+/// Монтирует файловую систему с передачей строки параметров (используется для FUSE `fd=N`).
+pub fn mount_with_data(
+    source: &str,
+    target: &str,
+    fstype: &str,
+    _flags: u64,
+    data: &str,
+) -> Result<(), VfsError> {
     let norm_target = normalize_path(target);
 
     let (fs, detected_fstype): (Arc<dyn FileSystem>, String) = if fstype == "vboxsf" {
-        // Общие папки VirtualBox обращаются напрямую к гипервизору без блочного диска
         (Arc::new(crate::drivers::virt::vbox::VBoxSfFileSystem::new(source)), String::from("vboxsf"))
+    } else if fstype == "fuse" || fstype.starts_with("fuse.") {
+        let fd = parse_fuse_fd(source, data).ok_or(VfsError::InvalidPath)?;
+        let handle = crate::fs::get_file_handle(fd).ok_or(VfsError::NotFound)?;
+        let session = handle.as_fuse_session().ok_or(VfsError::InvalidPath)?;
+        (Arc::new(crate::fs::fuse::FuseFileSystem::new(session)), String::from(fstype))
     } else {
         // Ищем блочное устройство по имени источника (например, "/dev/vda1" или "vda1")
         let dev = match crate::fs::block::get_block_device(source) {

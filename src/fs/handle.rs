@@ -94,6 +94,12 @@ pub trait FileHandle: Send + Sync {
             Err(-25)
         }
     }
+    fn mmap_backing(&self, offset: usize, len: usize) -> Option<crate::fs::vfs::MmapBacking> {
+        self.as_inode()?.mmap_backing(offset, len)
+    }
+    fn as_fuse_session(&self) -> Option<Arc<crate::fs::fuse::FuseSession>> {
+        None
+    }
 }
 
 pub struct RegularFileHandle {

@@ -60,8 +60,9 @@ pub fn on_timer_tick(is_user: bool) {
         return;
     }
 
-    // Проверяем дедлайны спящих потоков (futex, nanosleep, epoll)
+    // Проверяем дедлайны спящих потоков (futex, nanosleep, epoll) и таймеры SIGALRM
     scheduler::check_timeouts();
+    syscall::signal::check_alarms();
 
     // Вытеснение по кванту времени разрешено только при возврате в Ring 3 (пользовательский режим).
     // Асинхронное переключение контекста внутри Ring 0 способно нарушить атомарность

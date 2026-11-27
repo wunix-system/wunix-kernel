@@ -1,33 +1,25 @@
+use alloc::collections::VecDeque;
+use alloc::format;
+use alloc::sync::Arc;
 use spin::Mutex;
+use wunix_drv::abi::display::InputEventRecord;
 
-use super::types::CharDeviceOp;
+use super::types::{CharDeviceOp, INPUT_MAJOR};
 use crate::fs::vfs::VfsError;
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct LinuxInputEvent {
-    pub time_sec: u64,
-    pub time_usec: u64,
-    pub type_: u16,
-    pub code: u16,
-    pub value: i32,
-}
-
-static MOUSE_PACKET_QUEUE: Mutex<[u8; 128]> = Mutex::new([0u8; 128]);
-static MOUSE_QUEUE_LEN: Mutex<usize> = Mutex::new(0);
+static MOUSE_PACKET_QUEUE: Mutex<VecDeque<u8>> = Mutex::new(VecDeque::new());
 
 pub fn push_mouse_packet(pkt: [u8; 3]) {
     let mut q = MOUSE_PACKET_QUEUE.lock();
-    let mut len = MOUSE_QUEUE_LEN.lock();
-    if *len + 3 <= 128 {
-        q[*len] = pkt[0];
-        q[*len + 1] = pkt[1];
-        q[*len + 2] = pkt[2];
-        *len += 3;
+    while q.len() + 3 > 256 {
+        q.pop_front();
     }
+    q.push_back(pkt[0]);
+    q.push_back(pkt[1]);
+    q.push_back(pkt[2]);
 }
 
-/// /dev/input/mice: поток пакетов мыши по 3 байта (PS/2 Mouse Protocol)
+/// /dev/input/mice: поток 3-байтных пакетов мыши (PS/2 Mouse Protocol) без фиктивных пакетов покоя.
 pub struct MiceDev;
 
 impl CharDeviceOp for MiceDev {
@@ -36,56 +28,71 @@ impl CharDeviceOp for MiceDev {
             return Ok(0);
         }
         let mut q = MOUSE_PACKET_QUEUE.lock();
-        let mut len = MOUSE_QUEUE_LEN.lock();
-
-        if *len == 0 {
-            // Если очередь пуста, возвращаем нейтральный пакет покоя [0x08, 0, 0]
-            if buf.len() >= 3 {
-                buf[0] = 0x08; // Синхробит PS/2 мыши
-                buf[1] = 0;
-                buf[2] = 0;
-                return Ok(3);
-            }
+        if q.is_empty() {
             return Ok(0);
         }
-
-        let to_copy = buf.len().min(*len);
-        buf[..to_copy].copy_from_slice(&q[..to_copy]);
-        q.copy_within(to_copy..*len, 0);
-        *len -= to_copy;
+        let to_copy = buf.len().min(q.len());
+        for dst in buf[..to_copy].iter_mut() {
+            *dst = q.pop_front().unwrap();
+        }
         Ok(to_copy)
     }
 
     fn write(&self, _offset: usize, buf: &[u8]) -> Result<usize, VfsError> {
         Ok(buf.len())
     }
+
+    fn poll_events(&self) -> u32 {
+        let mut ev = crate::fs::EPOLLOUT;
+        if !MOUSE_PACKET_QUEUE.lock().is_empty() {
+            ev |= crate::fs::EPOLLIN;
+        }
+        ev
+    }
 }
 
-/// /dev/input/event0: универсальный поток событий подсистемы Linux evdev
-pub struct EventDev;
+/// /dev/input/eventN: универсальный поток событий подсистемы evdev для указанного устройства ввода.
+pub struct EventDev {
+    pub index: usize,
+    pending: Mutex<Option<crate::drivers::InputEvent>>,
+}
+
+impl EventDev {
+    pub const fn new(index: usize) -> Self {
+        Self {
+            index,
+            pending: Mutex::new(None),
+        }
+    }
+
+    fn fetch_next_event(&self) -> Option<crate::drivers::InputEvent> {
+        if let Some(ev) = self.pending.lock().take() {
+            return Some(ev);
+        }
+        crate::drivers::with_device_manager(|dm| {
+            if let Some(dev) = dm.get_input_device(self.index) {
+                return dev.lock().poll_event();
+            }
+            None
+        })
+        .unwrap_or(None)
+    }
+}
 
 impl CharDeviceOp for EventDev {
     fn read(&self, _offset: usize, buf: &mut [u8]) -> Result<usize, VfsError> {
-        let ev_size = core::mem::size_of::<LinuxInputEvent>();
+        let ev_size = core::mem::size_of::<InputEventRecord>();
         if buf.len() < ev_size {
             return Ok(0);
         }
 
-        // Опрашиваем активные устройства ввода ядра (VirtIO Input, VBox Tablet, etc.)
-        let event_opt = crate::drivers::with_device_manager(|dm| {
-            for i in 0..dm.input_device_count() {
-                if let Some(dev) = dm.get_input_device(i) {
-                    if let Some(ev) = dev.lock().poll_event() {
-                        return Some(ev);
-                    }
-                }
-            }
-            None
-        }).unwrap_or(None);
-
-        if let Some(ev) = event_opt {
+        let mut read_bytes = 0usize;
+        while read_bytes + ev_size <= buf.len() {
+            let Some(ev) = self.fetch_next_event() else {
+                break;
+            };
             let ticks = crate::arch::x86_64::timer::ticks();
-            let lev = LinuxInputEvent {
+            let lev = InputEventRecord {
                 time_sec: ticks / 100,
                 time_usec: (ticks % 100) * 10_000,
                 type_: ev.type_,
@@ -94,18 +101,45 @@ impl CharDeviceOp for EventDev {
             };
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    &lev as *const LinuxInputEvent as *const u8,
-                    buf.as_mut_ptr(),
+                    &lev as *const InputEventRecord as *const u8,
+                    buf.as_mut_ptr().add(read_bytes),
                     ev_size,
                 );
             }
-            Ok(ev_size)
-        } else {
-            Ok(0)
+            read_bytes += ev_size;
         }
+
+        Ok(read_bytes)
     }
 
     fn write(&self, _offset: usize, buf: &[u8]) -> Result<usize, VfsError> {
         Ok(buf.len())
+    }
+
+    fn poll_events(&self) -> u32 {
+        let mut p = self.pending.lock();
+        if p.is_none() {
+            *p = crate::drivers::with_device_manager(|dm| {
+                dm.get_input_device(self.index)?.lock().poll_event()
+            })
+            .unwrap_or(None);
+        }
+        if p.is_some() {
+            crate::fs::EPOLLIN | crate::fs::EPOLLOUT
+        } else {
+            crate::fs::EPOLLOUT
+        }
+    }
+}
+
+/// Экспонирует в `/dev/input/eventN` все устройства ввода, зарегистрированные в `DeviceManager`.
+pub fn sync_input_nodes() {
+    let Some(devfs) = super::get_devfs() else {
+        return;
+    };
+    let count = crate::drivers::with_device_manager(|dm| dm.input_device_count()).unwrap_or(0);
+    for idx in 0..count {
+        let path = format!("input/event{}", idx);
+        devfs.register_char(&path, INPUT_MAJOR, 64 + idx as u32, Arc::new(EventDev::new(idx)), 0o660);
     }
 }
